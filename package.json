@@ -1,0 +1,14 @@
+{
+  "name": "topdown-f1",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Top-down F1 racing game (Canvas + Web Audio)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^7.3.7"
+  }
+}
