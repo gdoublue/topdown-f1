@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>加速测试 · 0-100</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 18px;
+    background: radial-gradient(circle at 50% 30%, #101926 0%, #070a0f 70%);
+    color: #e8eef7;
+    font-family: "Courier New", ui-monospace, monospace;
+    min-height: 100vh;
+  }
+  h1 { font-size: 16px; letter-spacing: .2em; color: #ffd166; margin: 0 0 14px; }
+  canvas { display: block; width: 100%; border-radius: 8px; background: #0b1118;
+           box-shadow: 0 0 0 1px rgba(140,180,220,.18); }
+  #row { display: flex; gap: 14px; margin-top: 14px; align-items: stretch; }
+  .panel {
+    background: linear-gradient(180deg, rgba(12,20,30,.9), rgba(6,10,16,.82));
+    border: 1px solid rgba(160,200,240,.22);
+    border-radius: 9px; padding: 12px 16px;
+  }
+  #speedBox { min-width: 190px; text-align: center; }
+  #speedBig { font-size: 54px; font-weight: 800; color: #ffd166; line-height: 1;
+              font-variant-numeric: tabular-nums; text-shadow: 0 0 18px rgba(255,200,80,.35); }
+  #speedBox small { color: #8aa2ba; letter-spacing: .14em; }
+  #accelBox { color: #9fd0ff; font-size: 22px; font-weight: 700; margin-top: 8px; }
+  #marks { font-size: 11px; letter-spacing: .1em; margin-top: 6px; color: #ff8a8a; }
+  #marks.off { color: #6d8299; }
+  table { border-collapse: collapse; font-size: 14px; }
+  td { padding: 3px 12px; letter-spacing: .08em; }
+  td.t { color: #ffd166; font-weight: 700; text-align: right; min-width: 80px; }
+  td.b { color: #9fd0ff; text-align: right; }
+  tr.done td.t { color: #7dff9b; }
+  #btns { display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+  button {
+    font-family: inherit; font-size: 14px; letter-spacing: .1em;
+    color: #e8eef7; background: rgba(20,32,46,.9);
+    border: 1px solid rgba(160,200,240,.3); border-radius: 7px;
+    padding: 9px 14px; cursor: pointer; user-select: none;
+  }
+  button:active, button.on { background: rgba(255,209,102,.25); border-color: #ffd166; }
+  #tip { margin-top: 12px; font-size: 11px; color: #6d8299; letter-spacing: .06em; line-height: 1.7; }
+</style>
+</head>
+<body>
+<h1>SHANGHAI GP · 加速测试台</h1>
+<canvas id="view" width="1400" height="230"></canvas>
+<canvas id="chart" width="1400" height="240"></canvas>
+<div id="row">
+  <div class="panel" id="speedBox">
+    <div id="speedBig">0.0</div>
+    <small>KM/H</small>
+    <div id="accelBox">0.00 g</div>
+    <div id="marks" class="off">轮胎印：无</div>
+  </div>
+  <div class="panel">
+    <table>
+      <tr id="g50"><td>0-50 km/h</td><td class="t">—</td></tr>
+      <tr id="g100"><td>0-100 km/h</td><td class="t">—</td></tr>
+      <tr id="g200"><td>0-200 km/h</td><td class="t">—</td></tr>
+      <tr id="g300"><td>0-300 km/h</td><td class="t">—</td></tr>
+      <tr id="g350"><td>0-350 km/h</td><td class="t">—</td></tr>
+      <tr><td>距离</td><td class="b" id="dist">0 m</td></tr>
+    </table>
+  </div>
+  <div class="panel" id="btns">
+    <button id="bJ">J · 油门（按住）</button>
+    <button id="bK">K · 轻刹车</button>
+    <button id="bL">L · 重刹车</button>
+    <button id="bSurf">路面：沥青</button>
+    <button id="bReset">R · 重置</button>
+  </div>
+</div>
+<div id="tip">
+  按住 J（或点住按钮）起步，观察 0-100 km/h 计时与速度-时间曲线；|加速度| 超过 1g 会在路面留下轮胎印（红字提示）。
+  键盘：J 油门 · K 轻刹 · L 重刹 · R 重置。
+</div>
+<script type="module" src="./src/test/speedtest.js"></script>
+</body>
+</html>
