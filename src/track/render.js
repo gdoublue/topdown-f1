@@ -1,5 +1,5 @@
 // 赛道静态渲染：草坪、沥青、路肩、轮胎墙、起跑线（离屏一次绘制，单位：米）
-import { WORLD } from "./geometry.js";
+import { WORLD, isLinear } from "./geometry.js";
 import { makeRandom } from "../utils.js";
 import { pts, N, tan, nor, curvS, kerbFlag, hw, addLoop, ringPath, centerPath } from "./geometry.js";
 
@@ -169,20 +169,26 @@ export function buildTrackCanvas() {
   }
 
   /* ---------- 起终点格子线（横跨赛道） ---------- */
-  const sp = pts[0], st = tan[0];
-  g.save();
-  g.translate(sp.x, sp.y);
-  g.rotate(Math.atan2(st.y, st.x));
-  const cells = 10, cw = (hw[0] * 2) / cells, depth = 1.5;
-  for (let r = 0; r < 2; r++) {
-    for (let c = 0; c < cells; c++) {
-      g.fillStyle = ((r + c) % 2 === 0) ? "#f5f9fd" : "#181c22";
-      g.fillRect(-depth + r * depth, -hw[0] + c * cw, depth + 0.05, cw + 0.05);
+  const drawGridLine = (idx) => {
+    const sp = pts[idx], st = tan[idx];
+    g.save();
+    g.translate(sp.x, sp.y);
+    g.rotate(Math.atan2(st.y, st.x));
+    const cells = 10, cw = (hw[idx] * 2) / cells, depth = 1.5;
+    for (let r = 0; r < 2; r++) {
+      for (let c = 0; c < cells; c++) {
+        g.fillStyle = ((r + c) % 2 === 0) ? "#f5f9fd" : "#181c22";
+        g.fillRect(-depth + r * depth, -hw[idx] + c * cw, depth + 0.05, cw + 0.05);
+      }
     }
-  }
-  g.fillStyle = "rgba(255,255,255,.55)";
-  g.fillRect(-depth - 0.8, -hw[0], 0.45, hw[0] * 2);
-  g.restore();
+    g.fillStyle = "rgba(255,255,255,.55)";
+    g.fillRect(-depth - 0.8, -hw[idx], 0.45, hw[idx] * 2);
+    g.restore();
+  };
+
+  drawGridLine(0);
+  // 线性赛道：终点处再画一条格子线（单程冲刺的决胜线）
+  if (isLinear) drawGridLine(N - 1);
 
   return cv;
 }

@@ -3,8 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "description": "Top-down F1 racing game (Canvas + Web Audio)",
+  "type": "module",
   "scripts": {
     "dev": "vite",
+    "ai": "vite --open /?ai=1",
+    "ai:sim": "node scripts/ai-sim.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },

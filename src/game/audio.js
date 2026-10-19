@@ -138,6 +138,13 @@ export function updateAudio(car, input, dt, racing) {
   bgGain.gain.setTargetAtTime(musicOn ? BG_VOLUME : 0, t, musicOn ? 0.25 : 0.4);
 }
 
+// 切换视角赛车时，瞬时同步引擎音频转速到该车
+export function syncCarAudio(car) {
+  if (!car) return;
+  const spd = Math.abs(car.speed);
+  rpm = clamp(spd / PHYS.maxSpeed[0] * 0.85, 0, 1);
+}
+
 // 倒计时 / 提示蜂鸣（振荡器合成）
 export function beep(freq, dur, vol = 0.16) {
   if (!ready) return;

@@ -11,7 +11,57 @@
   <canvas id="cv"></canvas>
   <div id="vignette"></div>
   <div id="hud">
-    <div class="panel" id="miniWrap"><canvas id="mini" width="200" height="140"></canvas></div>
+    <!-- 左上角小地图仪表 (自适应等比例赛道地图) -->
+    <div class="panel" id="miniWrap">
+      <div class="panel-header">
+        <span>CIRCUIT MAP</span>
+        <small id="miniTrackName">🇨🇳 上海国际赛车场</small>
+      </div>
+      <canvas id="mini" width="210" height="135"></canvas>
+    </div>
+
+    <!-- 顶部中央赛道快速切换胶囊 -->
+    <div id="trackSwitcherPill" class="panel track-pill" title="点击切换赛道">
+      <span class="track-flag" id="pillFlag">🇨🇳</span>
+      <b class="track-name" id="pillName">上海国际赛车场</b>
+      <span class="track-len" id="pillLen">5.45km</span>
+      <span class="track-switch-btn">▾ 切换赛道</span>
+    </div>
+
+    <!-- AI 模式实时排位榜 (点击切换视图) -->
+    <div class="panel" id="standingsPanel">
+      <div class="panel-header">
+        <span>LIVE STANDINGS</span>
+        <small>点击切换视角</small>
+      </div>
+      <div id="standingsList"></div>
+    </div>
+
+    <!-- AI 模式当前选中赛车遥测条 (底部居中横向布局) -->
+    <div class="panel" id="carStatusPanel">
+      <div class="car-badge">
+        <span id="carColorDot"></span><b id="carBadgeName">CAR</b>
+        <span id="camIndicator">● CAM</span>
+      </div>
+      <div class="cs-divider"></div>
+      <div class="speed-box"><b id="speedVal">0</b><span class="unit">KM/H</span></div>
+      <div class="cs-divider"></div>
+      <div class="g-box">
+        <div class="g-total"><b id="gVal">0.0</b><span class="unit">G</span></div>
+        <div class="g-sub">
+          <span>LAT <b id="gLatVal">0.0G</b></span>
+          <span>LON <b id="gLonVal">0.0G</b></span>
+        </div>
+      </div>
+      <div class="cs-divider"></div>
+      <div class="status-stats">
+        <div class="row"><span>LAP</span><b id="statusLap">1/3</b></div>
+        <div class="row"><span>TIME</span><b id="statusTime">0:00.00</b></div>
+        <div class="row"><span>BEST</span><b id="statusBest" class="hi">--:--.--</b></div>
+      </div>
+    </div>
+
+    <!-- 原单人驾驶 HUD 面板 (非 AI 模式时显示) -->
     <div class="panel" id="stats">
       <div class="row"><span>LAP</span><b id="lap">1/3</b></div>
       <div class="row"><span>TIME</span><b id="time">0:00.00</b></div>
@@ -22,6 +72,23 @@
     <div class="panel" id="help">J 油门　K 轻刹　L 重刹/倒车<br>← → 或 A D 转向　R 重开　M 静音</div>
     <div id="msg"><span id="msgMain"></span><span id="msgSub"></span></div>
     <div id="credits">Audio: engine loops by domasx2 (CC0) · F1 recordings by Edvvc (CC BY-SA 3.0) · tire squeal by audible-edge (CC BY 3.0)</div>
+  </div>
+
+  <!-- 赛道选择弹窗 (开局选择或点击切换赛道) -->
+  <div id="trackModal" class="track-modal-overlay">
+    <div class="track-modal-card">
+      <div class="track-modal-header">
+        <div class="modal-title-wrap">
+          <span class="f1-badge">FORMULA 1 GRAND PRIX</span>
+          <h2 class="modal-title">选择大奖赛赛道 (SELECT CIRCUIT)</h2>
+        </div>
+        <button id="closeTrackModal" class="track-close-btn" title="关闭并继续比赛">✕</button>
+      </div>
+      <p class="track-modal-desc">精选 5 座真实世界传奇 F1 赛车场 · 物理引擎与自动驾驶 AI 100% 自动适配</p>
+      <div id="trackCardsGrid" class="track-cards-grid">
+        <!-- 由 JS 动态渲染各赛道卡片 -->
+      </div>
+    </div>
   </div>
 </div>
 <script type="module" src="./src/main.js"></script>

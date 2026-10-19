@@ -17,7 +17,7 @@ export const ZOOM_LO = 9;            // 镜头远景（高速）：视野约 133
 export const PHYS = {
   maxSpeed: [100, 90, 33.6],         // 沥青 / 路肩 / 草地（360 / 324 / 121 km/h）
   // 满油门加速度曲线（m/s²，随速度衰减）：0→100km/h ≈ 2.4s，极速 360km/h
-  accelCurve: [[0, 12.3], [28, 11.2], [56, 8.5], [78.4, 5.5], [100, 1.5]],
+  accelCurve: [[0, 11.6], [28, 11.0], [56, 8.5], [78.4, 5.5], [100, 1.5]],
   accelKerbFactor: 0.85,
   accelGrassFactor: 0.6,
   grassDrag: 0.4,

@@ -34,10 +34,12 @@ export function applyCamera(ctx, canvas, shake) {
   ctx.fillStyle = "#173a22";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const k = Math.min(canvas.width / WORLD.w, canvas.height / WORLD.h) * cam.zoom;
+  // 统一各赛道物理视野比例：基于标准参考高度解算物理米/像素，杜绝大世界赛道车辆缩成小点
+  const REFERENCE_VIEW_H = 760;
+  const k = (canvas.height / REFERENCE_VIEW_H) * cam.zoom;
   const viewW = canvas.width / k, viewH = canvas.height / k;
-  let cx = clamp(cam.x, viewW / 2, WORLD.w - viewW / 2);
-  let cy = clamp(cam.y, viewH / 2, WORLD.h - viewH / 2);
+  let cx = WORLD.w >= viewW ? clamp(cam.x, viewW / 2, WORLD.w - viewW / 2) : WORLD.w / 2;
+  let cy = WORLD.h >= viewH ? clamp(cam.y, viewH / 2, WORLD.h - viewH / 2) : WORLD.h / 2;
   if (shake > 0.2) {
     cx += (Math.random() - 0.5) * shake;
     cy += (Math.random() - 0.5) * shake;
