@@ -6,8 +6,14 @@ import { clamp } from "../utils.js";
 export const cam = {
   x: 0, y: 0,
   zoom: ZOOM_HI,
+  zoomScale: 1,                                  // 用户手动视野缩放系数（1 = 默认，越大越近）
   view: { x: 0, y: 0, w: WORLD.w, h: WORLD.h }   // 当前视野（米），供小地图使用
 };
+
+// 设置手动缩放系数（0.6 ~ 2.2），随时生效，不随重开/换车复位
+export function setZoomScale(v) {
+  cam.zoomScale = clamp(Number(v) || 1, 0.4, 3);
+}
 
 export function resetCamera(car) {
   cam.x = car.x;
@@ -36,7 +42,7 @@ export function applyCamera(ctx, canvas, shake) {
 
   // 统一各赛道物理视野比例：基于标准参考高度解算物理米/像素，杜绝大世界赛道车辆缩成小点
   const REFERENCE_VIEW_H = 760;
-  const k = (canvas.height / REFERENCE_VIEW_H) * cam.zoom;
+  const k = (canvas.height / REFERENCE_VIEW_H) * cam.zoom * cam.zoomScale;
   const viewW = canvas.width / k, viewH = canvas.height / k;
   let cx = WORLD.w >= viewW ? clamp(cam.x, viewW / 2, WORLD.w - viewW / 2) : WORLD.w / 2;
   let cy = WORLD.h >= viewH ? clamp(cam.y, viewH / 2, WORLD.h - viewH / 2) : WORLD.h / 2;

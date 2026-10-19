@@ -38,6 +38,7 @@ export function initCarRaceState(car, now = performance.now()) {
   car.lapStart = now;
   car.finished = false;
   car.lapTimes = [];
+  car._cruiseV = null;        // 完赛巡航速度：每场比赛重新随机（60~100km/h）
   if (car.gridPos != null && car.raceDist == null) {
     car.raceDist = -(12 + car.gridPos * 8);
   }

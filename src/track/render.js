@@ -1,7 +1,7 @@
 // 赛道静态渲染：草坪、沥青、路肩、轮胎墙、起跑线（离屏一次绘制，单位：米）
 import { WORLD, isLinear } from "./geometry.js";
 import { makeRandom } from "../utils.js";
-import { pts, N, tan, nor, curvS, kerbFlag, hw, addLoop, ringPath, centerPath } from "./geometry.js";
+import { pts, N, tan, nor, curvS, kerbFlag, hw, cumDist, LAP_LENGTH, addLoop, ringPath, centerPath } from "./geometry.js";
 
 const SS = 2;   // 超采样倍率
 
@@ -88,26 +88,28 @@ export function buildTrackCanvas() {
   g.beginPath(); addLoop(g, -1, 0.45); g.stroke();
 
   /* ---------- 路肩（红白相间，宽约 1m） ---------- */
+  // 连续弯道处按 kerbFlag 铺设；线性赛道（直线冲刺）全段两侧连续铺路肩
   const BLOCK = 9;
+  const kerbIdx = (k) => (isLinear ? Math.min(k, N - 1) : k % N);
   for (let side = -1; side <= 1; side += 2) {
     let i = 0;
     while (i < N) {
-      if (!kerbFlag[i]) { i++; continue; }
+      if (!isLinear && !kerbFlag[i]) { i++; continue; }
       let j = i;
-      while (j < N && kerbFlag[j]) j++;
+      while (j < N && (isLinear || kerbFlag[j])) j++;
       let bi = 0;
       for (let s = i; s < j; s += BLOCK, bi++) {
         const e = Math.min(s + BLOCK, j);
         g.beginPath();
         for (let k = s; k <= e; k++) {
-          const q = pts[k % N], n = nor[k % N];
-          const off = side * hw[k % N] + 0.3;
+          const q = pts[kerbIdx(k)], n = nor[kerbIdx(k)];
+          const off = side * hw[kerbIdx(k)] + 0.3;
           const x = q.x + n.x * off, y = q.y + n.y * off;
           if (k === s) g.moveTo(x, y); else g.lineTo(x, y);
         }
         for (let k = e; k >= s; k--) {
-          const q = pts[k % N], n = nor[k % N];
-          const off = side * hw[k % N] + 1.3;
+          const q = pts[kerbIdx(k)], n = nor[kerbIdx(k)];
+          const off = side * hw[kerbIdx(k)] + 1.3;
           g.lineTo(q.x + n.x * off, q.y + n.y * off);
         }
         g.closePath();
@@ -187,8 +189,16 @@ export function buildTrackCanvas() {
   };
 
   drawGridLine(0);
-  // 线性赛道：终点处再画一条格子线（单程冲刺的决胜线）
-  if (isLinear) drawGridLine(N - 1);
+  // 线性赛道：在计时终点（比赛里程处）画决胜格子线。
+  // 注意沥青可能延伸到冲线缓冲区之后（dragstrip 冲线后还有 5km 巡航区），
+  // 所以不能直接画在沥青末端 N-1。
+  if (isLinear) {
+    let fi = N - 1;
+    for (let i = 0; i < N; i++) {
+      if (cumDist[i] >= LAP_LENGTH) { fi = i; break; }
+    }
+    drawGridLine(fi);
+  }
 
   return cv;
 }

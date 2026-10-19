@@ -5,7 +5,7 @@
 // 3. Classic Baseline（完整保留原基准算法）
 // 4. Smooth Cruiser Pro（时间最优闭环纵向规划 + 双前瞻融合转向 + 主动防撞脱困）
 
-import { N, pts, nor, hw, tan, curvS, onTrackChange, LAP_LENGTH, isLinear } from "../track/geometry.js";
+import { N, pts, nor, hw, tan, curvS, cumDist, onTrackChange, LAP_LENGTH, isLinear } from "../track/geometry.js";
 import { PHYS } from "../config.js";
 import { clamp } from "../utils.js";
 import { CAR_LENGTH, CAR_WIDTH, getCarDistance } from "../car/physics.js";
@@ -36,7 +36,9 @@ export function buildCarVTarget(perf = {}, opts = {}) {
   const maxOmega = perf.maxOmega ?? PHYS.maxOmega;
   const brakePlan = PHYS.brake * (perf.brakeMult ?? 1.0)
     * (opts.brakeFactor ?? perf.vtBrakeFactor ?? 0.58);
-  const A_LAT = latGrip * (opts.gripFactor ?? perf.vtGripFactor ?? 0.78);
+  // cornerGripMult：实时调校用的弯速极限系数（1 = 配置原始值，>1 更激进、<1 更保守）
+  const A_LAT = latGrip
+    * Math.min(1.0, (opts.gripFactor ?? perf.vtGripFactor ?? 0.78) * (perf.cornerGripMult ?? 1));
   const vt = new Float32Array(N);
 
   const w = Math.max(1, Math.round(30 / Math.max(0.1, DS)));
@@ -66,9 +68,23 @@ export function buildCarVTarget(perf = {}, opts = {}) {
   return vt;
 }
 
+// 实时性能调校后调用：立即重建该车的目标速度表，并清掉按 perf 对象缓存的弯速表
+// （三个 Cache 都以 perf 对象为键，原地改值不会失效，必须显式清除）
+export function refreshCarPerf(car) {
+  if (!car || !car.perf) return;
+  car.vTarget = buildCarVTarget(car.perf);
+  _cruiseCornerCapCache.delete(car.perf);
+  _superCornerCapCache.delete(car.perf);
+  resetApexCapCache();
+}
+
 export function rebuildAITrack() {
   if (N <= 0) return;
-  DS = LAP_LENGTH / N;
+  // 线性赛道的沥青可能延伸到冲线缓冲区之后（如 dragstrip），
+  // 点间距必须按真实折线长度计算，否则 AI 的前瞻/扫描距离会整体失真
+  DS = isLinear
+    ? cumDist[N - 1] / Math.max(1, N - 1)
+    : LAP_LENGTH / N;
 
   lineX = new Float32Array(N);
   lineY = new Float32Array(N);
@@ -1033,8 +1049,8 @@ export const AI_CONFIGS = [
       maxSpeed: [133.2, 88.0, 63.6],    // 沥青极速 350 km/h（SU7 Ultra 电子限速）
       latGrip: 16.2,                   // ≈1.65g：赛道热熔胎横向抓地物理极限（F1 为 4.6g）
       maxOmega: 3.50,                  //低速最大转向角速度，限制发卡弯过弯速度
-      powerKW: 5600,                    // 三电机持续轮上功率 ≈660kW（峰值 1138kW 受电池放电限制，按官方 0-200=5.96s 校准）
-      naturalVmax: 151.1,              // 自然极速  （无电子限速时的风阻平衡点，用于风阻标定）
+      powerKW: 1740,                    //  机持续轮上功率
+
       massKg: 2300,                    // 整备质量
       launchAccel: 14.2,               // 四四驱弹射起步极限 → 0-100km/h ≈1.96s（官方 1.98s）
       accelMult: 1.25,                 // （电车走功率模型，此系数仅作后备）
@@ -1063,7 +1079,7 @@ export const AI_CONFIGS = [
       maxOmega: 2.60,                  // 四电机矢量扭矩分配，低速转向稍好于同重量
       powerKW: 1600,                   // 四电机持续功率 ≈1600kW（峰值 2210kW / 超 3000Ps）
       massKg: 2475,                    // 整备质量
-      launchAccel: 14.5,               // 1200V 弹射起步极限 → 0-100km/h ≈1.92s
+      launchAccel: 14.6,               // 弹射抓地极限 ≈1.49g → 0-100km/h = 27.78/14.6 ≈ 1.90s（官方 1.9s）
       accelMult: 1.35,                 // （电车走功率模型，此系数仅作后备）
       brakeMult: 0.32,                 // 碳陶 ≈2.0g 制动
       steerRate: 9.5,

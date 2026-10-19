@@ -13,16 +13,14 @@ body {
 
 #game {
   position: relative;
-  width: min(96vw, 177.7vh);
-  aspect-ratio: 16 / 9;
-  max-width: 1560px;
-  max-height: 880px;
-  border-radius: 14px;
+  /* 全屏铺满：画布尺寸 = 视口尺寸 × devicePixelRatio（resize() 中实时计算） */
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;      /* 移动端动态视口，规避地址栏高度 */
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
   overflow: hidden;
-  box-shadow:
-    0 0 0 1px rgba(140, 180, 220, .18),
-    0 0 0 6px rgba(10, 16, 24, .9),
-    0 26px 60px rgba(0, 0, 0, .75);
 }
 canvas#cv { display: block; width: 100%; height: 100%; }
 
@@ -84,6 +82,81 @@ canvas#cv { display: block; width: 100%; height: 100%; }
   width: 210px;
   height: 135px;
   border-radius: 6px;
+}
+
+/* 左侧视野工具面板（AI 探测线开关 + 视野缩放系数） */
+#viewTools {
+  left: 16px;
+  top: 205px;
+  width: 196px;
+  padding: 8px 10px 10px;
+  pointer-events: auto;
+  z-index: 10;
+}
+#viewTools .vt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 11px;
+  color: #9fb4c9;
+}
+.vt-name { letter-spacing: 0.04em; }
+.vt-switch {
+  position: relative;
+  width: 38px;
+  height: 18px;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid rgba(120, 150, 180, 0.35);
+  background: rgba(30, 42, 58, 0.9);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.vt-switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #7f97b0;
+  transition: all 0.18s ease;
+}
+.vt-switch.on {
+  background: rgba(0, 255, 180, 0.2);
+  border-color: rgba(0, 255, 180, 0.65);
+}
+.vt-switch.on i {
+  left: 20px;
+  background: #00ffb4;
+  box-shadow: 0 0 8px rgba(0, 255, 180, 0.7);
+}
+#zoomRange {
+  width: 92px;
+  accent-color: #00e5ff;
+  cursor: pointer;
+}
+#zoomVal {
+  color: #ffd166;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.vt-mini {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #cbd5e1;
+  border-radius: 5px;
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.vt-mini:hover {
+  background: rgba(0, 229, 255, 0.16);
+  border-color: #00e5ff;
+  color: #fff;
 }
 
 #stats { right: 16px; top: 88px; min-width: 152px; }
@@ -268,6 +341,86 @@ body.ai-mode #speedo {
 .status-stats .row span { color: #7f97b0; }
 .status-stats .row b { color: #f2f7ff; font-weight: 700; font-variant-numeric: tabular-nums; }
 .status-stats .row b.hi { color: #ffd166; }
+
+/* 实时性能调校：TUNE 按钮 + 向上展开的调校面板 */
+.tune-btn {
+  background: rgba(0, 229, 255, 0.12);
+  border: 1px solid rgba(0, 229, 255, 0.45);
+  color: #7fe7ff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.tune-btn:hover,
+.tune-btn.active {
+  background: rgba(0, 229, 255, 0.25);
+  color: #fff;
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
+}
+
+.tune-panel {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  width: min(720px, 92vw);
+  padding: 10px 14px 12px;
+  background: linear-gradient(180deg, rgba(14, 23, 36, 0.97), rgba(8, 13, 20, 0.95));
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 10px;
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  white-space: normal;
+}
+.tune-panel.open { display: block; }
+
+.tune-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: #9fb4c9;
+  border-bottom: 1px solid rgba(160, 200, 240, 0.14);
+  padding-bottom: 6px;
+}
+.tune-head b { color: #e2e8f0; }
+
+.tune-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 20px;
+  margin-top: 8px;
+}
+.tune-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #9fb4c9;
+}
+.tune-label {
+  width: 72px;
+  white-space: nowrap;
+}
+.tune-row input[type="range"] {
+  flex: 1;
+  min-width: 60px;
+  accent-color: #00e5ff;
+  cursor: pointer;
+}
+.tune-val {
+  width: 78px;
+  text-align: right;
+  color: #ffd166;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
 
 #help {
   left: 16px; bottom: 16px;
@@ -505,4 +658,43 @@ body.ai-mode #speedo {
   padding: 2px 26px;
   transform: rotate(45deg);
   letter-spacing: 0.05em;
+}
+
+/* ================= 开局流程弹窗（玩法模式 → 赛车选择） ================= */
+.start-modal-card {
+  width: min(920px, 94%);
+}
+
+.mode-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+.mode-card {
+  padding: 18px;
+}
+.mode-icon {
+  font-size: 26px;
+  line-height: 1;
+  margin-bottom: 10px;
+}
+
+#carSelectWrap.hidden {
+  display: none !important;
+}
+
+.car-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.car-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.22);
+}
+#carCardsGrid {
+  margin-top: 2px;
 }

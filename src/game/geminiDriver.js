@@ -37,7 +37,7 @@ function getApexReleaseCap(perf) {
   const topSpeed = perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0];
   const latGrip  = perf.latGrip ?? PHYS.latGrip;
   const maxOmega = perf.maxOmega ?? PHYS.maxOmega;
-  const A_LAT    = latGrip * 0.965; // 压榨 96.5% 极限横向抓地力
+  const A_LAT    = latGrip * Math.min(1.0, 0.965 * (perf.cornerGripMult ?? 1)); // 压榨 96.5% 极限横向抓地力
   cap = new Float32Array(N);
 
   // 关键突破：后向仅看 2.0m（半个车身），前向看 10.5m（纯追踪转向提前量）

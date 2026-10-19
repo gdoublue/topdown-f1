@@ -19,6 +19,9 @@ export const NO_INPUT = { up: false, brake: 0, left: false, right: false };
 
 export function initInput(onRestart) {
   window.addEventListener("keydown", function (e) {
+    // 焦点在输入控件（缩放滑杆等）时，不把按键当作驾驶输入
+    const tag = (e.target && e.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     if (e.key === "ArrowUp" || e.key === "ArrowDown" ||
       e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === " ") {
       e.preventDefault();

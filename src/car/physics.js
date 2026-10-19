@@ -247,26 +247,39 @@ export function stepLongitudinal(car, dt, input, surf) {
 }
 
 // ================= 完赛巡航 =================
-// 冲线后不再急刹停车：只松油门靠引擎制动平滑降速，落到 30km/h 后补油匀速巡航。
+// 冲线后不再急刹停车：只松油门靠引擎制动平滑降速，落到随机巡航速度（60~100km/h）后匀速巡航。
 // - AI 车：沿用 AI 的转向与弯前点刹（保证过弯不冲出赛道），仅把油门/目标速度压到巡航值
 // - 玩家车：无 AI 输入时沿赛道中心线纯追踪自行巡航
-export const FINISH_CRUISE_KMH = 30;
-const FINISH_CRUISE_V = FINISH_CRUISE_KMH / 3.6;   // 30km/h ≈ 8.33 m/s
+export const FINISH_CRUISE_KMH_MIN = 60;
+export const FINISH_CRUISE_KMH_MAX = 100;
 const CRUISE_STEER_GAIN = 1.8;                     // 航向误差 → 方向盘 duty 增益
+
+// 每辆车在本场比赛中抽取一次巡航速度（60~100km/h 随机），完赛期间保持不变
+function getCruiseSpeed(car) {
+  if (car._cruiseV == null) {
+    const kmh = FINISH_CRUISE_KMH_MIN
+      + Math.random() * (FINISH_CRUISE_KMH_MAX - FINISH_CRUISE_KMH_MIN);
+    car._cruiseV = kmh / 3.6;
+  }
+  return car._cruiseV;
+}
 
 export function finishedCarInput(car, aiCtrl) {
   const i = car.nearIdx ?? 0;
   const v = Math.abs(car.speed);
+  const cruiseV = getCruiseSpeed(car);
 
   if (aiCtrl && typeof aiCtrl.steer === "number") {
-    // ---- AI 车：转向与弯道刹车交给 AI，纵向只做"慢慢降到 30km/h"的收敛 ----
+    // ---- AI 车：转向与弯道刹车交给 AI，纵向只做"慢慢降到巡航速度"的收敛 ----
     const brake = aiCtrl.brake || 0;
-    const up = brake === 0 && v < FINISH_CRUISE_V;   // 高于巡航速度只滑行，靠引擎制动降速
+    const up = brake === 0 && v < cruiseV;   // 高于巡航速度只滑行，靠引擎制动降速
     return { up, brake, steer: aiCtrl.steer };
   }
 
   // ---- 玩家车：沿中心线纯追踪（前瞻随车速加长，弯道自动提前切向） ----
-  const ds = LAP_LENGTH / Math.max(1, N);
+  const ds = isLinear
+    ? cumDist[N - 1] / Math.max(1, N - 1)
+    : LAP_LENGTH / Math.max(1, N);
   const look = Math.max(8, v * 0.85);
   const step = Math.max(1, Math.round(look / Math.max(0.1, ds)));
   const j = isLinear ? Math.min(i + step, N - 1) : (i + step) % N;
@@ -276,9 +289,9 @@ export function finishedCarInput(car, aiCtrl) {
   const steer = clamp(hErr * CRUISE_STEER_GAIN, -1, 1);
 
   // 极高速时用轻刹（45% 制动力）先把尾速收下来，避免以 300km/h 滑行冲出弯道；
-  // 进入低速段后改为纯滑行，平顺收油到 30km/h
-  const brake = v > FINISH_CRUISE_V * 2.5 ? 1 : 0;
-  return { up: v < FINISH_CRUISE_V && brake === 0, brake, steer };
+  // 接近巡航速度后改为纯滑行，平顺收油到巡航速度
+  const brake = v > cruiseV * 1.8 ? 1 : 0;
+  return { up: v < cruiseV && brake === 0, brake, steer };
 }
 
 export function stepCar(car, dt, input, fx) {
@@ -341,37 +354,52 @@ export function stepCar(car, dt, input, fx) {
     car.raceDist = (effLap - 1) * lapLen + s;
   }
 
-  /* 四轮独立精确几何位置（米，用于前/后轮真实独立刹车与极限转向滑移痕） */
+  /* 四轮独立精确几何位置 + 阿克曼半径差（前/后轴转弯半径不同 → 四条独立痕迹） */
   const cosA = Math.cos(car.angle), sinA = Math.sin(car.angle);
-  const fxForward = cosA * 1.75, fyForward = sinA * 1.75;
-  const rxBack = -cosA * 1.75, ryBack = -sinA * 1.75;
-  const pxPerp = -sinA, pyPerp = cosA;
+  const pxPerp = -sinA, pyPerp = cosA;              // 车身法向（+ 侧）
+  const HALF_BASE = 1.75;                           // 半轴距（前/后轴各距车身中心 1.75m）
+  const TRACK_F = 0.77, TRACK_R = 0.79;             // 前/后半轮距
 
-  // 前轮（半轴距 0.77m）与后轮（半轴距 0.79m）
-  const fl = { x: car.x + fxForward + pxPerp * 0.77, y: car.y + fyForward + pyPerp * 0.77 };
-  const fr = { x: car.x + fxForward - pxPerp * 0.77, y: car.y + fyForward - pyPerp * 0.77 };
-  const rl = { x: car.x + rxBack + pxPerp * 0.79, y: car.y + ryBack + pyPerp * 0.79 };
-  const rr = { x: car.x + rxBack - pxPerp * 0.79, y: car.y + ryBack - pyPerp * 0.79 };
+  const yawRate = car.steer * omega * (car.speed < -1 ? -1 : 1);   // 有符号横摆角速度
+  const turnSign = yawRate >= 0 ? 1 : -1;                          // 转向侧
+  const kappa = spd > 3 ? Math.abs(yawRate) / spd : 0;             // 路径曲率
+  // 前后轴半径差：R_front = hypot(R, L) → ΔR ≈ L²·κ/2，弯越急差距越大
+  const radiusGap = clamp(0.5 * (2 * HALF_BASE) * (2 * HALF_BASE) * kappa, 0, 0.45);
+  // 逼近附着极限后轮胎向外滑：前轴推头外滑明显，后轴收向弯内（两者进一步拉开）
+  const slip = clamp((Math.abs(car.gLat) - 2.0) / 2.6, 0, 1);
+  const outDir = -turnSign;                                        // 弯外方向（+ 法向为正）
+  const offF = outDir * clamp(radiusGap + slip * 0.40, 0, 0.45);   // 前轴：半径更大 → 偏弯外
+  const offR = -outDir * clamp(radiusGap + slip * 0.10, 0, 0.28);  // 后轴：半径更小 → 偏弯内
+
+  const fxBase = cosA * HALF_BASE, fyBase = sinA * HALF_BASE;
+  const latFL = TRACK_F + offF, latFR = -TRACK_F + offF;
+  const latRL = TRACK_R + offR, latRR = -TRACK_R + offR;
+  const fl = { x: car.x + fxBase + pxPerp * latFL, y: car.y + fyBase + pyPerp * latFL };
+  const fr = { x: car.x + fxBase + pxPerp * latFR, y: car.y + fyBase + pyPerp * latFR };
+  const rl = { x: car.x - fxBase + pxPerp * latRL, y: car.y - fyBase + pyPerp * latRL };
+  const rr = { x: car.x - fxBase + pxPerp * latRR, y: car.y - fyBase + pyPerp * latRR };
 
   /* 轮胎印：由刹车制动强度或极限弯道侧滑产生，前后四轮完全独立记录与呈现，起步加速不留印 */
   if (car.prevWheels && surf !== 2 && spd > 3.5) {
     let skidIntensity = 0;
+    let frontBias = 1.0, rearBias = 1.0;
     // 1. 刹车制动工况（减速度大于约 1.2G 开始显痕，重刹越狠印越深）
     if (car.braking && car.accel < -11.5) {
       skidIntensity = clamp((-car.accel - 11.5) / 36, 0.18, 0.95);
+      frontBias = 1.0; rearBias = 0.88;     // 重刹重心前移：前轮先锁死，印更深
     }
     // 2. 弯道极限离心力侧向滑动 (侧向 G 超过 3.8G 且在转弯)
     else if (car.gLat > 3.8 && Math.abs(car.steer) > 0.22) {
       skidIntensity = clamp((car.gLat - 3.8) / 1.1, 0.15, 0.65);
+      frontBias = 0.88; rearBias = 1.0;     // 极限过弯：后轴先失稳，后轮印更深
     }
 
     if (skidIntensity > 0) {
-      // 前轮独立刹车印（前轮转向走线，宽度 0.35m）
-      fx.addSkid(car.prevWheels.fl, fl, skidIntensity * 0.96, 0.35);
-      fx.addSkid(car.prevWheels.fr, fr, skidIntensity * 0.96, 0.35);
-      // 后轮独立刹车印（后轴驱动走线，宽度 0.42m）
-      fx.addSkid(car.prevWheels.rl, rl, skidIntensity, 0.42);
-      fx.addSkid(car.prevWheels.rr, rr, skidIntensity, 0.42);
+      // 前轮窄胎 0.32m、后轮宽胎 0.42m：四条痕迹的宽度、深浅与半径各不相同
+      fx.addSkid(car.prevWheels.fl, fl, skidIntensity * frontBias, 0.32);
+      fx.addSkid(car.prevWheels.fr, fr, skidIntensity * frontBias, 0.32);
+      fx.addSkid(car.prevWheels.rl, rl, skidIntensity * rearBias, 0.42);
+      fx.addSkid(car.prevWheels.rr, rr, skidIntensity * rearBias, 0.42);
     }
   }
   car.prevWheels = { fl, fr, rl, rr };

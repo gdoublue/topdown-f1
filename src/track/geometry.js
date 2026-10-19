@@ -228,6 +228,19 @@ export function addLoop(g, base, delta) {
 
 export function ringPath(g) {
   g.beginPath();
+  if (isLinear) {
+    // 线性赛道：沿 +hw 走到终点、再沿 -hw 折返，闭合成一条真正有面积的路面带
+    // （旧的 addLoop(1)+addLoop(-1) 是两条开口折线，首尾自动闭合后面积为零，沥青根本填不出来）
+    for (let i = 0; i < N; i++) {
+      const x = pts[i].x + nor[i].x * hw[i], y = pts[i].y + nor[i].y * hw[i];
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    for (let i = N - 1; i >= 0; i--) {
+      g.lineTo(pts[i].x - nor[i].x * hw[i], pts[i].y - nor[i].y * hw[i]);
+    }
+    g.closePath();
+    return;
+  }
   addLoop(g, 1);
   addLoop(g, -1);
 }

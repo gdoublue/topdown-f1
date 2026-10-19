@@ -20,6 +20,26 @@
       <canvas id="mini" width="210" height="135"></canvas>
     </div>
 
+    <!-- 视图工具面板：AI 探测线开关 + 视野缩放系数 -->
+    <div class="panel" id="viewTools">
+      <div class="panel-header">
+        <span>VIEW</span>
+        <small>视图工具</small>
+      </div>
+      <div class="vt-row">
+        <span class="vt-name">AI 探测线</span>
+        <button id="aiLineToggle" class="vt-switch on" aria-pressed="true" title="显示 / 隐藏 AI 前瞻目标点与引线"><i></i></button>
+      </div>
+      <div class="vt-row">
+        <span class="vt-name">视野缩放</span>
+        <input id="zoomRange" type="range" min="0.3" max="2.8" step="0.05" value="1" title="手动调节镜头远近（越大越近）" />
+      </div>
+      <div class="vt-row vt-val">
+        <span id="zoomVal">1.00×</span>
+        <button id="zoomReset" class="vt-mini">复位</button>
+      </div>
+    </div>
+
     <!-- 顶部中央赛道快速切换胶囊 -->
     <div id="trackSwitcherPill" class="panel track-pill" title="点击切换赛道">
       <span class="track-flag" id="pillFlag">🇨🇳</span>
@@ -59,6 +79,17 @@
         <div class="row"><span>TIME</span><b id="statusTime">0:00.00</b></div>
         <div class="row"><span>BEST</span><b id="statusBest" class="hi">--:--.--</b></div>
       </div>
+      <div class="cs-divider"></div>
+      <button id="tuneToggle" class="tune-btn" title="展开 / 收起当前赛车的实时性能微调">TUNE</button>
+
+      <!-- 实时性能调校面板（从遥测条向上展开，作用于当前焦点赛车） -->
+      <div id="tunePanel" class="tune-panel">
+        <div class="tune-head">
+          <span>实时微调 · <b id="tuneCarName">CAR</b></span>
+          <button id="tuneReset" class="vt-mini">恢复默认</button>
+        </div>
+        <div id="tuneGrid" class="tune-grid"></div>
+      </div>
     </div>
 
     <!-- 原单人驾驶 HUD 面板 (非 AI 模式时显示) -->
@@ -72,6 +103,38 @@
     <div class="panel" id="help">J 油门　K 轻刹　L 重刹/倒车<br>← → 或 A D 转向　R 重开　M 静音</div>
     <div id="msg"><span id="msgMain"></span><span id="msgSub"></span></div>
     <div id="credits">Audio: engine loops by domasx2 (CC0) · F1 recordings by Edvvc (CC BY-SA 3.0) · tire squeal by audible-edge (CC BY 3.0)</div>
+  </div>
+
+  <!-- 开局流程弹窗：玩法模式 → 赛车选择 -->
+  <div id="startModal" class="track-modal-overlay">
+    <div class="track-modal-card start-modal-card">
+      <div class="track-modal-header">
+        <div class="modal-title-wrap">
+          <span class="f1-badge">FORMULA 1 · TOP DOWN GP</span>
+          <h2 class="modal-title" id="startTitle">选择玩法模式 (SELECT MODE)</h2>
+        </div>
+      </div>
+      <p class="track-modal-desc" id="startDesc">单人计时刷圈，还是与全场 AI 车手同场竞速？</p>
+
+      <div id="modeCards" class="mode-cards">
+        <div class="track-card mode-card" data-mode="solo">
+          <div class="mode-icon">⏱</div>
+          <div class="track-card-title">单人玩 · TIME ATTACK</div>
+          <div class="track-card-en">独自上赛道，专心刷最快圈速</div>
+          <div class="track-card-tag">无对手 · 自由练习</div>
+        </div>
+        <div class="track-card mode-card" data-mode="vs">
+          <div class="mode-icon">🏁</div>
+          <div class="track-card-title">和 AI 比 · GRAND PRIX</div>
+          <div class="track-card-en">你选一台车，其余车手全部由 AI 驾驶</div>
+          <div class="track-card-tag">同场竞速 · 争夺冠军</div>
+        </div>
+      </div>
+
+      <div id="carSelectWrap" class="hidden">
+        <div id="carCardsGrid" class="track-cards-grid"></div>
+      </div>
+    </div>
   </div>
 
   <!-- 赛道选择弹窗 (开局选择或点击切换赛道) -->

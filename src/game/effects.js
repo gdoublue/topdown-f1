@@ -47,9 +47,9 @@ export function updateEffects(dt) {
 }
 
 export function drawEffects(ctx) {
-  ctx.lineCap = "round";
-
-  // 高性能分桶批量绘制：将多达数千段前后轮刹车印按深浅聚合为 8 次批处理绘制，杜绝掉帧卡顿
+  // 高性能分桶批量绘制：将多达数千段前后轮刹车印按深浅聚合为 8 次批处理绘制，杜绝掉帧卡顿。
+  // 每段用四边形填充而不是统一 lineWidth 描边 —— 这样前轮 0.34m / 后轮 0.44m 的真实胎宽才能体现，
+  // 四条痕迹（左前/右前/左后/右后）宽度各不相同、互不粘连。
   if (skids.length > 0) {
     const BUCKET_COUNT = 8;
     const buckets = Array.from({ length: BUCKET_COUNT }, () => []);
@@ -66,15 +66,29 @@ export function drawEffects(ctx) {
       const list = buckets[b];
       if (list.length === 0) continue;
       const alpha = ((b + 0.6) / BUCKET_COUNT).toFixed(3);
-      ctx.strokeStyle = `rgba(16,18,22,${alpha})`;
-      ctx.lineWidth = 0.38;
+      ctx.fillStyle = `rgba(16,18,22,${alpha})`;
       ctx.beginPath();
       for (let j = 0; j < list.length; j++) {
-        const item = list[j];
-        ctx.moveTo(item.a.x, item.a.y);
-        ctx.lineTo(item.b.x, item.b.y);
+        const s = list[j];
+        const hw = Math.max(0.05, (s.width || 0.38) * 0.5);
+        const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 1e-4) {
+          // 原地滑移：补一个圆点，避免出现空洞
+          ctx.moveTo(s.a.x + hw, s.a.y);
+          ctx.arc(s.a.x, s.a.y, hw, 0, Math.PI * 2);
+          continue;
+        }
+        const ux = dx / len, uy = dy / len;
+        const nx = -uy * hw, ny = ux * hw;
+        const ex = ux * hw * 0.6, ey = uy * hw * 0.6;   // 两端略微延长，模拟圆头接缝
+        ctx.moveTo(s.a.x - ex + nx, s.a.y - ey + ny);
+        ctx.lineTo(s.b.x + ex + nx, s.b.y + ey + ny);
+        ctx.lineTo(s.b.x + ex - nx, s.b.y + ey - ny);
+        ctx.lineTo(s.a.x - ex - nx, s.a.y - ey - ny);
+        ctx.closePath();
       }
-      ctx.stroke();
+      ctx.fill();
     }
   }
 
