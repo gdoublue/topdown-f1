@@ -963,7 +963,7 @@ export const AI_CONFIGS = [
     livery: "aston",
     number: "14",
     driverName: "阿隆索 (ALO #14)",
-    driver: geminiDriver,
+    driver: superDriver,
     // 真实特性：弯道下压力足，但直道风阻偏大，尾速略逊
     perf: {
       maxSpeed: [100.3, 87.5, 33.0],    // 沥青极速
@@ -1004,24 +1004,24 @@ export const AI_CONFIGS = [
     livery: "cyber",
     number: "55",
     driverName: "Ai (HAM #55)",
-    driver: superDriver,
+    driver: geminiDriver,
     // 真实特性：极强制动力，晚刹深扎，底盘巡航稳定
     perf: {
-      maxSpeed: [101.2, 90.8, 33.6],   // 沥青极速 364.3 km/h
-      latGrip: 45.0,
-      maxOmega: 3.30,                  // 沉稳平顺，不神经质
-      accelMult: 1.00,
+      maxSpeed: [101.5, 91.8, 33.6],   // 沥青极速
+      latGrip: 47.0,
+      maxOmega: 3.40,                  // 沉稳平顺，不神经质
+      accelMult: 1.02,
       brakeMult: 1.08,                 // 全场最强刹车
-      steerRate: 10.5,
+      steerRate: 13.5,
       // Smooth Cruiser Pro 速度规划调优：更高抓地利用率 + 贴近真实制动能力
-      vtGripFactor: 0.88,
+      vtGripFactor: 0.95,
       vtBrakeFactor: 0.92
     }
   },
   {
     id: "smooth-cruiser",
-    name: "小米 SU7 Ultra #7 (1548PS · 三电机弹射与碳陶瓷深刹)",
-    shortName: "SU7 Ultra #7",
+    name: "小米 SU8 Ultra #7 (1548PS · 三电机弹射与碳陶瓷深刹)",
+    shortName: "SU8 Ultra #7",
     color: "#f5c518",
     livery: "su7ultra",
     number: "7",
@@ -1030,15 +1030,15 @@ export const AI_CONFIGS = [
     // 真实特性：三电机 1138kW，0-100km/h 1.98s 弹射起步；350km/h 电子限速；
     // 民用车物理极限：横向 ≈1.65g、制动 ≈1.8g（碳陶），远低于 F1 的 4.6g/6.3g
     perf: {
-      maxSpeed: [127.2, 118.0, 63.6],    // 沥青极速 350 km/h（SU7 Ultra 电子限速）
+      maxSpeed: [133.2, 88.0, 63.6],    // 沥青极速 350 km/h（SU7 Ultra 电子限速）
       latGrip: 16.2,                   // ≈1.65g：赛道热熔胎横向抓地物理极限（F1 为 4.6g）
-      maxOmega: 2.50,                  // 2.3 吨整备质量，低速转向速率受限
-      powerKW: 660,                    // 三电机持续轮上功率 ≈660kW（峰值 1138kW 受电池放电限制，按官方 0-200=5.96s 校准）
+      maxOmega: 3.50,                  //低速最大转向角速度，限制发卡弯过弯速度
+      powerKW: 5600,                    // 三电机持续轮上功率 ≈660kW（峰值 1138kW 受电池放电限制，按官方 0-200=5.96s 校准）
       naturalVmax: 151.1,              // 自然极速  （无电子限速时的风阻平衡点，用于风阻标定）
       massKg: 2300,                    // 整备质量
       launchAccel: 14.2,               // 四四驱弹射起步极限 → 0-100km/h ≈1.96s（官方 1.98s）
       accelMult: 1.25,                 // （电车走功率模型，此系数仅作后备）
-      brakeMult: 0.30,                 // 碳陶 ≈1.8g 制动（F1 为 6.3g）
+      brakeMult: 1.90,                 // 碳陶 ≈1.8g 制动（F1 为 6.3g）
       steerRate: 9.5,
       // Smooth Cruiser Pro 速度规划调优：更高抓地利用率 + 贴近真实制动能力
       vtGripFactor: 0.88,

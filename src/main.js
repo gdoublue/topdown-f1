@@ -29,6 +29,7 @@ let cars = [];
 let aiInputs = [];
 let focusIndex = 0;
 let finishAt = 0;
+let winner = null;      // 全场首位冲线车辆（冠军与观察视角无关）
 
 // 洗牌算法：用于每局发车位随机排位
 function shuffle(array) {
@@ -77,6 +78,7 @@ function reset() {
   fx.clearEffects();
   hideMsg(true);
   finishAt = 0;
+  winner = null;
 }
 
 function resize() {
@@ -238,22 +240,29 @@ function update(dt) {
       driveAI(car, aiInputs[i], dt, cars);
     }
 
-    // 已完赛的车辆减速停稳并驶离赛车线（避免被仍在比赛的后车冲撞）
+    // 已完赛的车辆平滑降速到 30km/h 巡航（不再停车）；AI 车沿用其转向与弯前刹车
     let effCtrl = ctrl;
-    if (car.finished) effCtrl = finishedCarInput(car);
+    if (car.finished) effCtrl = finishedCarInput(car, AI_MODE ? aiInputs[i] : null);
     else if (race.state !== "racing") effCtrl = NO_INPUT;
 
     stepCar(car, dt, effCtrl, fx);
 
     const ev = updateCarLap(car);
-    if (i === focusIndex) {
-      if (ev === "lap") {
-        showMsg("LAP " + car.lap + "/" + TOTAL_LAPS, car.shortName, 1100);
-        audio.lapSound();
-      } else if (ev === "finish" && !finishAt) {
-        showMsg("WINNER: " + car.shortName, "总时间 " + fmt(car.total) + " · 最快圈 " + fmt(car.best), 0);
-        audio.finishSound();
-      }
+    if (i === focusIndex && ev === "lap") {
+      showMsg("LAP " + car.lap + "/" + TOTAL_LAPS, car.shortName, 1100);
+      audio.lapSound();
+    }
+  }
+
+  // 冠军判定：全场首位冲线者，与当前观察视角无关
+  // （同一帧有多车冲线时取总用时最短者，避免按数组顺序误判）
+  if (!winner) {
+    for (const c of cars) {
+      if (c.finished && (!winner || (c.total || 0) < (winner.total || 0))) winner = c;
+    }
+    if (winner) {
+      showMsg("WINNER: " + winner.shortName, "总时间 " + fmt(winner.total) + " · 最快圈 " + fmt(winner.best), 0);
+      audio.finishSound();
     }
   }
 

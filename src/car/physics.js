@@ -246,14 +246,39 @@ export function stepLongitudinal(car, dt, input, surf) {
   car.accel = dt > 0 ? (car.speed - prev) / dt : 0;
 }
 
-// 完赛车辆输入：重刹减速 + 主动驶离赛车线靠边停（避免停在 racing line 上被后车冲撞推出赛道）
-export function finishedCarInput(car) {
+// ================= 完赛巡航 =================
+// 冲线后不再急刹停车：只松油门靠引擎制动平滑降速，落到 30km/h 后补油匀速巡航。
+// - AI 车：沿用 AI 的转向与弯前点刹（保证过弯不冲出赛道），仅把油门/目标速度压到巡航值
+// - 玩家车：无 AI 输入时沿赛道中心线纯追踪自行巡航
+export const FINISH_CRUISE_KMH = 30;
+const FINISH_CRUISE_V = FINISH_CRUISE_KMH / 3.6;   // 30km/h ≈ 8.33 m/s
+const CRUISE_STEER_GAIN = 1.8;                     // 航向误差 → 方向盘 duty 增益
+
+export function finishedCarInput(car, aiCtrl) {
   const i = car.nearIdx ?? 0;
-  const dxn = car.x - pts[i].x, dyn = car.y - pts[i].y;
-  const lat = dxn * -tan[i].y + dyn * tan[i].x;          // 侧向偏移（+nor 方向为正）
-  const target = hw[i] * 0.6;
-  const steer = Math.abs(lat) < target ? (lat >= 0 ? 0.4 : -0.4) : 0;
-  return { up: false, brake: Math.abs(car.speed) > 2 ? 2 : 1, steer };
+  const v = Math.abs(car.speed);
+
+  if (aiCtrl && typeof aiCtrl.steer === "number") {
+    // ---- AI 车：转向与弯道刹车交给 AI，纵向只做"慢慢降到 30km/h"的收敛 ----
+    const brake = aiCtrl.brake || 0;
+    const up = brake === 0 && v < FINISH_CRUISE_V;   // 高于巡航速度只滑行，靠引擎制动降速
+    return { up, brake, steer: aiCtrl.steer };
+  }
+
+  // ---- 玩家车：沿中心线纯追踪（前瞻随车速加长，弯道自动提前切向） ----
+  const ds = LAP_LENGTH / Math.max(1, N);
+  const look = Math.max(8, v * 0.85);
+  const step = Math.max(1, Math.round(look / Math.max(0.1, ds)));
+  const j = isLinear ? Math.min(i + step, N - 1) : (i + step) % N;
+  let hErr = Math.atan2(pts[j].y - car.y, pts[j].x - car.x) - car.angle;
+  while (hErr > Math.PI) hErr -= Math.PI * 2;
+  while (hErr < -Math.PI) hErr += Math.PI * 2;
+  const steer = clamp(hErr * CRUISE_STEER_GAIN, -1, 1);
+
+  // 极高速时用轻刹（45% 制动力）先把尾速收下来，避免以 300km/h 滑行冲出弯道；
+  // 进入低速段后改为纯滑行，平顺收油到 30km/h
+  const brake = v > FINISH_CRUISE_V * 2.5 ? 1 : 0;
+  return { up: v < FINISH_CRUISE_V && brake === 0, brake, steer };
 }
 
 export function stepCar(car, dt, input, fx) {
