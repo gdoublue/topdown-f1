@@ -5,7 +5,7 @@
 // 3. Classic Baseline（完整保留原基准算法）
 // 4. Smooth Cruiser Pro（时间最优闭环纵向规划 + 双前瞻融合转向 + 主动防撞脱困）
 
-import { N, pts, nor, hw, tan, curvS, cumDist, onTrackChange, LAP_LENGTH, isLinear } from "../track/geometry.js";
+import { N, pts, nor, hw, tan, curvS, cumDist, onTrackChange, LAP_LENGTH, isLinear, currentTrackId } from "../track/geometry.js";
 import { PHYS } from "../config.js";
 import { clamp } from "../utils.js";
 import { CAR_LENGTH, CAR_WIDTH, getCarDistance } from "../car/physics.js";
@@ -30,7 +30,11 @@ const _superCornerCapCache = new Map();    // superDriver 弯速表缓存（更�
 /* ================= 3. 目标速度表生成器（适配各车性能，支持 per-car 调优） ================= */
 // opts: gripFactor 弯中抓地利用率（默认 0.78）、brakeFactor 刹车规划系数（默认 0.58）、
 //       noBrakePlan=true 时跳过反向刹车传播（返回纯弯中极限速度表）
-export function buildCarVTarget(perf = {}, opts = {}) {
+// data: 可选注入 { N, DS, rcurvS }（服务端上下文构建用）；缺省读全局激活赛道
+export function buildCarVTarget(perf = {}, opts = {}, data = null) {
+  const _N = data ? data.N : N;
+  const _DS = data ? data.DS : DS;
+  const _rcurvS = data ? data.rcurvS : rcurvS;
   const topSpeed = perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0];
   const latGrip = perf.latGrip ?? PHYS.latGrip;
   const maxOmega = perf.maxOmega ?? PHYS.maxOmega;
@@ -39,13 +43,13 @@ export function buildCarVTarget(perf = {}, opts = {}) {
   // cornerGripMult：实时调校用的弯速极限系数（1 = 配置原始值，>1 更激进、<1 更保守）
   const A_LAT = latGrip
     * Math.min(1.0, (opts.gripFactor ?? perf.vtGripFactor ?? 0.78) * (perf.cornerGripMult ?? 1));
-  const vt = new Float32Array(N);
+  const vt = new Float32Array(_N);
 
-  const w = Math.max(1, Math.round(30 / Math.max(0.1, DS)));
-  for (let i = 0; i < N; i++) {
+  const w = Math.max(1, Math.round(30 / Math.max(0.1, _DS)));
+  for (let i = 0; i < _N; i++) {
     let k = 0;
     for (let j = -w; j <= w; j++) {
-      const c = Math.abs(rcurvS[(i + j + N) % N]);
+      const c = Math.abs(_rcurvS[(i + j + _N) % _N]);
       if (c > k) k = c;
     }
     const R = k > 1e-5 ? 1 / k : 1e6;
@@ -58,9 +62,9 @@ export function buildCarVTarget(perf = {}, opts = {}) {
   if (!opts.noBrakePlan) {
     // 反向传播刹车规划
     for (let pass = 0; pass < 2; pass++) {
-      for (let i = N - 1; i >= 0; i--) {
-        const j = (i + 1) % N;
-        const v = Math.sqrt(vt[j] * vt[j] + 2 * brakePlan * DS);
+      for (let i = _N - 1; i >= 0; i--) {
+        const j = (i + 1) % _N;
+        const v = Math.sqrt(vt[j] * vt[j] + 2 * brakePlan * _DS);
         if (v < vt[i]) vt[i] = v;
       }
     }
@@ -78,63 +82,92 @@ export function refreshCarPerf(car) {
   resetApexCapCache();
 }
 
-export function rebuildAITrack() {
-  if (N <= 0) return;
+/* ================= 3.5 AI 走线数据：按赛道上下文构建（纯函数 + 缓存） =================
+
+服务端多房间场景：每条赛道的走线数据只计算一次（900 次平滑迭代较重），
+按 trackId 缓存 bundle；激活新赛道时 rebuildAITrack 只是"换引用"，成本 O(1)。
+*/
+const _aiDataCache = new Map();      // trackId -> { DS, lineX, lineY, lineYaw, rcurv, rcurvS, vTarget }
+
+// 依据赛道上下文构建全套 AI 走线数据（不修改任何模块状态，可安全并发调用）
+export function buildAIData(ctx) {
+  const hit = _aiDataCache.get(ctx.id);
+  if (hit) return hit;
+
+  const cN = ctx.N, cPts = ctx.pts, cNor = ctx.nor, cHw = ctx.hw;
+  const cLinear = ctx.isLinear;
   // 线性赛道的沥青可能延伸到冲线缓冲区之后（如 dragstrip），
   // 点间距必须按真实折线长度计算，否则 AI 的前瞻/扫描距离会整体失真
-  DS = isLinear
-    ? cumDist[N - 1] / Math.max(1, N - 1)
-    : LAP_LENGTH / N;
+  const cDS = cLinear
+    ? ctx.cumDist[cN - 1] / Math.max(1, cN - 1)
+    : ctx.LAP_LENGTH / cN;
 
-  lineX = new Float32Array(N);
-  lineY = new Float32Array(N);
-  lineYaw = new Float32Array(N);
-  corridor = new Float32Array(N);
+  const cLineX = new Float32Array(cN);
+  const cLineY = new Float32Array(cN);
+  const cLineYaw = new Float32Array(cN);
+  const corridor = new Float32Array(cN);
 
-  for (let i = 0; i < N; i++) {
-    lineX[i] = pts[i].x;
-    lineY[i] = pts[i].y;
-    corridor[i] = Math.max(0, hw[i] - 3.4);
+  for (let i = 0; i < cN; i++) {
+    cLineX[i] = cPts[i].x;
+    cLineY[i] = cPts[i].y;
+    corridor[i] = Math.max(0, cHw[i] - 3.4);
   }
 
   for (let it = 0; it < 900; it++) {
-    for (let i = 0; i < N; i++) {
-      const a = (i - 1 + N) % N, b = (i + 1) % N;
-      const mx = (lineX[a] + lineX[b]) * 0.5;
-      const my = (lineY[a] + lineY[b]) * 0.5;
-      const off = clamp((mx - pts[i].x) * nor[i].x + (my - pts[i].y) * nor[i].y,
+    for (let i = 0; i < cN; i++) {
+      const a = (i - 1 + cN) % cN, b = (i + 1) % cN;
+      const mx = (cLineX[a] + cLineX[b]) * 0.5;
+      const my = (cLineY[a] + cLineY[b]) * 0.5;
+      const off = clamp((mx - cPts[i].x) * cNor[i].x + (my - cPts[i].y) * cNor[i].y,
         -corridor[i], corridor[i]);
-      lineX[i] = pts[i].x + nor[i].x * off;
-      lineY[i] = pts[i].y + nor[i].y * off;
+      cLineX[i] = cPts[i].x + cNor[i].x * off;
+      cLineY[i] = cPts[i].y + cNor[i].y * off;
     }
   }
 
-  for (let i = 0; i < N; i++) {
-    const b = (i + 1) % N;
-    lineYaw[i] = Math.atan2(lineY[b] - lineY[i], lineX[b] - lineX[i]);
+  for (let i = 0; i < cN; i++) {
+    const b = (i + 1) % cN;
+    cLineYaw[i] = Math.atan2(cLineY[b] - cLineY[i], cLineX[b] - cLineX[i]);
   }
 
-  rcurv = new Float32Array(N);
-  for (let i = 0; i < N; i++) {
-    const a = (i - 1 + N) % N, b = (i + 1) % N;
-    const v1x = lineX[i] - lineX[a], v1y = lineY[i] - lineY[a];
-    const v2x = lineX[b] - lineX[i], v2y = lineY[b] - lineY[i];
+  const cRcurv = new Float32Array(cN);
+  for (let i = 0; i < cN; i++) {
+    const a = (i - 1 + cN) % cN, b = (i + 1) % cN;
+    const v1x = cLineX[i] - cLineX[a], v1y = cLineY[i] - cLineY[a];
+    const v2x = cLineX[b] - cLineX[i], v2y = cLineY[b] - cLineY[i];
     const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
-    rcurv[i] = Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y)
+    cRcurv[i] = Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y)
       / ((l1 + l2) * 0.5 || 1);
   }
 
-  rcurvS = new Float32Array(N);
-  for (let i = 0; i < N; i++) {
+  const cRcurvS = new Float32Array(cN);
+  for (let i = 0; i < cN; i++) {
     let s = 0;
-    for (let k = -5; k <= 5; k++) s += rcurv[(i + k + N) % N];
-    rcurvS[i] = s / 11;
+    for (let k = -5; k <= 5; k++) s += cRcurv[(i + k + cN) % cN];
+    cRcurvS[i] = s / 11;
   }
 
-  vTarget = buildCarVTarget();
-  _cruiseCornerCapCache.clear();
-  _superCornerCapCache.clear();
-  resetApexCapCache();   // geminiDriver.js 内部的 Apex-Release 弯速表缓存
+  const bundle = {
+    DS: cDS, lineX: cLineX, lineY: cLineY, lineYaw: cLineYaw, rcurv: cRcurv, rcurvS: cRcurvS,
+    vTarget: buildCarVTarget({}, {}, { N: cN, DS: cDS, rcurvS: cRcurvS }),
+  };
+  _aiDataCache.set(ctx.id, bundle);
+  return bundle;
+}
+
+export function rebuildAITrack() {
+  if (N <= 0) return;
+  const b = buildAIData({
+    id: currentTrackId, N, pts, nor, hw, cumDist, LAP_LENGTH, isLinear
+  });
+  DS = b.DS;
+  lineX = b.lineX;
+  lineY = b.lineY;
+  lineYaw = b.lineYaw;
+  rcurv = b.rcurv;
+  rcurvS = b.rcurvS;
+  vTarget = b.vTarget;
+  // 弯速表缓存均为 "perf + 赛道 id" 双键，切换赛道无需清空（多房间/多赛道安全）
 }
 
 // 自动响应赛道切换
@@ -480,34 +513,33 @@ export function driveClassicBaseline(car, out, dt, otherCars) {
 
 /* ================= 算法 4：Smooth Cruiser Pro（时间最优闭环纵向规划 + 双前瞻融合转向 + 主动防撞脱困） ================= */
 
+// 双键缓存读取：perf 对象 + 当前赛道 id（服务端多赛道上下文切换互不污染）
+function trackCacheGet(cache, perf, build) {
+  let byTrack = cache.get(perf);
+  if (!byTrack) { byTrack = new Map(); cache.set(perf, byTrack); }
+  let cap = byTrack.get(currentTrackId);
+  if (!cap) { cap = build(); byTrack.set(currentTrackId, cap); }
+  return cap;
+}
+
 // Smooth Cruiser Pro 弯中极限速度表：不含刹车传播的纯弯速上限，配合逐帧闭环刹车规划使用。
 // 按 perf 对象缓存（F1/电车各自建表），避免不同性能车辆串用同一张弯速表
 function getCruiseCornerCap(perf) {
-  let cap = _cruiseCornerCapCache.get(perf);
-  if (!cap) {
-    cap = buildCarVTarget(perf, {
-      gripFactor: 0.92,     // 弯中抓地利用率 92%（满舵仍留 8% 余量纠偏）
-      brakeFactor: 0.92,
-      noBrakePlan: true
-    });
-    _cruiseCornerCapCache.set(perf, cap);
-  }
-  return cap;
+  return trackCacheGet(_cruiseCornerCapCache, perf, () => buildCarVTarget(perf, {
+    gripFactor: 0.92,     // 弯中抓地利用率 92%（满舵仍留 8% 余量纠偏）
+    brakeFactor: 0.92,
+    noBrakePlan: true
+  }));
 }
 
 // superDriver 专用弯速表：更高抓地利用率（96%），仅留 4% 余量做微小纠偏
 // 物理模型无驱动/转向联合摩擦损失，可以更激进地吃满抓地极限
 export function getSuperCornerCap(perf) {
-  let cap = _superCornerCapCache.get(perf);
-  if (!cap) {
-    cap = buildCarVTarget(perf, {
-      gripFactor: 0.96,     // ★ 弯中抓地利用率 96%（仅 4% 余量 → 每个弯快 1-2 km/h）
-      brakeFactor: 0.95,    // ★ 刹车规划利用率 95%
-      noBrakePlan: true
-    });
-    _superCornerCapCache.set(perf, cap);
-  }
-  return cap;
+  return trackCacheGet(_superCornerCapCache, perf, () => buildCarVTarget(perf, {
+    gripFactor: 0.96,     // ★ 弯中抓地利用率 96%（仅 4% 余量 → 每个弯快 1-2 km/h）
+    brakeFactor: 0.95,    // ★ 刹车规划利用率 95%
+    noBrakePlan: true
+  }));
 }
 
 export function driveSmoothCruiser(car, out, dt, otherCars) {
@@ -979,13 +1011,13 @@ export const AI_CONFIGS = [
     livery: "aston",
     number: "14",
     driverName: "阿隆索 (ALO #14)",
-    driver: superDriver,
+    driver: geminiDriver,
     // 真实特性：弯道下压力足，但直道风阻偏大，尾速略逊
     perf: {
       maxSpeed: [100.3, 87.5, 33.0],    // 沥青极速
       latGrip: 47.2,                   // 弯中抓地
       maxOmega: 3.55,
-      accelMult: 0.98,
+      accelMult: 0.99,
       brakeMult: 0.98,
       steerRate: 11.0
     }
@@ -1016,7 +1048,7 @@ export const AI_CONFIGS = [
     id: "AiMotor",
     name: "Ai Motor",
     shortName: "ai",
-    color: "#e2e8f0",
+    color: "#a855f7",        // 排位榜色条 / 小地图点位：紫色（原本白色，和梅奔撞色）
     livery: "cyber",
     number: "55",
     driverName: "Ai (HAM #55)",
@@ -1135,8 +1167,11 @@ export function applyCarConfig(car, cfg) {
   car.driverName = cfg.driverName;
   car.algorithm = cfg.id;
   car.driver = cfg.driver;
-  car.perf = cfg.perf;
-  car.vTarget = buildCarVTarget(cfg.perf);
+  // 每辆车持有自己的性能副本：调校（TUNE）只作用于本车，不污染全局 AI_CONFIGS，
+  // 也不会出现"多辆同款车共享同一份 perf，改一辆全变"的问题
+  car.perf = { ...cfg.perf };
+  if (cfg.perf.maxSpeed) car.perf.maxSpeed = [...cfg.perf.maxSpeed];
+  car.vTarget = buildCarVTarget(car.perf);
   return car;
 }
 

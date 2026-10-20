@@ -1,0 +1,134 @@
+/* 结算大屏：名次表 / 操作按钮 */
+/* ================= 比赛结算大屏 ================= */
+.results-card {
+  width: min(720px, 94%);
+}
+.results-track {
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+  align-self: center;
+}
+.results-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.result-row {
+  display: grid;
+  grid-template-columns: 34px 16px minmax(140px, 1.4fr) 1fr 1fr 0.9fr;
+  align-items: center;
+  gap: 10px;
+  background: rgba(18, 28, 42, 0.65);
+  border: 1px solid rgba(160, 200, 255, 0.14);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 13px;
+  color: #e2e8f0;
+}
+.result-row.result-head {
+  background: transparent;
+  border: none;
+  padding: 2px 14px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #64748b;
+  text-transform: uppercase;
+}
+.result-row.gold {
+  border-color: rgba(255, 209, 102, 0.55);
+  background: rgba(255, 209, 102, 0.08);
+  box-shadow: 0 0 14px rgba(255, 209, 102, 0.15);
+}
+.result-row.player {
+  border-color: rgba(0, 255, 180, 0.45);
+  background: rgba(0, 255, 180, 0.06);
+}
+.rr-rank {
+  font-weight: 900;
+  font-size: 15px;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+.result-row.gold .rr-rank { color: #ffd166; }
+.rr-color {
+  width: 14px;
+  height: 22px;
+  border-radius: 4px;
+}
+.rr-name {
+  font-weight: 800;
+  color: #fff;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.rr-name small {
+  color: #64748b;
+  font-weight: 400;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rr-you {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 900;
+  color: #022c22;
+  background: #00ffb4;
+  border-radius: 3px;
+  padding: 1px 4px;
+  letter-spacing: 0.06em;
+}
+.rr-total, .rr-best, .rr-gap {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: #cbd5e1;
+}
+.rr-best.purple { color: #c084fc; }
+.rr-gap { color: #94a3b8; font-size: 12px; }
+.results-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.results-btn {
+  flex: 1;
+  max-width: 240px;
+  padding: 12px 18px;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.results-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+}
+.results-btn.primary {
+  color: #022c22;
+  background: #00ffb4;
+  border-color: #00ffb4;
+}
+.results-btn.primary:hover {
+  background: #33ffbe;
+  box-shadow: 0 6px 20px rgba(0, 255, 180, 0.35);
+}
+.results-upload {
+  text-align: center;
+  font-size: 12px;
+  min-height: 18px;
+  margin: 0 0 10px;
+  color: #94a3b8;
+}
+

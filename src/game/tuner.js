@@ -77,6 +77,19 @@ const SPECS = [
 // 原始配置快照（按赛车 id 保存），用于「恢复默认」
 const DEFAULTS = new Map();
 let currentCar = null;
+// 在线对战中成绩由服务器权威判定，不允许客户端改车（避免"自己加性能"）
+let enabled = true;
+
+export function setTunerEnabled(on) {
+  enabled = !!on;
+  const btn = document.getElementById("tuneToggle");
+  const panel = document.getElementById("tunePanel");
+  if (!enabled) {
+    if (panel) panel.classList.remove("open");
+    if (btn) btn.classList.remove("active");
+  }
+  if (btn) btn.classList.toggle("hidden", !enabled);
+}
 
 function snapshot(perf) {
   const copy = { ...perf };
@@ -126,7 +139,7 @@ function buildRows(car) {
 }
 
 export function syncTuner(car) {
-  if (!car || car === currentCar) return;
+  if (!enabled || !car || car === currentCar) return;
   currentCar = car;
   if (!DEFAULTS.has(car.id)) DEFAULTS.set(car.id, snapshot(car.perf || {}));
   buildRows(car);

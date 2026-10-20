@@ -87,13 +87,15 @@ function runGrandPrix(trackObj, laps, verbose = true) {
     simTime += dt;
     totalFrames++;
 
+    const liveCars = cars.filter(c => !c.finished);   // 完赛车幽灵化
+
     for (let i = 0; i < cars.length; i++) {
       const car = cars[i];
       const ai = aiInputs[i];
       const st = stats[i];
 
       if (!car.finished) {
-        driveAI(car, ai, dt, cars);
+        driveAI(car, ai, dt, liveCars);
         const dSteer = (ai.steer - st.prevSteer) / dt;
         st.steerJerkSum += Math.abs(dSteer);
         st.prevSteer = ai.steer;

@@ -1,6 +1,9 @@
-import { TOTAL_LAPS, M } from "../config.js";
+function escapeHtml(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+import { M, effectiveLaps } from "../config.js";
 import { N, currentTrack } from "../track/geometry.js";
-import { race } from "./race.js";
+import { race, simClock } from "./race.js";
 
 const el = {};
 let msgTimer = 0;
@@ -84,10 +87,11 @@ export function tickMsg(now) {
 export function updateHUD(car) {
   if (!car) return;
   setText(el.speed, String(Math.round(Math.abs(car.speed) / M * 3.6)));
-  const maxLaps = currentTrack?.laps || TOTAL_LAPS;
+  const maxLaps = effectiveLaps(currentTrack?.laps);
   setText(el.lap, Math.min(car.lap || race.lap, maxLaps) + "/" + maxLaps);
   let t = 0;
-  if (race.state === "racing") t = performance.now() - (car.raceStart || race.raceStart);
+  // 与圈速同源：用模拟时钟，倍速下也显示真实比赛用时
+  if (race.state === "racing") t = Math.max(0, simClock - (car.raceStart || race.raceStart || 0));
   else if (race.state === "finished") t = car.total || race.total;
   setText(el.time, fmt(t));
   setText(el.best, fmt(car.best || race.best));
@@ -145,10 +149,10 @@ export function updateAIHUD(cars, focusIndex, onSelectCar) {
   const gLonVal = activeCar.gLon || 0;
   setText(el.gLonVal, `${gLonVal >= 0 ? "+" : ""}${gLonVal.toFixed(1)}G`);
 
-  const maxLaps = currentTrack?.laps || TOTAL_LAPS;
+  const maxLaps = effectiveLaps(currentTrack?.laps);
   setText(el.statusLap, `${Math.min(activeCar.lap || 1, maxLaps)}/${maxLaps}`);
   let t = 0;
-  if (race.state === "racing") t = performance.now() - (activeCar.raceStart || race.raceStart || performance.now());
+  if (race.state === "racing") t = Math.max(0, simClock - (activeCar.raceStart || race.raceStart || 0));
   else if (activeCar.finished) t = activeCar.total;
   setText(el.statusTime, fmt(t));
   setText(el.statusBest, fmt(activeCar.best));
@@ -197,8 +201,20 @@ export function updateAIHUD(cars, focusIndex, onSelectCar) {
     const barEl = row.querySelector(".standing-color-bar");
     if (barEl) barEl.style.backgroundColor = c.color || "#ff4a5e";
 
+    const isPlayer = !!c.isPlayer;
+    if (isPlayer) {
+      if (!row.classList.contains("is-player")) row.classList.add("is-player");
+    } else {
+      if (row.classList.contains("is-player")) row.classList.remove("is-player");
+    }
+
     const nameEl = row.querySelector(".standing-name");
-    if (nameEl) nameEl.textContent = c.shortName;
+    if (nameEl) {
+      const displayName = c.nickname || c.driverName || c.name || c.shortName;
+      const numPrefix = c.number ? `#${c.number} ` : "";
+      nameEl.innerHTML = `${numPrefix}${escapeHtml(displayName)}${isPlayer ? ' <span class="standing-you-tag">YOU</span>' : ""}`;
+      nameEl.title = `${displayName} (${c.shortName || ""})`;
+    }
 
     const camEl = row.querySelector(".standing-cam-tag");
     if (camEl) camEl.style.display = isFocus ? "inline-block" : "none";

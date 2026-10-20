@@ -3,7 +3,7 @@ import { WORLD, isLinear } from "./geometry.js";
 import { makeRandom } from "../utils.js";
 import { pts, N, tan, nor, curvS, kerbFlag, hw, cumDist, LAP_LENGTH, addLoop, ringPath, centerPath } from "./geometry.js";
 
-const SS = 2;   // 超采样倍率
+const SS = 4;   // 超采样倍率（赛道画质核心，不做任何降级）
 
 export function buildTrackCanvas() {
   const cv = document.createElement("canvas");
@@ -39,19 +39,16 @@ export function buildTrackCanvas() {
 
   const vg = g.createRadialGradient(WORLD.w * 0.5, WORLD.h * 0.46, 250, WORLD.w * 0.5, WORLD.h * 0.46, 1070);
   vg.addColorStop(0, "rgba(0,0,0,0)");
-  vg.addColorStop(1, "rgba(0,20,5,.30)");
+  // 原 .30：场外草地被压成一片暗绿，"冲出赛道"完全看不出来；只保留极轻的远处压暗
+  vg.addColorStop(1, "rgba(0,20,5,.12)");
   g.fillStyle = vg;
   g.fillRect(0, 0, WORLD.w, WORLD.h);
 
-  /* ---------- 赛道投影 ---------- */
-  g.strokeStyle = "rgba(0,0,0,.20)";
-  g.lineWidth = 9.5;
-  g.beginPath(); addLoop(g, 1); g.stroke();
-  g.beginPath(); addLoop(g, -1); g.stroke();
-
   /* ---------- 沥青 ---------- */
+  // 不再画"赛道投影"：那圈深绿色描边既不是路面也不是路肩，
+  // 物理上毫无意义却特别像一条可以走的窄道，直接去掉，让草坪一路铺到路缘。
   ringPath(g);
-  g.fillStyle = "#484e58";
+  g.fillStyle = "#4c535e";   // 略亮一档的中性灰，和深绿草地拉开明度差
   g.fill("evenodd");
 
   const noise = document.createElement("canvas");
@@ -81,44 +78,70 @@ export function buildTrackCanvas() {
   g.stroke();
   g.restore();
 
-  /* ---------- 白色边线 ---------- */
-  g.strokeStyle = "rgba(240,246,252,.92)";
-  g.lineWidth = 0.6;
-  g.beginPath(); addLoop(g, 1, -0.45); g.stroke();
-  g.beginPath(); addLoop(g, -1, 0.45); g.stroke();
+  /* ---------- 沥青硬边 + 白色边线 ---------- */
+  // 硬边：把沥青边界压实成一条深色细线，远看也能一眼分清"路面 / 草皮"
+  g.strokeStyle = "rgba(8,12,18,.55)";
+  g.lineWidth = 0.45;
+  g.beginPath(); addLoop(g, 1, -0.18); g.stroke();
+  g.beginPath(); addLoop(g, -1, 0.18); g.stroke();
 
-  /* ---------- 路肩（红白相间，宽约 1m） ---------- */
-  // 连续弯道处按 kerbFlag 铺设；线性赛道（直线冲刺）全段两侧连续铺路肩
-  const BLOCK = 9;
+  g.strokeStyle = "rgba(242,248,255,.95)";
+  g.lineWidth = 0.5;
+  g.beginPath(); addLoop(g, 1, -0.5); g.stroke();
+  g.beginPath(); addLoop(g, -1, 0.5); g.stroke();
+
+  /* ---------- 路肩（红白相间路缘石：1.5m 宽 / 1.5m 一段） ---------- */
+  // 连续弯道处按 kerbFlag 铺设；线性赛道（直线冲刺）全段两侧连续铺路肩。
+  // 旧实现两个硬伤：① side*hw+0.3 在左侧(side=-1)把路肩画进了沥青内侧，
+  // 看起来像沥青上的一条红色涂装；② 每 9 个采样点才换色（≈33m 一段），不像路缘石。
+  const KERB_W = 1.5;      // 路缘石宽度（米）
+  const KERB_SEG = 1.5;    // 红白分段长度（米）
   const kerbIdx = (k) => (isLinear ? Math.min(k, N - 1) : k % N);
-  for (let side = -1; side <= 1; side += 2) {
-    let i = 0;
-    while (i < N) {
-      if (!isLinear && !kerbFlag[i]) { i++; continue; }
-      let j = i;
-      while (j < N && (isLinear || kerbFlag[j])) j++;
-      let bi = 0;
-      for (let s = i; s < j; s += BLOCK, bi++) {
-        const e = Math.min(s + BLOCK, j);
-        g.beginPath();
-        for (let k = s; k <= e; k++) {
-          const q = pts[kerbIdx(k)], n = nor[kerbIdx(k)];
-          const off = side * hw[kerbIdx(k)] + 0.3;
-          const x = q.x + n.x * off, y = q.y + n.y * off;
-          if (k === s) g.moveTo(x, y); else g.lineTo(x, y);
-        }
-        for (let k = e; k >= s; k--) {
-          const q = pts[kerbIdx(k)], n = nor[kerbIdx(k)];
-          const off = side * hw[kerbIdx(k)] + 1.3;
-          g.lineTo(q.x + n.x * off, q.y + n.y * off);
-        }
-        g.closePath();
-        g.fillStyle = (bi % 2 === 0) ? "#e13b46" : "#f3f7fb";
-        g.fill();
-      }
-      i = j;
-    }
+
+  // 提取 kerbFlag 的连续路段
+  const kerbRanges = [];
+  for (let i = 0; i < N;) {
+    if (!isLinear && !kerbFlag[i]) { i++; continue; }
+    let j = i;
+    while (j < N && (isLinear || kerbFlag[j])) j++;
+    kerbRanges.push([i, j]);
+    i = j;
   }
+
+  const kerbPath = (side) => {
+    g.beginPath();
+    for (const [i0, i1] of kerbRanges) {
+      for (let k = i0; k <= i1; k++) {
+        const idx = kerbIdx(k);
+        const off = side * (hw[idx] + KERB_W / 2);   // 内外两段都朝路外偏移
+        const x = pts[idx].x + nor[idx].x * off;
+        const y = pts[idx].y + nor[idx].y * off;
+        if (k === i0) g.moveTo(x, y); else g.lineTo(x, y);
+      }
+    }
+  };
+
+  g.lineCap = "butt";
+  for (const side of [-1, 1]) {
+    // 深色描边：让路缘石凸出于路面 / 草地之上，边界清楚
+    g.setLineDash([]);
+    g.strokeStyle = "rgba(10,14,20,.45)";
+    g.lineWidth = KERB_W + 0.45;
+    kerbPath(side); g.stroke();
+
+    // 同一路径描两次、相位错开半个周期 → 红白相间的路缘石
+    g.lineWidth = KERB_W;
+    g.setLineDash([KERB_SEG, KERB_SEG]);
+    g.lineDashOffset = 0;
+    g.strokeStyle = "#e03a41";
+    kerbPath(side); g.stroke();
+    g.lineDashOffset = KERB_SEG;
+    g.strokeStyle = "#f2f6fa";
+    kerbPath(side); g.stroke();
+  }
+  g.setLineDash([]);
+  g.lineDashOffset = 0;
+  g.lineCap = "round";
 
   /* ---------- 轮胎墙（弯道外侧，半径 0.67m 的轮胎） ---------- */
   for (let i = 0; i < N; i += 2) {

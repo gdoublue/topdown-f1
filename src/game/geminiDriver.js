@@ -4,17 +4,17 @@
 // 依赖 ai.js 中的赛道数据表与通用工具（弯速表生成、角度归一化），
 // 仅在函数调用期使用，不存在模块求值期的循环依赖问题。
 
-import { N, pts, nor, hw, curvS, isLinear } from "../track/geometry.js";
+import { N, pts, nor, hw, curvS, isLinear, currentTrackId } from "../track/geometry.js";
 import { PHYS } from "../config.js";
 import { clamp } from "../utils.js";
 import { CAR_LENGTH, CAR_WIDTH, getCarDistance } from "../car/physics.js";
 // 实时赛道数据（DS / lineX / lineY / rcurvS 在换赛道时会整体重建，import 绑定可拿到最新值）
 import { DS, lineX, lineY, rcurvS, wrapAngle, getSuperCornerCap } from "./ai.js";
 
-// 本模块专属弯速表缓存（按 perf 对象区分）。
+// 本模块专属弯速表缓存（按 perf 对象 + 赛道 id 双键区分）。
 // 注意：不能复用 ai.js 里的 _superCornerCapCache —— 那张表存的是均匀 30m 窗口的弯速，
 // 而这里的 Apex-Release 表是非对称窗口（-2m ~ +10.5m）且做过出弯折损，混用会返回错误的限速表。
-const _apexCapCache = new Map();
+const _apexCapCache = new Map();   // perf -> Map(trackId -> cap)
 
 // 换赛道后由 ai.js 的 rebuildAITrack() 调用，清空缓存重建专属速度表
 export function resetApexCapCache() {
@@ -31,7 +31,9 @@ export function resetApexCapCache() {
 
 // 构建专属“过弯心即释放”的非对称极限速度表（取代原版前后 30m 对称锁死的 buildCarVTarget）
 function getApexReleaseCap(perf) {
-  let cap = _apexCapCache.get(perf);
+  let byTrack = _apexCapCache.get(perf);
+  if (!byTrack) { byTrack = new Map(); _apexCapCache.set(perf, byTrack); }
+  let cap = byTrack.get(currentTrackId);
   if (cap) return cap;
 
   const topSpeed = perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0];
@@ -78,7 +80,7 @@ function getApexReleaseCap(perf) {
     cap[i] = Math.min(topSpeed, vGrip, vOmega);
   }
 
-  _apexCapCache.set(perf, cap);
+  _apexCapCache.get(perf).set(currentTrackId, cap);
   return cap;
 }
 

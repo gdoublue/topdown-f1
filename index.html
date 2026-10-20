@@ -21,18 +21,22 @@
     </div>
 
     <!-- 视图工具面板：AI 探测线开关 + 视野缩放系数 -->
-    <div class="panel" id="viewTools">
-      <div class="panel-header">
+    <div class="panel collapsed" id="viewTools">
+      <div class="panel-header" title="点击展开 / 收起视图工具">
         <span>VIEW</span>
         <small>视图工具</small>
       </div>
       <div class="vt-row">
         <span class="vt-name">AI 探测线</span>
-        <button id="aiLineToggle" class="vt-switch on" aria-pressed="true" title="显示 / 隐藏 AI 前瞻目标点与引线"><i></i></button>
+        <button id="aiLineToggle" class="vt-switch" aria-pressed="false" title="显示 / 隐藏 AI 前瞻目标点与引线（默认关闭）"><i></i></button>
       </div>
       <div class="vt-row">
         <span class="vt-name">视野缩放</span>
         <input id="zoomRange" type="range" min="0.3" max="2.8" step="0.05" value="1" title="手动调节镜头远近（越大越近）" />
+      </div>
+      <div class="vt-row">
+        <span class="vt-name">比赛倍速</span>
+        <div id="speedChips" class="speed-chips" title="快进比赛（在线对战不受影响）· 快捷键 + / -"></div>
       </div>
       <div class="vt-row vt-val">
         <span id="zoomVal">1.00×</span>
@@ -47,6 +51,10 @@
       <span class="track-len" id="pillLen">5.45km</span>
       <span class="track-switch-btn">▾ 切换赛道</span>
     </div>
+
+    <!-- 比赛中随时重选模式 / 赛车 -->
+    <button id="reopenStartBtn" class="panel home-pill" title="重新选择玩法模式与赛车">⟲ 重选模式</button>
+    <button id="quitOnlineBtn" class="panel danger-pill hidden" title="退出在线比赛（多人对战将判定为认输）">🏳️ 退出比赛</button>
 
     <!-- AI 模式实时排位榜 (点击切换视图) -->
     <div class="panel" id="standingsPanel">
@@ -100,8 +108,15 @@
       <div class="row"><span>LAST</span><b id="last">--:--.--</b></div>
     </div>
     <div class="panel" id="speedo"><b id="speed">0</b><span>KM/H</span></div>
-    <div class="panel" id="help">J 油门　K 轻刹　L 重刹/倒车<br>← → 或 A D 转向　R 重开　M 静音</div>
+    <div class="panel collapsed" id="help">
+      <div class="panel-header" title="点击展开 / 收起操作说明">
+        <span>CONTROLS</span>
+        <small>操作说明</small>
+      </div>
+      <div id="helpBody">J 油门　K 轻刹　L 重刹/倒车<br>← → 或 A D 转向　R 重开　M 静音</div>
+    </div>
     <div id="msg"><span id="msgMain"></span><span id="msgSub"></span></div>
+    <div id="offTrackWarn" class="off-track-warn hidden">⚠ OFF TRACK</div>
     <div id="credits">Audio: engine loops by domasx2 (CC0) · F1 recordings by Edvvc (CC BY-SA 3.0) · tire squeal by audible-edge (CC BY 3.0)</div>
   </div>
 
@@ -113,6 +128,7 @@
           <span class="f1-badge">FORMULA 1 · TOP DOWN GP</span>
           <h2 class="modal-title" id="startTitle">选择玩法模式 (SELECT MODE)</h2>
         </div>
+        <button id="backToModeBtn" class="track-close-btn start-back-btn hidden" title="返回上一步重新选模式">←</button>
       </div>
       <p class="track-modal-desc" id="startDesc">单人计时刷圈，还是与全场 AI 车手同场竞速？</p>
 
@@ -129,10 +145,51 @@
           <div class="track-card-en">你选一台车，其余车手全部由 AI 驾驶</div>
           <div class="track-card-tag">同场竞速 · 争夺冠军</div>
         </div>
+        <div class="track-card mode-card" data-mode="online">
+          <div class="mode-icon">🌐</div>
+          <div class="track-card-title">在线对战 · ONLINE</div>
+          <div class="track-card-en">连接服务器 · 每赛道排行榜 · 创建房间 PK</div>
+          <div class="track-card-tag">算法竞技 · 同车公平赛</div>
+        </div>
       </div>
 
       <div id="carSelectWrap" class="hidden">
         <div id="carCardsGrid" class="track-cards-grid"></div>
+        <div class="autopilot-entry">
+          <button id="autopilotOpenBtn" class="vt-mini autopilot-open">🤖 自动驾驶：关闭</button>
+          <span class="autopilot-entry-hint">开启后由算法接管你的赛车 · 单人 / 在线 / 房间通用 · 算法可自定义</span>
+        </div>
+      </div>
+
+      <!-- 在线模式：服务器地址 → 大厅 → 房间 -->
+      <div id="onlineWrap" class="hidden">
+        <div class="online-topbar">
+          <button id="onlineExitBtn" class="vt-mini online-exit-btn" title="退出在线模式：会自动离开房间并终止进行中的比赛">🏠 返回主菜单</button>
+        </div>
+        <div id="onlineAddrStep">
+          <p class="track-modal-desc">输入服务器地址连接（服务端位于 server/ 目录，npm start 启动）</p>
+          <div class="online-addr-row">
+            <input id="nicknameInput" type="text" maxlength="12" placeholder="你的昵称（留空自动生成）" title="昵称将显示在房间与排行榜中">
+            <input id="serverAddrInput" type="text" spellcheck="false" placeholder="ws://localhost:8080">
+            <button id="serverConnectBtn" class="results-btn primary online-btn">连接服务器</button>
+          </div>
+          <div id="onlineStatus" class="online-status"></div>
+        </div>
+        <div id="onlineLobby" class="hidden">
+          <div class="online-lobby-head">
+            <span id="onlineConnInfo" class="online-conn-info"></span>
+            <span class="online-lobby-actions">
+              <button id="onlinePracticeBtn" class="results-btn primary online-btn">⏱ 单人在线练习</button>
+              <button id="onlineDisconnectBtn" class="vt-mini">断开</button>
+            </span>
+          </div>
+          <div class="online-tabs">
+            <button class="online-tab active" data-tab="boards">🏆 排行榜</button>
+            <button class="online-tab" data-tab="rooms">🚪 房间</button>
+          </div>
+          <div id="lobbyBody"></div>
+        </div>
+        <div id="onlineRoom" class="hidden"></div>
       </div>
     </div>
   </div>
@@ -148,8 +205,87 @@
         <button id="closeTrackModal" class="track-close-btn" title="关闭并继续比赛">✕</button>
       </div>
       <p class="track-modal-desc">精选 5 座真实世界传奇 F1 赛车场 · 物理引擎与自动驾驶 AI 100% 自动适配</p>
+      <div class="laps-row">
+        <span class="laps-label">🏁 比赛圈数</span>
+        <div id="lapChips" class="online-chips"></div>
+        <span class="laps-hint" id="lapsHint"></span>
+      </div>
       <div id="trackCardsGrid" class="track-cards-grid">
         <!-- 由 JS 动态渲染各赛道卡片 -->
+      </div>
+
+      <!-- 底部操作栏：点击卡片只高亮，必须手动点"开始比赛"才真正发车 -->
+      <div class="track-modal-footer">
+        <div class="track-start-summary" id="trackStartSummary"></div>
+        <button id="trackStartBtn" class="results-btn primary track-start-btn">🏁 开始比赛</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 退出比赛确认弹窗 -->
+  <div id="confirmModal" class="track-modal-overlay">
+    <div class="track-modal-card confirm-modal-card">
+      <div class="track-modal-header">
+        <div class="modal-title-wrap">
+          <span class="f1-badge">QUIT / FORFEIT</span>
+          <h2 class="modal-title" id="confirmTitle">确认退出比赛</h2>
+        </div>
+        <button id="closeConfirmModal" class="track-close-btn">✕</button>
+      </div>
+      <p class="track-modal-desc" id="confirmDesc">当前比赛正在进行中。多人对战中途退出将判定为认输 (Surrender)。确认退出并返回在线大厅吗？</p>
+      <div class="results-actions">
+        <button id="confirmCancelBtn" class="results-btn">继续比赛</button>
+        <button id="confirmOkBtn" class="results-btn danger-btn">确认认输退出</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 比赛结算大屏：排名 / 用时 / 最快圈速 / 与前一名差距 -->
+  <div id="resultsModal" class="track-modal-overlay">
+    <div class="track-modal-card results-card">
+      <div class="track-modal-header">
+        <div class="modal-title-wrap">
+          <span class="f1-badge">RACE RESULT · FINAL CLASSIFICATION</span>
+          <h2 class="modal-title" id="resultsTitle">比赛结束</h2>
+        </div>
+        <span class="results-track" id="resultsTrack"></span>
+      </div>
+      <p class="track-modal-desc" id="resultsDesc"></p>
+      <div id="resultsTable" class="results-table"></div>
+      <p id="resultsUpload" class="results-upload"></p>
+      <div class="results-actions">
+        <button id="resultsRestartBtn" class="results-btn primary">🔁 再来一局</button>
+        <button id="resultsHomeBtn" class="results-btn">🏠 回到主页面</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 自动驾驶算法设置（单人 / 在线 / 房间通用） -->
+  <div id="autopilotModal" class="track-modal-overlay">
+    <div class="track-modal-card autopilot-card">
+      <div class="track-modal-header">
+        <div class="modal-title-wrap">
+          <span class="f1-badge">AUTOPILOT · DRIVER ALGORITHM</span>
+          <h2 class="modal-title">自动驾驶</h2>
+        </div>
+        <button id="closeAutopilotModal" class="track-close-btn">✕</button>
+      </div>
+      <p class="track-modal-desc">
+        开启后由算法接管你的赛车（单人计时 / 对战 AI / 在线练习 / 在线房间全部生效）。
+        代码里必须定义 <code>driver(car, out, dt, otherCars)</code>（<b>函数名固定叫 driver</b>，不用叫 superDriver），
+        通过 <code>out.up</code> / <code>out.brake</code> / <code>out.steer</code> 输出控制量。
+        完整的可读字段、可写字段与工具函数见「📖 参数说明」。
+      </p>
+      <label class="autopilot-switch">
+        <input type="checkbox" id="autopilotToggle">
+        <span>开启自动驾驶（本局由算法驾驶你的车）</span>
+      </label>
+      <textarea id="autopilotCode" class="autopilot-code" spellcheck="false" autocomplete="off"></textarea>
+      <div class="autopilot-bar">
+        <button id="autopilotReset" class="vt-mini">恢复默认 superDriver</button>
+        <a class="vt-mini autopilot-doc-link" href="./autopilot-doc.html" target="_blank" rel="noopener">📖 参数说明</a>
+        <span id="autopilotStatus" class="autopilot-status"></span>
+        <button id="autopilotDone" class="results-btn primary autopilot-done">完成</button>
       </div>
     </div>
   </div>

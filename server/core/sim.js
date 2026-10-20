@@ -1,0 +1,304 @@
+// 房间竞速协调器（QQ飞车式幽灵竞速模型）
+//
+// 职责划分：
+//   - 每个玩家：自己的车在【自己的客户端】以完整帧率本地模拟（零网络延迟），
+//     以 ~12Hz 上报位置/圈数状态；服务器只做中继展示与合理性校验
+//   - AI 补位车：服务器 30Hz 权威模拟（复用单机物理）
+//   - 服务器：比赛时钟（倒计时/开赛/结束）、状态广播、成绩收集与排名
+//   - 车辆间不发生实体碰撞（幽灵竞速）——在线竞速没有必须实时对撞的交互
+import { activateContext, createTrackContext } from "../../src/track/geometry.js";
+import { createCar, stepCar, nearestIndex, finishedCarInput, resolveCarCollisions, getCarDistance } from "../../src/car/physics.js";
+import { applyCarConfig, createAIInput, driveAI, AI_CONFIGS } from "../../src/game/ai.js";
+import { createRaceState, initCarRaceState, updateCarLap } from "../../src/game/race.js";
+import { TOTAL_LAPS, PHYS } from "../../src/config.js";
+import { TRACK_MIN_LAP_MS, DEFAULT_MIN_LAP_MS } from "../config.js";
+
+const FX_STUB = { addSkid() {}, addDust() {}, clearEffects() {} };
+
+export class RaceSim {
+  constructor(room, humans) {
+    this.room = room;
+    this.humans = humans;             // [{ sid, nickname, carId }]
+    this.trackCtx = createTrackContext(room.trackId);
+    activateContext(this.trackCtx);   // 立即激活一次：预构建 AI 走线数据缓存
+    this.race = createRaceState();
+    this.aiEntries = [];              // { car, aiInput }
+    this.ghosts = new Map();          // sid -> 幽灵（客户端中继状态）
+    this.finishReports = new Map();   // sid -> { totalMs, bestLapMs, laps, valid }
+    this.tickNo = 0;
+    this.ended = false;
+    this.endBroadcast = false;
+    this.maxLaps = room.laps || this.trackCtx.track?.laps || TOTAL_LAPS;
+    this._carList = [];               // 复用数组（AI 避让感知用）
+    this._buildAI();
+    for (const h of humans) this.addPlayer(h.sid, h.nickname, h.carId);
+  }
+
+  // AI 补位车：占满剩余发车位（同车模式下沿用统一性能、只换驾驶员）
+  _buildAI() {
+    const aiCount = this.room.fillAI
+      ? Math.max(0, this.room.maxPlayers - this.humans.length)
+      : 0;
+    const sameCarId = this.room.sameCar
+      ? (this.humans[0]?.carId || AI_CONFIGS[0].id)
+      : null;
+    let gridPos = this.humans.length;   // 人类占前排发车位，AI 排后
+    const usedCfg = new Set(this.humans.map(h => h.carId));
+    for (const cfg of AI_CONFIGS) {
+      if (this.aiEntries.length >= aiCount) break;
+      if (!sameCarId && usedCfg.has(cfg.id)) continue;
+      const perfCfg = sameCarId
+        ? (AI_CONFIGS.find(c => c.id === sameCarId) || AI_CONFIGS[0])
+        : cfg;
+      const car = applyCarConfig(createCar(gridPos++), perfCfg);
+      if (sameCarId) {
+        car.algorithm = cfg.id;
+        car.shortName = cfg.shortName;
+        car.name = cfg.name;
+        car.color = cfg.color;
+        car.number = cfg.number;
+        car.driver = cfg.driver;
+        car.driverName = cfg.driverName;
+      }
+      car.isPlayer = false;
+      car.nickname = cfg.shortName + "(AI)";
+      initCarRaceState(car, performance.now());
+      this.aiEntries.push({ car, aiInput: createAIInput() });
+    }
+  }
+
+  // 注册人类幽灵（发车位 idx = 人类序号，客户端同序本地 createCar）
+  addPlayer(sid, nickname, carId) {
+    const cfg = AI_CONFIGS.find(c => c.id === carId) || AI_CONFIGS[0];
+    const car = createCar(this.ghosts.size);
+    car.isPlayer = true;
+    const numList = ["1", "16", "44", "55", "11", "81", "4", "63", "7", "9", "23", "77"];
+    const colorList = ["#ef233c", "#0284c7", "#d97706", "#ec4899", "#10b981", "#ea580c", "#a855f7", "#0891b2"];
+    const slotIdx = this.ghosts.size;
+    const color = this.room.sameCar ? colorList[slotIdx % colorList.length] : cfg.color;
+    const number = this.room.sameCar ? numList[slotIdx % numList.length] : cfg.number;
+    this.ghosts.set(sid, {
+      sid, nickname, shortName: cfg.shortName, color, number,
+      car, lastAt: 0,
+    });
+  }
+
+  // 客户端状态上报（~12Hz）：速度做粗粒度合理性钳制
+  setPlayerState(sid, s, now) {
+    const g = this.ghosts.get(sid);
+    if (!g) return;
+    const c = g.car;
+    const vMax = (c.perf?.maxSpeed?.[0] ?? PHYS.maxSpeed[0]) * 1.05 + 5;
+    c.x = Number(s.x) || 0;
+    c.y = Number(s.y) || 0;
+    c.angle = Number(s.angle) || 0;
+    c.speed = Math.max(-vMax, Math.min(vMax, Number(s.speed) || 0));
+    c.lap = Math.max(1, Math.round(Number(s.lap)) || 1);
+    c.raceDist = Math.max(0, Number(s.rd) || 0);
+    c.finished = !!s.fin;
+    c.total = Number(s.tot) || 0;
+    c.best = Number(s.best) || 0;
+    // 踏板 / 方向输入：中继给其他玩家（对手算法可据此判断前车是否在刹车）
+    c.inBrake = Math.max(0, Math.min(2, Number(s.b) | 0));
+    c.inUp = !!s.u;
+    c.inSteer = Math.max(-1, Math.min(1, Number(s.s) || 0));
+    const near = nearestIndex(c.x, c.y, c.nearIdx >= 0 ? c.nearIdx : -1);
+    c.nearIdx = near.i; c.trackS = near.s;   // AI 避让感知需要
+    g.lastAt = now;
+  }
+
+  // 玩家认输 / 放弃比赛
+  forfeitPlayer(sid) {
+    const g = this.ghosts.get(sid);
+    if (!g || this.finishReports.has(sid)) return;
+    g.forfeited = true;
+    g.car.finished = true;
+    g.car.forfeited = true;
+    this.finishReports.set(sid, {
+      totalMs: 9999999,
+      bestLapMs: Math.round(g.car.best || 0),
+      laps: Math.max(0, (g.car.lap || 1) - 1),
+      valid: false,
+      forfeited: true,
+    });
+  }
+
+  // 玩家完赛上报（本地计时）；服务器做合理性校验
+  reportFinish(sid, r) {
+    const g = this.ghosts.get(sid);
+    if (!g || this.finishReports.has(sid)) return;
+    const minLap = TRACK_MIN_LAP_MS[this.room.trackId] ?? DEFAULT_MIN_LAP_MS;
+    const totalMs = Math.round(Number(r.totalMs) || 0);
+    const bestLapMs = Math.round(Number(r.bestLapMs) || 0);
+    const laps = Math.max(1, Math.round(Number(r.laps)) || 1);
+    const valid = bestLapMs >= minLap * 0.9 && totalMs >= laps * minLap * 0.9;
+    this.finishReports.set(sid, { totalMs, bestLapMs, laps, valid });
+    g.car.finished = true;
+    g.car.total = totalMs;
+    g.car.best = bestLapMs;
+  }
+
+  tick(dt, now) {
+    activateContext(this.trackCtx);   // 多房间轮流 tick：切到本房间赛道（缓存下 O(1)）
+
+    if (this.race.state === "countdown") {
+      this.race.countdown -= dt;
+      if (this.race.countdown <= 0) {
+        this.race.state = "racing";
+        this.race.raceStart = now;
+        for (const e of this.aiEntries) {
+          e.car.raceStart = now;
+          e.car.lapStart = now;   // 圈速从绿灯起算
+        }
+      }
+      return;
+    }
+    if (this.race.state !== "racing") return;
+
+    // AI 车本地模拟；人类幽灵作为感知对象参与避让（无实体碰撞）
+    // 完赛车辆已幽灵化：不再作为避让/跟车目标，避免堵住仍在比赛的车
+    const carList = this._carList;
+    carList.length = 0;
+    for (const e of this.aiEntries) if (!e.car.finished) carList.push(e.car);
+    for (const g of this.ghosts.values()) if (!g.car.finished) carList.push(g.car);
+
+    for (const e of this.aiEntries) {
+      let ctrl;
+      if (e.car.finished) {
+        ctrl = finishedCarInput(e.car, e.aiInput);
+      } else {
+        driveAI(e.car, e.aiInput, dt, carList);
+        ctrl = e.aiInput;
+      }
+      stepCar(e.car, dt, ctrl, FX_STUB);
+      updateCarLap(e.car, now, this.race);
+    }
+    // AI 车之间保持防穿模
+    if (this.aiEntries.length > 1) {
+      resolveCarCollisions(this.aiEntries.map(e => e.car));
+    }
+
+    // AI 车对人类玩家进行单向防穿透处理（保护人类先行权：AI 作为后车追尾时减速并推开，人类坐标与速度严格不修改）
+    if (this.ghosts.size > 0 && this.aiEntries.length > 0) {
+      for (const e of this.aiEntries) {
+        const aiCar = e.car;
+        for (const g of this.ghosts.values()) {
+          const humanCar = g.car;
+          // 完赛车辆幽灵化：已冲线的车不再参与碰撞
+          if (aiCar.finished || humanCar.finished) continue;
+          const geo = getCarDistance(aiCar, humanCar);
+          if (geo.gapFrontRear >= 0 || geo.gapLateral >= 0) continue;
+
+          const dx = humanCar.x - aiCar.x;
+          const dy = humanCar.y - aiCar.y;
+          const dist = Math.hypot(dx, dy) || 1;
+          const nx = dx / dist, ny = dy / dist;
+
+          const pen = Math.min(-geo.gapFrontRear, -geo.gapLateral);
+          const push = Math.min(0.6, Math.max(0.04, pen * 0.6));
+          aiCar.x -= nx * push;
+          aiCar.y -= ny * push;
+
+          // 若 AI 是后车且追尾人类，AI 承担动量损失减速
+          if (Math.abs(geo.sLon) >= Math.abs(geo.dLat) && geo.sLon > 0) {
+            if (aiCar.speed > humanCar.speed) {
+              aiCar.speed -= (aiCar.speed - humanCar.speed) * 0.45;
+            }
+          } else {
+            aiCar.speed *= 0.995;
+          }
+        }
+      }
+    }
+
+    // 终局判定：全部人类已上报完赛 且 全部 AI 完赛；或超时 150s
+    if (!this.ended) {
+      const allHumanDone = [...this.ghosts.keys()].every(sid => this.finishReports.has(sid));
+      const allAIDone = this.aiEntries.every(e => e.car.finished);
+      const timeout = now - this.race.raceStart > 150000;
+      if ((allHumanDone && allAIDone) || timeout) {
+        this.ended = true;
+        this.race.state = "finished";
+      }
+    }
+  }
+
+  // 快照：AI 权威状态 + 人类中继状态
+  snapshot() {
+    const carSnap = (c) => ({
+      x: Math.round(c.x * 10) / 10,
+      y: Math.round(c.y * 10) / 10,
+      a: Math.round(c.angle * 1000) / 1000,
+      v: Math.round(c.speed * 10) / 10,
+      lap: c.lap,
+      rd: Math.round(c.raceDist || 0),
+      fin: c.finished ? 1 : 0,
+      tot: Math.round(c.total || 0),
+      best: c.best ? Math.round(c.best) : 0,
+      // 踏板状态（AI 来自本地模拟，玩家来自 car_state 上报）
+      b: c.inBrake | 0,
+      u: c.inUp ? 1 : 0,
+      s: Math.round((c.inSteer || 0) * 100) / 100,
+    });
+    return {
+      t: "snapshot",
+      tick: this.tickNo++,
+      state: this.race.state,
+      countdown: Math.max(0, Math.ceil(this.race.countdown || 0)),
+      cars: [
+        ...[...this.ghosts.values()].map(g => ({ i: g.sid, ...carSnap(g.car) })),
+        ...this.aiEntries.map(e => ({ i: "ai:" + e.car.algorithm, ...carSnap(e.car) })),
+      ],
+    };
+  }
+
+  // 最终排名：已上报完赛按总时；未上报按最后已知进度
+  results() {
+    const rows = [];
+    for (const g of this.ghosts.values()) {
+      const rep = this.finishReports.get(g.sid);
+      const isForfeited = !!(g.forfeited || rep?.forfeited);
+      rows.push({
+        sessionId: g.sid,
+        nickname: g.nickname,
+        shortName: g.shortName,
+        color: g.color,
+        finished: isForfeited ? false : !!rep,
+        forfeited: isForfeited,
+        valid: rep && !isForfeited ? rep.valid : 0,
+        totalMs: rep ? rep.totalMs : Math.round(g.car.total || 0),
+        bestLapMs: rep ? rep.bestLapMs : Math.round(g.car.best || 0),
+        laps: rep ? rep.laps : Math.min((g.car.lap || 1) - 1, this.maxLaps),
+        raceDist: g.car.raceDist || 0,
+      });
+    }
+    for (const e of this.aiEntries) {
+      const c = e.car;
+      rows.push({
+        sessionId: null,
+        nickname: c.nickname,
+        shortName: c.shortName,
+        color: c.color,
+        finished: !!c.finished,
+        valid: 1,
+        totalMs: Math.round(c.total || 0),
+        bestLapMs: c.best ? Math.round(c.best) : 0,
+        laps: Math.min((c.lap || 1) - 1, this.maxLaps),
+        raceDist: c.raceDist || 0,
+      });
+    }
+    rows.sort((a, b) => {
+      if (a.forfeited !== b.forfeited) return a.forfeited ? 1 : -1;
+      if (a.finished !== b.finished) return a.finished ? -1 : 1;
+      if (a.finished) {
+        // 合理性校验未通过的成绩（客户端乱报/改车）排在所有有效成绩之后，
+        // 不能靠"报一个更快的总时"直接拿冠军
+        const av = a.valid ? 1 : 0, bv = b.valid ? 1 : 0;
+        if (av !== bv) return bv - av;
+        return a.totalMs - b.totalMs;
+      }
+      return b.raceDist - a.raceDist;
+    });
+    return rows.map((r, i) => ({ ...r, rank: i + 1 }));
+  }
+}

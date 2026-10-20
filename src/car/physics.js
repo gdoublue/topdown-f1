@@ -1,6 +1,6 @@
 // 赛车物理：加减速、转向（抓地极限模型）、路面判定、轮胎印与粒子
 import { PHYS } from "../config.js";
-import { WORLD, pts, N, nor, tan, hw, cumDist, LAP_LENGTH, isLinear } from "../track/geometry.js";
+import { WORLD, pts, N, nor, tan, hw, cumDist, LAP_LENGTH, isLinear, kerbFlag } from "../track/geometry.js";
 import { clamp } from "../utils.js";
 
 // 沿赛道中心线计算发车格精确坐标：
@@ -84,6 +84,8 @@ export function createCar(gridPos = 0) {
     idx: slot.idx, nearIdx: slot.idx,
     prevSpeed: 0, accel: 0,
     braking: false, shake: 0,
+    // 上一步的原始控制量（供对手算法 / 刹车灯 / 遥测读取）
+    inUp: false, inBrake: 0, inSteer: 0,
     gLon: 0, gLat: 0, gTotal: 0,
     gridPos,
     raceDist: raceDist0,
@@ -295,10 +297,27 @@ export function finishedCarInput(car, aiCtrl) {
 }
 
 export function stepCar(car, dt, input, fx) {
+  // 记录本步原始控制量：对手算法可据此判断前车是否在刹车 / 给油（模拟真实赛道信息），
+  // 渲染层也用它点亮刹车灯；在线对战由服务器快照中继。
+  car.inUp = !!input.up;
+  car.inBrake = input.brake | 0;
+  car.inSteer = typeof input.steer === "number"
+    ? clamp(input.steer, -1, 1)
+    : (input.right ? 1 : 0) - (input.left ? 1 : 0);
+
   const near = nearestIndex(car.x, car.y, car.nearIdx);
   const d = near.d;
   const hwHere = hw[near.i];
-  const surf = d < hwHere - 1 ? 0 : (d < hwHere + 1.5 ? 1 : 2);   // 0 沥青 1 路肩 2 草地
+  // 0 沥青 1 路肩 2 草地：判定与画面严格对应
+  // · 白线以内：沥青
+  // · 只有画了红白路缘石的路段（kerbFlag，直线冲刺赛道全程）才有路肩带，宽 1.5m
+  // · 其余位置出白线 0.4m 容差后立刻是草地（不再有"说不出是什么"的过渡带）
+  const kerbHere = isLinear || kerbFlag[near.i] === 1;
+  let surf;
+  if (d < hwHere) surf = 0;
+  else if (kerbHere) surf = d < hwHere + 1.5 ? 1 : 2;
+  else surf = d < hwHere + 0.4 ? 0 : 2;
+  car.surf = surf;   // 供 HUD 判断是否冲出赛道
 
   stepLongitudinal(car, dt, input, surf);
 
@@ -312,9 +331,17 @@ export function stepCar(car, dt, input, fx) {
     ? clamp(input.steer, -1, 1)
     : (input.right ? 1 : 0) - (input.left ? 1 : 0);
 
-  // 抓地极限转向：最大侧向加速度 latGrip → ω = latGrip / v（低速另有上限）
+  // 摩擦圆（椭圆）：纵向已经消耗的抓地会挤占横向可用抓地
+  //   (a_lon / a_lonMax)² + (a_lat / a_latMax)² ≤ 1
+  // 满油/滑行的纵向加速度远小于制动，所以主要惩罚"边重刹边满舵"，
+  // 轻刹（45%）仍保留 ~89% 横向抓地，不会破坏循迹刹车手感。
+  const longMax = PHYS.brake * (perf.brakeMult ?? 1);
+  const usedLong = Math.min(1, Math.abs(car.accel) / Math.max(1, longMax));
+  const latAvail = latGrip * Math.sqrt(Math.max(PHYS.frictionLatFloor, 1 - usedLong * usedLong));
+
+  // 抓地极限转向：最大侧向加速度 latAvail → ω = latAvail / v（低速另有上限）
   // 必须有速度才能转向：0→3 m/s 线性生效，原地无法转向
-  const omega = Math.min(maxOmega, latGrip / Math.max(spd, 1))
+  const omega = Math.min(maxOmega, latAvail / Math.max(spd, 1))
     * Math.min(1, spd / 3)
     * (surf === 2 ? 0.74 : 1);
   car.angle += steerIn * omega * dt * (car.speed < -1 ? -1 : 1);
@@ -431,12 +458,25 @@ export const CAR_WIDTH = 2.0;
 export function getCarDistance(carA, carB) {
   const dx = carB.x - carA.x;
   const dy = carB.y - carA.y;
-  const cosA = Math.cos(carA.angle);
-  const sinA = Math.sin(carA.angle);
 
-  // 投影到 carA 航向坐标系
-  const sLon = dx * cosA + dy * sinA;   // 纵向距离：>0 表示 carB 在 carA 车头前方
-  const dLat = -dx * sinA + dy * cosA;  // 侧向距离：垂直偏移
+  // 统一到"两车平均航向"坐标系：交换 A/B 时 sLon / dLat 严格取反，
+  // 追尾 / 侧碰的判定不再取决于数组顺序。
+  // （旧版把两车都投影到 carA 的航向，斜向接触时可能把后车判成前车，
+  //   导致被追尾的一方反而承担 45% 的动量损失）
+  let fx = Math.cos(carA.angle) + Math.cos(carB.angle);
+  let fy = Math.sin(carA.angle) + Math.sin(carB.angle);
+  const fl = Math.hypot(fx, fy);
+  if (fl < 0.35) {
+    // 近乎对头 / 对尾泊车：平均航向退化，退回 carA 航向（此时前后关系本就模糊）
+    fx = Math.cos(carA.angle);
+    fy = Math.sin(carA.angle);
+  } else {
+    fx /= fl;
+    fy /= fl;
+  }
+
+  const sLon = dx * fx + dy * fy;   // 纵向距离：>0 表示 carB 在 carA 前方
+  const dLat = -dx * fy + dy * fx;  // 侧向距离：垂直偏移
 
   // 车头到车尾真实净空隙（扣除各自 2.8m 车身半长，共 5.6m）
   const gapFrontRear = Math.abs(sLon) - CAR_LENGTH;
@@ -448,6 +488,14 @@ export function getCarDistance(carA, carB) {
 
 /**
  * 多车物理碰撞分离处理：防止车头穿透前车车尾、防止侧面穿模重叠
+ *
+ * 公平性原则（服务端权威模拟与单机共用）：
+ * 1. 分离方向取两车中心连线（几何对称），不沿任何一方的车头方向推——
+ *    避免攻击者把前车"顶"向自己的行进方向
+ * 2. 前后接触（追尾）：后车承担全部动量损失；被撞车速度严格不变——
+ *    旧版给前车加速 +25% 速度差，弯中被顶会超过弯道抓地极限滑出赛道，
+ *    形成"后车弯中快速撞前车 → 前车上草地减速 → 被超越"的恶意超车漏洞
+ * 3. 侧面并排：双方对称轻微摩擦
  */
 export function resolveCarCollisions(cars) {
   if (!cars || cars.length <= 1) return;
@@ -455,56 +503,40 @@ export function resolveCarCollisions(cars) {
     for (let j = i + 1; j < cars.length; j++) {
       const a = cars[i];
       const b = cars[j];
+      // 完赛车幽灵化：不参与碰撞，避免已冲线的车在赛道上堵住仍在跑的车
+      if (a.finished || b.finished) continue;
       const geo = getCarDistance(a, b);
 
       // 只有在车长与车宽包围盒均重叠时发生接触
-      if (geo.gapFrontRear < 0 && geo.gapLateral < 0) {
-        const overlapX = -geo.gapLateral;
-        const overlapY = -geo.gapFrontRear;
+      if (geo.gapFrontRear >= 0 || geo.gapLateral >= 0) continue;
 
-        const cosA = Math.cos(a.angle);
-        const sinA = Math.sin(a.angle);
+      // 分离方向：两车中心连线单位向量（对双方完全对称）
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      const nx = dx / dist, ny = dy / dist;
 
-        let pushX = 0, pushY = 0;
-        if (overlapY < overlapX * 1.5) {
-          // 前后追尾碰撞：车头顶到前车车尾，平滑弹性推开
-          const signY = geo.sLon >= 0 ? 1 : -1;
-          const pushDist = Math.min(0.8, overlapY * 0.45);
-          pushX = cosA * signY * pushDist;
-          pushY = sinA * signY * pushDist;
+      // 分离量：沿中心连线的较小穿透分量，比例递减保证收敛；上限防止单帧过冲
+      const pen = Math.min(-geo.gapFrontRear, -geo.gapLateral);
+      const push = Math.min(0.6, Math.max(0.04, pen * 0.6)) * 0.5;
+      b.x += nx * push;
+      b.y += ny * push;
+      a.x -= nx * push;
+      a.y -= ny * push;
 
-          // 动量阻尼与冲量传递：后车平缓减速，前车获得冲量被推快
-          if (geo.sLon > 0) {
-            // a 在后，b 在前
-            if (a.speed > b.speed) {
-              const diff = a.speed - b.speed;
-              a.speed -= diff * 0.45;
-              b.speed += diff * 0.25;
-            }
-          } else {
-            // b 在后，a 在前
-            if (b.speed > a.speed) {
-              const diff = b.speed - a.speed;
-              b.speed -= diff * 0.45;
-              a.speed += diff * 0.25;
-            }
-          }
-        } else {
-          // 侧面并排擦碰：沿横向平滑分离
-          const signX = geo.dLat >= 0 ? 1 : -1;
-          const pushDist = Math.min(0.4, overlapX * 0.4);
-          pushX = -sinA * signX * pushDist;
-          pushY = cosA * signX * pushDist;
-
-          // 侧面擦碰轻微摩擦阻尼
-          a.speed *= 0.995;
-          b.speed *= 0.995;
+      if (Math.abs(geo.sLon) >= Math.abs(geo.dLat)) {
+        // 前后接触（追尾/顶撞）：动量损失全部由更快的一方（后车）承担
+        const rearIsA = geo.sLon >= 0;   // sLon>0: b 在 a 前方 → a 是后车
+        const rear = rearIsA ? a : b;
+        const front = rearIsA ? b : a;
+        if (rear.speed > front.speed) {
+          const diff = rear.speed - front.speed;
+          rear.speed -= diff * 0.45;
+          // front.speed 保持不变：被追尾不加速（弯中不会超极限滑出）、不减速
         }
-
-        b.x += pushX * 0.5;
-        b.y += pushY * 0.5;
-        a.x -= pushX * 0.5;
-        a.y -= pushY * 0.5;
+      } else {
+        // 侧面并排擦碰：双方对称轻微摩擦阻尼
+        a.speed *= 0.995;
+        b.speed *= 0.995;
       }
     }
   }

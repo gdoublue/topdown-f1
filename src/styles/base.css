@@ -1,0 +1,217 @@
+/* 基础：页面、画布、通用面板、消息层 */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+/* 移动端内核（夸克/UC/部分安卓 Webview）backdrop-filter 每帧采样下层画布会造成闪烁：
+   触屏设备统一禁用；面板本身带 0.9+ 不透明度渐变背景，可读性不受影响 */
+@media (hover: none) and (pointer: coarse) {
+  .panel, .track-modal-overlay, .track-modal-card, .tune-panel,
+  #tunePanel, #carStatusPanel, #miniWrap, #viewTools, #standingsPanel {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+body {
+  margin: 0;
+  background: radial-gradient(circle at 50% 40%, #101926 0%, #070a0f 60%, #04060a 100%);
+  color: #e8eef7;
+  font-family: "Courier New", ui-monospace, SFMono-Regular, Menlo, monospace;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#game {
+  position: relative;
+  /* 全屏铺满：画布尺寸 = 视口尺寸 × devicePixelRatio（resize() 中实时计算） */
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;      /* 移动端动态视口，规避地址栏高度 */
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  overflow: hidden;
+}
+canvas#cv {
+  display: block; width: 100%; height: 100%;
+  transform: translateZ(0);   /* 提升为独立合成层：规避移动端内核与页面混合渲染的闪烁 */
+  outline: none;
+}
+
+#vignette {
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0) 55%, rgba(0,0,0,.34) 100%),
+    repeating-linear-gradient(to bottom, rgba(0,0,0,.05) 0 1px, rgba(0,0,0,0) 1px 3px);
+  /* 不用 mix-blend-mode：夸克/UC 系内核每帧混合读回 canvas 会闪烁；
+     覆盖层全为黑色渐变，普通 alpha 合成视觉几乎一致 */
+}
+
+#hud { position: absolute; inset: 0; pointer-events: none; }
+
+.panel {
+  position: absolute;
+  background: linear-gradient(180deg, rgba(14, 23, 36, 0.94) 0%, rgba(8, 13, 20, 0.90) 100%);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  padding: 8px 12px;
+  font-size: clamp(10px, 1.02vw, 15px);
+  letter-spacing: .08em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
+/* 统一仪表盘头部栏 */
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 5px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid rgba(160, 200, 240, 0.16);
+  font-size: 10px;
+  font-weight: 800;
+  color: #94a3b8;
+  letter-spacing: 0.12em;
+}
+.panel-header small {
+  font-size: 9px;
+  color: #38bdf8;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* 左上角小地图容器 */
+#miniWrap {
+  left: 16px;
+  top: 16px;
+  width: 226px;
+  padding: 8px 8px 6px;
+  z-index: 10;
+}
+#mini {
+  display: block;
+  width: 210px;
+  height: 135px;
+  border-radius: 6px;
+}
+
+/* 左侧视野工具面板（AI 探测线开关 + 视野缩放系数） */
+#viewTools {
+  left: 16px;
+  top: 205px;
+  width: 196px;
+  padding: 8px 10px 10px;
+  pointer-events: auto;
+  z-index: 10;
+}
+#viewTools .vt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 11px;
+  color: #9fb4c9;
+}
+.vt-name { letter-spacing: 0.04em; }
+.vt-switch {
+  position: relative;
+  width: 38px;
+  height: 18px;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid rgba(120, 150, 180, 0.35);
+  background: rgba(30, 42, 58, 0.9);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.vt-switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #7f97b0;
+  transition: all 0.18s ease;
+}
+.vt-switch.on {
+  background: rgba(0, 255, 180, 0.2);
+  border-color: rgba(0, 255, 180, 0.65);
+}
+.vt-switch.on i {
+  left: 20px;
+  background: #00ffb4;
+  box-shadow: 0 0 8px rgba(0, 255, 180, 0.7);
+}
+#zoomRange {
+  width: 92px;
+  accent-color: #00e5ff;
+  cursor: pointer;
+}
+.speed-chips { display: flex; gap: 4px; }
+.speed-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.speed-chip:hover { color: #e2e8f0; border-color: #00e5ff; }
+.speed-chip.active {
+  color: #022c22;
+  background: #00e5ff;
+  border-color: #00e5ff;
+}
+#zoomVal {
+  color: #ffd166;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.vt-mini {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #cbd5e1;
+  border-radius: 5px;
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.vt-mini:hover {
+  background: rgba(0, 229, 255, 0.16);
+  border-color: #00e5ff;
+  color: #fff;
+}
+
+#stats { right: 16px; top: 88px; min-width: 152px; }
+#stats .row { display: flex; justify-content: space-between; gap: 14px; }
+#stats .row span { color: #7f97b0; }
+#stats .row b { color: #f2f7ff; font-weight: 700; }
+#stats .row b.hi { color: #ffd166; }
+
+#speedo {
+  right: 16px; top: 16px;
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 6px 14px 8px;
+}
+#speedo b {
+  font-size: clamp(26px, 3.2vw, 46px);
+  line-height: 1;
+  color: #ffd166;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 18px rgba(255, 200, 80, .35);
+  min-width: 2ch; text-align: right;
+}
+#speedo span { font-size: clamp(9px, .95vw, 13px); color: #8aa2ba; letter-spacing: .14em; }
+

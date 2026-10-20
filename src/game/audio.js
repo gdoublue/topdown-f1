@@ -180,6 +180,23 @@ export function lapSound() {                                          // 过圈
   playClip(LAP_ROTATION[lapIdx++ % LAP_ROTATION.length], 4, 0.18);
 }
 
+// 碰撞与擦碰音效（沉闷阻尼冲击）
+export function bumpSound() {
+  if (!ready) return;
+  try {
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = "triangle";
+    o.frequency.setValueAtTime(150, actx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(35, actx.currentTime + 0.12);
+    g.gain.setValueAtTime(0.24, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.12);
+    o.connect(g).connect(master);
+    o.start();
+    o.stop(actx.currentTime + 0.13);
+  } catch (e) {}
+}
+
 // 调试/测试用状态
 export function audioState() {
   return { ready, started, muted, rpm: Math.round(rpm * 100) / 100, music: bgOn };

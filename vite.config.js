@@ -17,6 +17,7 @@ export default defineConfig({
       input: {
         main: "index.html",
         test: "test.html",
+        docs: "autopilot-doc.html",
       },
     },
   },

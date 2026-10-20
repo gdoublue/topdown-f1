@@ -1,21 +1,33 @@
-import { TOTAL_LAPS } from "../config.js";
+import { TOTAL_LAPS, effectiveLaps } from "../config.js";
 import { N, currentTrack, LAP_LENGTH } from "../track/geometry.js";
 
-export const race = {
-  state: "countdown",     // countdown | racing | finished
-  countdown: 3.0,
-  lap: 1,
-  best: null, last: null, total: 0,
-  half: false,
-  raceStart: 0, lapStart: 0
-};
+// 比赛状态工厂：服务端每个房间创建独立实例；浏览器沿用下方全局单例 race
+export function createRaceState() {
+  return {
+    state: "countdown",   // countdown | racing | finished
+    countdown: 3.0,
+    lap: 1,
+    best: null, last: null, total: 0,
+    half: false,
+    raceStart: 0, lapStart: 0
+  };
+}
 
-export function resetRace() {
-  race.state = "countdown";
-  race.countdown = 3.0;
-  race.lap = 1;
-  race.best = null; race.last = null; race.total = 0;
-  race.half = false;
+export const race = createRaceState();
+
+/* ================= 比赛模拟时钟 =================
+   圈速/总时唯一时间源：由主循环按实际推进的 dt 累加（倍速下与物理同步），
+   不能用 performance.now()——否则 2× 快进跑出的 90s 圈会被记成 45s。 */
+export let simClock = 0;   // 毫秒
+export function resetSimClock(v = 0) { simClock = v; }
+export function advanceSimClock(ms) { if (ms > 0) simClock += ms; }
+
+export function resetRace(r = race) {
+  r.state = "countdown";
+  r.countdown = 3.0;
+  r.lap = 1;
+  r.best = null; r.last = null; r.total = 0;
+  r.half = false;
 }
 
 // 倒计时推进；返回 "go" 表示刚开始比赛，否则返回当前应显示的数字
@@ -23,7 +35,7 @@ export function tickCountdown(dt) {
   race.countdown -= dt;
   if (race.countdown <= 0) {
     race.state = "racing";
-    race.raceStart = race.lapStart = performance.now();
+    race.raceStart = race.lapStart = simClock;
     return "go";
   }
   return String(Math.max(1, Math.ceil(race.countdown)));
@@ -44,11 +56,11 @@ export function initCarRaceState(car, now = performance.now()) {
   }
 }
 
-// 多车独立计圈判定
-export function updateCarLap(car, now = performance.now()) {
+// 多车独立计圈判定（r: 比赛状态实例，服务端每房间独立；缺省用全局单例）
+export function updateCarLap(car, now = performance.now(), r = race) {
   const prev = car.idx;
   car.idx = car.nearIdx;
-  if (race.state !== "racing" || car.finished) return null;
+  if (r.state !== "racing" || car.finished) return null;
 
   // 线性赛道：抵达终点线（比赛里程）即单程完赛；终点后方为缓冲区
   if (currentTrack.linear) {
@@ -59,7 +71,7 @@ export function updateCarLap(car, now = performance.now()) {
       car.lapTimes.push(car.last);
       if (car.best == null || car.last < car.best) car.best = car.last;
       car.lap = (car.lap || 1) + 1;
-      const raceT = car.raceStart != null ? car.raceStart : (race.raceStart != null ? race.raceStart : 0);
+      const raceT = car.raceStart != null ? car.raceStart : (r.raceStart != null ? r.raceStart : 0);
       car.total = now - raceT;
       car.finished = true;
       car.raceDist = currentTrack.length;
@@ -78,10 +90,10 @@ export function updateCarLap(car, now = performance.now()) {
     car.lapStart = now;
     car.half = false;
     car.lap = (car.lap || 1) + 1;
-    const maxLaps = currentTrack?.laps || TOTAL_LAPS;
+    const maxLaps = effectiveLaps(currentTrack?.laps);
     const lapLen = LAP_LENGTH || 5000;
     if (car.lap > maxLaps) {
-      const raceT = car.raceStart != null ? car.raceStart : (race.raceStart != null ? race.raceStart : 0);
+      const raceT = car.raceStart != null ? car.raceStart : (r.raceStart != null ? r.raceStart : 0);
       car.total = now - raceT;
       car.finished = true;
       car.raceDist = maxLaps * lapLen;

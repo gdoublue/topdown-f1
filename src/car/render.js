@@ -3,6 +3,142 @@ import { M } from "../config.js";
 import { TAU, rrect } from "../utils.js";
 
 // 赛车涂装配色表：键为车型代号（与 AI_CONFIGS 的 livery 字段对应）
+// 随机赛车涂装配色板（同车竞技/同车型防撞色，包含全部颜色点位）
+export const RANDOM_LIVERY_PALETTES = [
+  {
+    name: "烈焰红金",
+    grad: ["#ff4d4d", "#d90429", "#8b0000"],
+    side: "#b91c1c",
+    wing: "#ffd166",
+    stripe: "rgba(255,255,255,.9)",
+    helmet: "#ffd166",
+    numColor: "#ffffff",
+    color: "#ef233c",
+  },
+  {
+    name: "海湾蓝橙",
+    grad: ["#7dd3fc", "#0284c7", "#075985"],
+    side: "#ea580c",
+    wing: "#f97316",
+    stripe: "rgba(249,115,22,.95)",
+    helmet: "#fb923c",
+    numColor: "#ffffff",
+    color: "#0284c7",
+  },
+  {
+    name: "曜石黑金",
+    grad: ["#334155", "#0f172a", "#020617"],
+    side: "#d97706",
+    wing: "#f59e0b",
+    stripe: "rgba(245,158,11,.92)",
+    helmet: "#fbbf24",
+    numColor: "#fde047",
+    color: "#d97706",
+  },
+  {
+    name: "赛博霓虹",
+    grad: ["#22d3ee", "#06b6d4", "#0e7490"],
+    side: "#ec4899",
+    wing: "#f43f5e",
+    stripe: "rgba(244,63,94,.92)",
+    helmet: "#f43f5e",
+    numColor: "#ffffff",
+    color: "#ec4899",
+  },
+  {
+    name: "极速翠绿",
+    grad: ["#34d399", "#059669", "#064e3b"],
+    side: "#047857",
+    wing: "#ffffff",
+    stripe: "rgba(255,255,255,.9)",
+    helmet: "#f97316",
+    numColor: "#ffffff",
+    color: "#10b981",
+  },
+  {
+    name: "熔岩火橙",
+    grad: ["#fb923c", "#ea580c", "#9a3412"],
+    side: "#18181b",
+    wing: "#0f172a",
+    stripe: "rgba(255,255,255,.9)",
+    helmet: "#fde047",
+    numColor: "#ffffff",
+    color: "#ea580c",
+  },
+  {
+    name: "紫电幻影",
+    grad: ["#c084fc", "#9333ea", "#581c87"],
+    side: "#84cc16",
+    wing: "#a3e635",
+    stripe: "rgba(163,230,53,.9)",
+    helmet: "#bef264",
+    numColor: "#ffffff",
+    color: "#a855f7",
+  },
+  {
+    name: "钛银冰蓝",
+    grad: ["#ffffff", "#cbd5e1", "#475569"],
+    side: "#06b6d4",
+    wing: "#0891b2",
+    stripe: "rgba(6,182,212,.95)",
+    helmet: "#38bdf8",
+    numColor: "#0f172a",
+    color: "#0891b2",
+  },
+  {
+    name: "荧光战蜂",
+    grad: ["#fef08a", "#eab308", "#854d0e"],
+    side: "#18181b",
+    wing: "#09090b",
+    stripe: "rgba(15,23,42,.9)",
+    helmet: "#0284c7",
+    numColor: "#0f172a",
+    color: "#eab308",
+  },
+  {
+    name: "白红经典",
+    grad: ["#ffffff", "#f1f5f9", "#e2e8f0"],
+    side: "#dc2626",
+    wing: "#ef4444",
+    stripe: "rgba(220,38,38,.9)",
+    helmet: "#b91c1c",
+    numColor: "#dc2626",
+    color: "#e11d48",
+  },
+  {
+    name: "极地冰霜",
+    grad: ["#e0f2fe", "#7dd3fc", "#0369a1"],
+    side: "#fb7185",
+    wing: "#f43f5e",
+    stripe: "rgba(251,113,133,.9)",
+    helmet: "#fda4af",
+    numColor: "#0f172a",
+    color: "#38bdf8",
+  },
+  {
+    name: "毒液暗夜",
+    grad: ["#27272a", "#18181b", "#09090b"],
+    side: "#ef4444",
+    wing: "#dc2626",
+    stripe: "rgba(239,68,68,.9)",
+    helmet: "#ef4444",
+    numColor: "#ef4444",
+    color: "#ef4444",
+  },
+];
+
+// 根据序号生成不重复的随机涂装与颜色点位
+export function getRandomLivery(slotIdx = 0, defaultNum = null) {
+  const p = RANDOM_LIVERY_PALETTES[(slotIdx * 3 + 1) % RANDOM_LIVERY_PALETTES.length];
+  // 车号点位生成：若未指定则依据发车格或随机点位
+  const numList = ["1", "16", "44", "55", "11", "81", "4", "63", "7", "9", "23", "77"];
+  const num = defaultNum || numList[slotIdx % numList.length] || String(slotIdx + 1);
+  return {
+    ...p,
+    num,
+  };
+}
+
 export const CAR_LIVERIES = {
   ferrari: {           // 法拉利 SF-24
     grad: ["#ff6b6b", "#e02424", "#991b1b"],
@@ -72,7 +208,8 @@ export const CAR_LIVERIES = {
 };
 
 export function drawCar(g, car, liveryKey = "ferrari") {
-  const livery = CAR_LIVERIES[car.livery || liveryKey] || CAR_LIVERIES.ferrari;
+  const baseLivery = CAR_LIVERIES[car.livery || liveryKey] || CAR_LIVERIES.ferrari;
+  const livery = car.customLivery ? { ...baseLivery, ...car.customLivery } : baseLivery;
 
   g.save();
   g.translate(car.x, car.y);
@@ -102,8 +239,8 @@ export function drawCar(g, car, liveryKey = "ferrari") {
   rrect(g, -2.88, -0.76, 0.55, 0.17, 0.05); g.fill();
   rrect(g, -2.88, 0.59, 0.55, 0.17, 0.05); g.fill();
 
-  // 刹车灯
-  if (car.braking) {
+  // 刹车灯（本地车看物理状态，远端车看快照中继的踏板输入）
+  if (car.braking || car.inBrake > 0) {
     g.fillStyle = "rgba(255,60,60,.35)";
     rrect(g, -3.05, -0.52, 0.46, 0.32, 0.1); g.fill();
     rrect(g, -3.05, 0.2, 0.46, 0.32, 0.1); g.fill();
@@ -260,11 +397,12 @@ function drawRoadBody(g, car, livery) {
   rrect(g, -2.48, -0.8, 0.14, 1.6, 0.06); g.fill();
 
   // 贯穿式尾灯（EV 标志性设计，刹车时高亮泛光）
-  if (car.braking) {
+  const braking = car.braking || car.inBrake > 0;
+  if (braking) {
     g.fillStyle = "rgba(255,69,58,.32)";
     rrect(g, -2.72, -0.95, 0.48, 1.9, 0.12); g.fill();
   }
-  g.fillStyle = car.braking ? "#ff453a" : livery.wing;
+  g.fillStyle = braking ? "#ff453a" : livery.wing;
   rrect(g, -2.56, -0.82, 0.16, 1.64, 0.07); g.fill();
 
   // 封闭式玻璃座舱
