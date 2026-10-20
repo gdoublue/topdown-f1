@@ -6,7 +6,7 @@ export const SERVER_CONFIG = {
   // 模拟节奏（P3 房间对战启用；当前骨架阶段仅占位）
   simTickHz: 30,          // 权威物理步频
   snapshotHz: 30,         // 快照广播频率（每个物理 tick 一包，包小但节奏均匀）
-  inputHz: 20,            // 客户端输入上行频率（约定值）
+  inputHz: 30,            // 客户端输入上行频率（与快照同频，保证每个 tick 都有新坐标）
 
   // 房间限制
   maxPlayersPerRoom: 8,

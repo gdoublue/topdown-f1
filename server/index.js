@@ -10,7 +10,7 @@ import { loadDb, flushDb } from "./db/store.js";
 import { registerPlayer } from "./core/session.js";
 import { submitLapRecord, getLeaderboardView } from "./services/leaderboard.js";
 import { listRooms } from "./core/roomManager.js";
-import { attachGateway } from "./net/gateway.js";
+import { attachGateway, broadcastBoards } from "./net/gateway.js";
 
 loadDb();
 
@@ -49,6 +49,8 @@ const server = http.createServer((req, res) => {
           source: "solo_practice",
         });
         json(200, { ok: true, validated: !!rec.validated, recordId: rec.id });
+        // 新成绩写入 → 在线用户的排行榜即时刷新
+        if (rec.validated) broadcastBoards(d.trackId);
       } catch (e) {
         json(400, { ok: false, error: e.message });
       }

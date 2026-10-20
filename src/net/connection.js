@@ -26,7 +26,12 @@ export const conn = {
         if (u.pathname === "/" || u.pathname === "") url = url.replace(/\/+$/, "") + "/ws";
       } catch { /* 由浏览器负责报错 */ }
       this.url = url;
-      this.httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "");
+      // REST 基地址取同源 origin（不能把 /ws 网关路径拼进去）
+      try {
+        this.httpBase = new URL(url.replace(/^ws/, "http")).origin;
+      } catch {
+        this.httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "");
+      }
       this.status = "connecting";
       ws = new WebSocket(url);
 

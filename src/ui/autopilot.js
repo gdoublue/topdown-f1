@@ -12,6 +12,7 @@ import {
   DS, lineX, lineY, wrapAngle, getSuperCornerCap,
   evaluateTrafficAndOvertake, superDriver
 } from "../game/ai.js";
+import { getApexReleaseCap } from "../game/geminiDriver.js";
 import { PHYS, effectiveLaps } from "../config.js";
 import { clamp } from "../utils.js";
 import { CAR_LENGTH, CAR_WIDTH, getCarDistance } from "../car/physics.js";
@@ -66,7 +67,8 @@ const TRACK_API = {
 const API_PARAMS = [
   "N", "pts", "nor", "hw", "curvS", "lineX", "lineY", "DS", "PHYS",
   "clamp", "wrapAngle", "getSuperCornerCap", "evaluateTrafficAndOvertake",
-  "CAR_LENGTH", "CAR_WIDTH", "getCarDistance", "superDriver", "track"
+  "CAR_LENGTH", "CAR_WIDTH", "getCarDistance", "superDriver", "track",
+  "getApexReleaseCap"
 ];
 
 let enabled = false;
@@ -100,7 +102,7 @@ function compile(src) {
   const fn = factory(
     N, pts, nor, hw, curvS, lineX, lineY, DS, PHYS,
     clamp, wrapAngle, getSuperCornerCap, evaluateTrafficAndOvertake,
-    CAR_LENGTH, CAR_WIDTH, getCarDistance, superDriver, TRACK_API
+    CAR_LENGTH, CAR_WIDTH, getCarDistance, superDriver, TRACK_API, getApexReleaseCap
   );
   if (typeof fn !== "function") throw new Error("没有找到 driver(car, out, dt, otherCars) 函数（函数名必须是 driver）");
   return fn;

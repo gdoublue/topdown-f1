@@ -1,969 +1,508 @@
-// ==UserScript==
-// @name         Topdown F1 · 最优自动驾驶 (AI Autopilot)
-// @namespace    https://gdoublue.github.io/topdown-f1/
-// @version      1.0.0
-// @description  为 https://gdoublue.github.io/topdown-f1/ 提供时间最优自动驾驶：最小曲率赛车线 + 抓地/转向极限弯速表 + 双向速度包络 + 纯追踪转向 + 自动超车
-// @author       autopilot
-// @match        https://gdoublue.github.io/topdown-f1/*
-// @run-at       document-idle
-// @grant        none
-// @noframes
-// ==/UserScript==
+// 入口函数：ApexPredator 动态攻防自动驾驶算法
+const driver = function apexPredatorDriver(car, out, dt, otherCars) {
+  const isLinear = !!(typeof track !== 'undefined' && track.isLinear);
+  const stepIdx = (base, step) => isLinear
+      ? clamp(base + step, 0, N - 1)
+      : (((base + step) % N) + N) % N;
 
-(function () {
-  'use strict';
-  // 防重复注入（Tampermonkey 偶发重载 / 手动多次 eval 时避免叠加面板与双重 tick）
-  if (window.__f1ai_loaded) return;
-  window.__f1ai_loaded = true;
+  const idx = car.nearIdx % N;
+  const v = Math.abs(car.speed);
+  const perf = car.perf || {};
+  const latGrip = perf.latGrip ?? PHYS.latGrip;
+  const maxOmega = perf.maxOmega ?? PHYS.maxOmega;
+  const cornerCap = getSuperCornerCap(perf);
+  const hasKerbArr = (typeof track !== 'undefined' && track.kerbFlag) ? track.kerbFlag : null;
 
-  /* =====================================================================
-   *  算法总览（时间最优）
-   *  本作物理模型没有"驱动/转向联合摩擦损失"：
-   *    · 转向角速度 ω = min(maxOmega, latGrip / v) * steer
-   *    · 纵向制动 61.6 * brakeMult，油门按 accelCurve 衰减
-   *  因此时间最优解可以严格分解为：
-   *    1) 在赛道走廊内求最小曲率赛车线（投影梯度 / 拉普拉斯松弛）
-   *    2) 弯速上限 v = min(vmax, sqrt(aLat/κ), maxOmega/κ)
-   *    3) 沿赛车线做"后向刹车传播 + 前向加速传播"，得到逐点最大可行速度包络
-   *    4) 实时用纯追踪生成转向（在线上时纯追踪曲率精确等于路径曲率），
-   *       纵向按包络 bang-bang 给油/刹车
-   * ===================================================================== */
+  /* ==== 0. 状态记忆初始化 ==== */
+  if (car._apInit == null) {
+    car._apInit = true;
+    car._stuckT = 0;
+    car._revT = 0;
+    car._moved = false;
+    car._tacLat = 0;         // 平滑后的战术横向偏移（相对于中心线）
+    car._otSide = 0;         // 超车锁定方向 (-1左 / +1右)
+    car._otLockT = 0;        // 超车方向锁定时长
+    car._blockT = 0;         // 被前车阻挡累计时间
+    car._defendMode = false; // 当前是否处于防守状态
+  }
 
-  // ======================= CORE START =======================
-  const CAR_LEN = 5.6;           // 车身长（米），与游戏 physics.js 一致
-  const CAR_WID = 2.0;           // 车身宽（米）
-  const PHYS = {
-    accelCurve: [[0, 11.6], [28, 11.0], [56, 8.5], [78.4, 5.5], [100, 1.5]],
-    brake: 61.6,
-    lightBrakeFactor: 0.45,
-    latGrip: 45,
-    maxOmega: 3.4,
-    maxSpeed: [100, 90, 33.6]
+  /* ==== 1. 脱困逻辑：碰撞受困快速倒车回正 ==== */
+  if (car._revT > 0) {
+    car._revT -= dt;
+    out.up = false;
+    out.brake = 2;
+    // 倒车时反向打轮帮助车头摆回赛道切线方向
+    const tanAngle = Math.atan2(nor[idx].x, -nor[idx].y);
+    const headingErr = wrapAngle(tanAngle - car.angle);
+    out.steer = clamp(-headingErr * 2.0, -1, 1);
+    out.left = out.steer < -0.05;
+    out.right = out.steer > 0.05;
+    if (car._revT <= 0) car._stuckT = 0;
+    return;
+  }
+  if (v > 3.0) car._moved = true;
+  if (car._moved) {
+    if (v < 1.5) car._stuckT += dt;
+    else car._stuckT = Math.max(0, car._stuckT - dt * 2.5);
+    if (car._stuckT > 2.0) {
+      car._revT = 0.85;
+      return;
+    }
+  }
+
+  /* ==== 2. 自身横向状态与赛道几何特征提取 ==== */
+  const getRaceLat = (i) => (lineX[i] - pts[i].x) * nor[i].x + (lineY[i] - pts[i].y) * nor[i].y;
+  const getSafeHalfWidth = (i, margin) => {
+    const kerbBonus = (hasKerbArr && hasKerbArr[i] === 1) ? 0.65 : 0.0;
+    return Math.max(1.5, hw[i] + kerbBonus - margin);
   };
 
-  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
-  function wrapAngle(a) {
-    while (a > Math.PI) a -= Math.PI * 2;
-    while (a < -Math.PI) a += Math.PI * 2;
-    return a;
+  // 本车当前相对于中心线的横向偏移与横向速度（向右为正）
+  const myLat = (car.x - pts[idx].x) * nor[idx].x + (car.y - pts[idx].y) * nor[idx].y;
+  const myVLat = car.speed * (Math.cos(car.angle) * nor[idx].x + Math.sin(car.angle) * nor[idx].y);
+  const myRaceLat = getRaceLat(idx);
+
+  // 当前与前方曲率分析：识别入弯、弯心、非连续弯道出弯与S弯
+  const curvRaw = curvS[idx];
+  const curvHere = Math.abs(curvRaw);
+  const inCorner = curvHere > 0.0075;
+  const cornerIntensity = clamp((curvHere - 0.0075) / 0.024, 0, 1);
+
+  // 扫描前方 12m ~ 70m 的弯道趋势
+  let maxCurvAhead = 0;
+  let dominantCurvSum = 0;
+  let curv15 = 0, curv30 = 0, curv50 = 0;
+  const step15 = Math.max(1, Math.round(15 / DS));
+  const step30 = Math.max(2, Math.round(30 / DS));
+  const step50 = Math.max(3, Math.round(50 / DS));
+  const step70 = Math.max(4, Math.round(70 / DS));
+
+  for (let s = 1; s <= step70; s++) {
+    const c = curvS[stepIdx(idx, s)];
+    const absC = Math.abs(c);
+    if (absC > maxCurvAhead) maxCurvAhead = absC;
+    if (s >= Math.round(10 / DS) && s <= step50) dominantCurvSum += c;
+    if (s === step15) curv15 = c;
+    if (s === step30) curv30 = c;
+    if (s === step50) curv50 = c;
   }
 
-  /**
-   * 进攻强度档位（0 稳 / 1 均 / 2 猛）：
-   *   gapAdd      : 跟车净空余量（越小贴得越近、刹车越晚）
-   *   insideBonus : 入弯内线超车加分（越大越倾向切内线强吃）
-   *   safeSep     : 与前车的安全横向中心距（越小越敢贴车并排）
-   *   abort       : 超车未成形的放弃时限（越短越果断回线，避免并排缠斗）
-   */
-  const AGGR_PRESETS = [
-    { id: 0, label: '稳', gapAdd: 1.3, insideBonus: 1.6, safeSep: 2.75, abort: 2.4 },
-    { id: 1, label: '均', gapAdd: 1.0, insideBonus: 2.2, safeSep: 2.55, abort: 1.8 },
-    { id: 2, label: '猛', gapAdd: 0.7, insideBonus: 3.0, safeSep: 2.40, abort: 1.2 }
-  ];
+  // 下一个弯道的内线符号：+1 表示右弯（右侧 +off 为内线），-1 表示左弯（左侧 -off 为内线）
+  const nextCornerSign = Math.abs(dominantCurvSum) > 0.02 ? Math.sign(dominantCurvSum) : (curvHere > 0.006 ? Math.sign(curvRaw) : 0);
 
-  /** 满油门纵向加速度：与游戏 physics.js 的 accelAt / evAccelAt 保持一致 */
-  function accelAt(perf, v) {
-    if (perf.powerKW != null) {
-      const P = perf.powerKW * 1000;
-      const m = perf.massKg != null ? perf.massKg : 2200;
-      const vmaxNat = perf.naturalVmax != null ? perf.naturalVmax
-        : (perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0]);
-      const k = P / (m * vmaxNat * vmaxNat * vmaxNat);
-      let a = P / (m * Math.max(v, 2)) - k * v * v;
-      a = Math.min(a, perf.launchAccel != null ? perf.launchAccel : 14.0);
-      return Math.max(a, 0);
-    }
-    const c = PHYS.accelCurve;
-    let a = c[c.length - 1][1];
-    for (let i = 1; i < c.length; i++) {
-      if (v <= c[i][0]) {
-        const v0 = c[i - 1][0], a0 = c[i - 1][1];
-        a = a0 + (c[i][1] - a0) * (v - v0) / (c[i][0] - v0);
-        break;
+  // ★ 非连续弯道出弯判定：当前在弯中，前方 15~30m 曲率显著衰减，且没有紧接高强度反向急弯
+  const isReversingSharp = (curvRaw * curv30 < 0) && Math.abs(curv30) > 0.011;
+  const nonContExit = inCorner && !isReversingSharp && (
+      (Math.abs(curv15) < curvHere * 0.78 && Math.abs(curv30) < curvHere * 0.55) ||
+      (Math.abs(curv15) < 0.0055 && Math.abs(curv30) < 0.0045)
+  );
+  // 纯直道出弯判定
+  const exitStraight = !isReversingSharp && Math.abs(curv15) < 0.005 && Math.abs(curv30) < 0.004 && Math.abs(curv50) < 0.0045;
+
+  /* ==== 3. 全场态势感知：前车意图预判 + 后车威胁扫描 ==== */
+  const lookNear = Math.max(7.5, v * (inCorner ? 0.33 : 0.46));
+  const lookFar  = Math.min(92, (inCorner ? 14 : 18) + v * (inCorner ? 0.52 : 0.76));
+  const lookMid  = (lookNear + lookFar) * 0.48;
+
+  const iNear = stepIdx(idx, Math.round(lookNear / DS));
+  const iMid  = stepIdx(idx, Math.round(lookMid  / DS));
+  const iFar  = stepIdx(idx, Math.round(lookFar  / DS));
+
+  // 先调用内置交通函数作为远端兜底参考
+  const tr = evaluateTrafficAndOvertake(car, otherCars, iFar, dt);
+
+  const aheadCars = [];
+  let leadThreat = null;     // 同车道正前方最危险的前车
+  let closestAhead = null;   // 前方最近的前车（无论横向）
+  let pursuer = null;        // 后方最具威胁的追击车
+  let pursuerScore = -1e9;
+  let sideGuard = 0;         // 并排贴身防撞推力
+  let sideSqueeze = false;
+
+  if (otherCars && otherCars.length > 1) {
+    for (let i = 0; i < otherCars.length; i++) {
+      const o = otherCars[i];
+      if (o === car) continue;
+      const geo = getCarDistance(car, o);
+      if (geo.distCenter > 85) continue;
+
+      const oIdx = (o.nearIdx || 0) % N;
+      const oLat = (o.x - pts[oIdx].x) * nor[oIdx].x + (o.y - pts[oIdx].y) * nor[oIdx].y;
+      const oVLat = o.speed * (Math.cos(o.angle) * nor[oIdx].x + Math.sin(o.angle) * nor[oIdx].y);
+
+      // 预判对手在未来 0.45 秒后的横向位置（结合横向速度与对手方向盘输入 o.inSteer）
+      const predHorizon = clamp(Math.abs(geo.sLon) / Math.max(v, 12), 0.18, 0.65);
+      const oPredLat = oLat + oVLat * predHorizon + (o.inSteer || 0) * 1.45 * predHorizon;
+
+      // 预判对手减速度（读取刹车灯 o.inBrake 与物理加速度 o.accel）
+      const oBrakeDecel = o.inBrake === 2 ? PHYS.brake * 0.85
+          : (o.inBrake === 1 ? PHYS.brake * PHYS.lightBrakeFactor * 0.85 : 0);
+      const oEffDecel = Math.max(oBrakeDecel, -(o.accel || 0));
+
+      const info = { car: o, geo, oLat, oVLat, oPredLat, oEffDecel };
+
+      // A. 贴身并排检测（车身纵向重叠区域）
+      if (Math.abs(geo.sLon) < CAR_LENGTH + 1.6 && Math.abs(geo.dLat) < CAR_WIDTH + 1.45) {
+        if (geo.gapLateral < 0.65) sideSqueeze = true;
+        // 距离越近，侧向避让推力越强
+        const pushMag = clamp(1.2 - geo.gapLateral * 0.5, 0.25, 1.0);
+        sideGuard += (geo.dLat >= 0 ? -1 : 1) * pushMag;
+      }
+
+      // B. 前方车辆收集（含半个车身并排的前车）
+      if (geo.sLon >= -CAR_LENGTH * 0.65 && geo.sLon < 72) {
+        aheadCars.push(info);
+        if (!closestAhead || geo.sLon < closestAhead.geo.sLon) {
+          closestAhead = info;
+        }
+        // 判断是否在我们的行进走廊上构成纵向阻挡
+        const latDiffPred = Math.abs(oPredLat - (myLat + myVLat * 0.25));
+        if (geo.sLon > 0 && (Math.abs(geo.dLat) < CAR_WIDTH + 0.95 || latDiffPred < CAR_WIDTH + 0.85)) {
+          if (!leadThreat || geo.sLon < leadThreat.geo.sLon) {
+            leadThreat = info;
+          }
+        }
+      }
+
+      // C. 后方追击车辆评估（用于智能防守）
+      if (geo.sLon < -CAR_LENGTH * 0.55 && geo.sLon > -38) {
+        const closing = o.speed - v; // 正值表示后车比我们快
+        // 追击威胁分：距离越近、相对速度越快、或正处于入弯刹车区前，威胁越高
+        const distScore = (38 + geo.sLon) * 1.8;
+        const speedScore = closing * 5.5;
+        const cornerBonus = (maxCurvAhead > 0.008 && geo.sLon > -22) ? 18 : 0;
+        const score = distScore + speedScore + cornerBonus;
+        if (score > pursuerScore && (closing > -3.0 || geo.sLon > -16)) {
+          pursuerScore = score;
+          pursuer = info;
+        }
       }
     }
-    if (v > c[c.length - 1][0]) a *= (perf.highSpeedAccel != null ? perf.highSpeedAccel : 1.0);
-    return a * (perf.accelMult != null ? perf.accelMult : 1.0);
   }
 
-  /**
-   * 走廊约束下最小化弯曲能量 Σ|p[i-1]-2p[i]+p[i+1]|²
-   * 欧拉-拉格朗日方程：6p_i = 4(p[i-1]+p[i+1]) - (p[i-2]+p[i+2])
-   * 就地 Gauss-Seidel 迭代 + 走廊投影（off 为相对中心线法向的偏移）
-   */
-  function optimizeLine(off, cx, cy, cnx, cny, M, closed, corridor, iters, relax, blend) {
-    const lam = blend != null ? blend : 1;
-    const XL = new Float64Array(M), YL = new Float64Array(M);
-    for (let i = 0; i < M; i++) {
-      XL[i] = cx[i] + cnx[i] * off[i];
-      YL[i] = cy[i] + cny[i] * off[i];
-    }
-    const at = (i) => closed ? ((i % M) + M) % M : clamp(i, 0, M - 1);
-    for (let it = 0; it < iters; it++) {
-      for (let i = 0; i < M; i++) {
-        const a1 = at(i - 1), a2 = at(i - 2), b1 = at(i + 1), b2 = at(i + 2);
-        const txx = (4 * (XL[a1] + XL[b1]) - (XL[a2] + XL[b2])) / 6;
-        const tyy = (4 * (YL[a1] + YL[b1]) - (YL[a2] + YL[b2])) / 6;
-        // λ=1 最小曲率（外-内-外）；λ=0 最短走线（贴内侧，适合 180° 长弯）
-        const moB = (txx - cx[i]) * cnx[i] + (tyy - cy[i]) * cny[i];
-        const mx = 0.5 * (XL[a1] + XL[b1]), my = 0.5 * (YL[a1] + YL[b1]);
-        const moM = (mx - cx[i]) * cnx[i] + (my - cy[i]) * cny[i];
-        const mo = lam * moB + (1 - lam) * moM;
-        const prev = off[i];
-        let nv = prev + relax * (mo - prev);
-        if (nv < -corridor) nv = -corridor;
-        else if (nv > corridor) nv = corridor;
-        off[i] = nv;
-        XL[i] = cx[i] + cnx[i] * nv;
-        YL[i] = cy[i] + cny[i] * nv;
-      }
-    }
+  /* ==== 4. 动态博弈状态机：进攻选线 vs 后车防守 vs 最优赛车线 ==== */
+  const raceLatMid = getRaceLat(iMid);
+  const safeLimMid = getSafeHalfWidth(iMid, 1.65);
+
+  if (car._otLockT > 0) {
+    car._otLockT -= dt;
+    if (car._otLockT <= 0) car._otSide = 0;
   }
 
-  /**
-   * 由中心线点集构建赛道模型：
-   *   px/py 中心线、tx/ty 切线、nx/ny 法线、ds 逐段长度
-   *   off 最小曲率赛车线的横向偏移、lx/ly 赛车线、kmax 弯速用曲率
-   */
-  function buildTrackModel(points, opts) {
-    opts = opts || {};
-    const corridor = opts.corridor != null ? opts.corridor : 3.9;
-    const fineIters = opts.iters != null ? opts.iters : 600;
-    const blend = opts.blend != null ? opts.blend : 1;
-    const N = points.length;
-    const px = new Float64Array(N), py = new Float64Array(N);
-    for (let i = 0; i < N; i++) { px[i] = points[i].x; py[i] = points[i].y; }
+  // 判断是否受阻或具备进攻机会
+  const wantAttack = !!(closestAhead && (
+      (leadThreat && leadThreat.geo.sLon < 42 && (
+          cornerCap[idx] > leadThreat.car.speed + 1.0 ||
+          leadThreat.car.inBrake > 0 ||
+          v > leadThreat.car.speed + 1.2
+      )) ||
+      (closestAhead.geo.sLon < 22 && closestAhead.geo.sLon > -CAR_LENGTH * 0.5)
+  ));
 
-    // 闭合判定：首尾相邻视为环形赛道（本作环形赛道首尾间距 ≤ 1 段）
-    const closed = Math.hypot(px[0] - px[N - 1], py[0] - py[N - 1]) < 60;
+  const isBlockedNow = !!(leadThreat && leadThreat.geo.sLon < 16 && leadThreat.geo.gapFrontRear < 9.5);
+  car._blockT = isBlockedNow ? car._blockT + dt : Math.max(0, car._blockT - dt * 2.0);
+  const aggressiveAttack = car._blockT > 0.45 || (leadThreat && leadThreat.car.inBrake > 0 && leadThreat.geo.sLon < 25);
 
-    const ds = new Float64Array(N);
-    const cum = new Float64Array(N + 1);
-    for (let i = 0; i < N; i++) {
-      const j = i + 1 < N ? i + 1 : (closed ? 0 : N - 1);
-      ds[i] = i + 1 < N ? Math.hypot(px[j] - px[i], py[j] - py[i]) : (closed ? Math.hypot(px[0] - px[i], py[0] - py[i]) : 0);
-      cum[i + 1] = cum[i] + ds[i];
-    }
-    const total = cum[N];
+  let desiredLatMid = raceLatMid; // 默认走最优赛车线
+  car._defendMode = false;
 
-    const tx = new Float64Array(N), ty = new Float64Array(N);
-    const nx = new Float64Array(N), ny = new Float64Array(N);
-    for (let i = 0; i < N; i++) {
-      const a = closed ? (i - 1 + N) % N : Math.max(0, i - 1);
-      const b = closed ? (i + 1) % N : Math.min(N - 1, i + 1);
-      let dx = px[b] - px[a], dy = py[b] - py[a];
-      const L = Math.hypot(dx, dy) || 1;
-      dx /= L; dy /= L;
-      tx[i] = dx; ty[i] = dy;
-      nx[i] = -dy; ny[i] = dx;        // 左法线
-    }
+  if (wantAttack && aheadCars.length > 0) {
+    /* ---- ★ 进攻模式：7 走廊评分器（自动寻找内线晚刹 / 交叉线抽头空当） ---- */
+    let bestScore = -1e9;
+    let bestCandLat = raceLatMid;
 
-    // ---- 1) 最小曲率赛车线：多尺度（粗→细）投影梯度下降 ----
-    // 双调和迭代的长波收敛极慢（约 O(N²) 次），直接在原始采样上迭代 1000+ 次
-    // 只能用到 1m 左右的走线宽度。这里先在 1/8、1/4、1/2 采样上求长波解，
-    // 再逐级插值回原分辨率精修，几十毫秒即可收敛到完整走廊宽度。
-    // （若改用普通邻点中点，收敛到的是"最短路径/弹性带"，会贴内侧且曲率更大，反而更慢）
-    const off = new Float64Array(N);
-    const lx = new Float64Array(N), ly = new Float64Array(N);
-    const levels = [
-      { k: 8, it: 6000 },
-      { k: 4, it: 2000 },
-      { k: 2, it: 600 },
-      { k: 1, it: fineIters }
+    // 构造 7 条候选横向轨迹：含最优赛车线、赛道中心、左右内线极值、以及过渡走廊
+    const candidates = [
+      raceLatMid,
+      0,
+      clamp(raceLatMid - 2.6, -safeLimMid, safeLimMid),
+      clamp(raceLatMid + 2.6, -safeLimMid, safeLimMid),
+      clamp(raceLatMid - 4.8, -safeLimMid, safeLimMid),
+      clamp(raceLatMid + 4.8, -safeLimMid, safeLimMid),
+      nextCornerSign !== 0 ? nextCornerSign * (safeLimMid - 0.3) : -raceLatMid
     ];
-    for (let li = 0; li < levels.length; li++) {
-      const k = levels[li].k;
-      const M = k === 1 ? N : Math.max(24, Math.floor(N / k));
-      if (M < 24 || (k > 1 && M >= N)) continue;
-      const stride = N / M;
-      const cx = new Float64Array(M), cy = new Float64Array(M);
-      const cnx = new Float64Array(M), cny = new Float64Array(M);
-      const cidx = new Int32Array(M);
-      for (let j = 0; j < M; j++) {
-        let idx = Math.round(j * stride);
-        idx = closed ? ((idx % N) + N) % N : clamp(idx, 0, N - 1);
-        cidx[j] = idx;
-        cx[j] = px[idx]; cy[j] = py[idx];
-      }
-      for (let j = 0; j < M; j++) {
-        const a = closed ? (j - 1 + M) % M : Math.max(0, j - 1);
-        const b = closed ? (j + 1) % M : Math.min(M - 1, j + 1);
-        const dx = cx[b] - cx[a], dy = cy[b] - cy[a];
-        const L = Math.hypot(dx, dy) || 1;
-        cnx[j] = -dy / L; cny[j] = dx / L;
+
+    for (let c = 0; c < candidates.length; c++) {
+      const candLat = clamp(candidates[c], -safeLimMid, safeLimMid);
+      let score = 0;
+
+      // 1) 偏离最优赛车线的代价（弯中代价高防推头，直道/入弯前代价低鼓励大胆抽头）
+      const lineWeight = inCorner ? 2.4 : 0.85;
+      score -= Math.abs(candLat - raceLatMid) * lineWeight;
+
+      // 2) 与当前车身横向位置的平滑度代价（防止瞬移式剧烈变线损失速度）
+      score -= Math.abs(candLat - myLat) * 0.55;
+
+      // 3) 历史超车方向锁定奖励（防止在对手车尾左右摇摆）
+      const sideSign = Math.sign(candLat - (closestAhead ? closestAhead.oPredLat : raceLatMid));
+      if (car._otSide !== 0 && sideSign === car._otSide) {
+        score += 4.5;
       }
 
-      const cOff = new Float64Array(M);
-      for (let j = 0; j < M; j++) cOff[j] = off[cidx[j]];
-      optimizeLine(cOff, cx, cy, cnx, cny, M, closed, corridor, levels[li].it, 0.55, blend);
+      // 4) 弯道战术奖励：内线插刀（Dive-Bomb） vs 外切内交叉线（Switchback）
+      if (nextCornerSign !== 0 && closestAhead) {
+        const oppOnInside = (closestAhead.oPredLat * nextCornerSign) > 1.2;
+        const candSide = Math.sign(candLat - closestAhead.oPredLat);
+        if (!oppOnInside && candSide === nextCornerSign) {
+          // 前车未封死内线 → 强烈偏好抢占入弯内线！
+          score += 5.5;
+        } else if (oppOnInside && closestAhead.car.inBrake > 0 && candSide === -nextCornerSign) {
+          // 前车死守内线且提前踩刹车 → 走外线准备交叉线反切（Switchback）！
+          score += 4.2;
+        }
+      }
 
-      if (k === 1) {
-        for (let i = 0; i < N; i++) off[i] = cOff[i];
+      // 5) 遍历前方所有车辆，评估该走廊的净空安全度与通行效率
+      for (let k = 0; k < aheadCars.length; k++) {
+        const item = aheadCars[k];
+        const lon = item.geo.sLon;
+        if (lon > 55) continue;
+
+        // 考虑前车当前位置与预判位置的包络区间
+        const minOppLat = Math.min(item.oLat, item.oPredLat);
+        const maxOppLat = Math.max(item.oLat, item.oPredLat);
+        const distToEnvelope = candLat < minOppLat
+            ? (minOppLat - candLat)
+            : (candLat > maxOppLat ? (candLat - maxOppLat) : 0);
+
+        const safePassWidth = CAR_WIDTH + 1.25; // 2.0m车宽 + 1.25m净空余量
+        if (distToEnvelope < safePassWidth) {
+          // 走廊被该前车阻挡：距离越近、前车越慢或正在踩刹车，惩罚越重
+          const proxFactor = clamp((55 - Math.max(0, lon)) / 50, 0.2, 1.5);
+          const closingPen = Math.max(0, v - item.car.speed + (item.car.inBrake > 0 ? 6 : 0)) * 1.4;
+          const overlapPen = (safePassWidth - distToEnvelope) * (14.0 + closingPen) * proxFactor;
+          score -= overlapPen;
+        } else {
+          // 走廊畅通：额外给予净空奖励
+          score += Math.min(distToEnvelope - safePassWidth, 2.0) * 1.2;
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandLat = candLat;
+      }
+    }
+
+    desiredLatMid = bestCandLat;
+    // 更新超车方向锁
+    if (closestAhead && Math.abs(desiredLatMid - closestAhead.oPredLat) > 1.1) {
+      car._otSide = Math.sign(desiredLatMid - closestAhead.oPredLat);
+      car._otLockT = 1.6;
+    }
+  } else if (
+      pursuer &&
+      (!leadThreat || leadThreat.geo.sLon > 35) &&
+      !(inCorner && v < cornerCap[idx] * 0.98 && nonContExit) // 出弯加速段不牺牲出弯线
+  ) {
+    /* ---- ★ 防守模式：后视镜卡位 + 入弯前封死内线 ---- */
+    car._defendMode = true;
+    const pGeo = pursuer.geo;
+    const pPredLat = clamp(pursuer.oPredLat, -safeLimMid, safeLimMid);
+
+    if (pGeo.sLon > -CAR_LENGTH - 0.5) {
+      // 规则 1：后车车头已经插到并排位置 → 严禁强行关门自杀，保持安全横向间距并抢占有利线
+      const safeSideDist = CAR_WIDTH + 1.05;
+      if (Math.abs(myLat - pursuer.oLat) < safeSideDist) {
+        desiredLatMid = clamp(
+            pursuer.oLat + (myLat >= pursuer.oLat ? safeSideDist : -safeSideDist),
+            -safeLimMid,
+            safeLimMid
+        );
       } else {
-        for (let i = 0; i < N; i++) {
-          const t = i / stride;
-          const j0 = Math.floor(t);
-          const f = t - j0;
-          const a = closed ? (j0 % M) : Math.min(j0, M - 1);
-          const b = closed ? ((j0 + 1) % M) : Math.min(j0 + 1, M - 1);
-          off[i] = cOff[a] + (cOff[b] - cOff[a]) * f;
-        }
+        desiredLatMid = myLat;
       }
-    }
-
-    for (let i = 0; i < N; i++) {
-      lx[i] = px[i] + nx[i] * off[i];
-      ly[i] = py[i] + ny[i] * off[i];
-    }
-
-    // ---- 2) 赛车线曲率（Menger 曲率，取小邻域最大值做安全包络） ----
-    const kap = new Float64Array(N);
-    for (let i = 0; i < N; i++) {
-      const a = closed ? (i - 1 + N) % N : Math.max(0, i - 1);
-      const b = closed ? (i + 1) % N : Math.min(N - 1, i + 1);
-      const v1x = lx[i] - lx[a], v1y = ly[i] - ly[a];
-      const v2x = lx[b] - lx[i], v2y = ly[b] - ly[i];
-      const v3x = lx[b] - lx[a], v3y = ly[b] - ly[a];
-      const cross = v1x * v2y - v1y * v2x;
-      const l1 = Math.hypot(v1x, v1y);
-      const l2 = Math.hypot(v2x, v2y);
-      const l3 = Math.hypot(v3x, v3y);
-      const den = l1 * l2 * l3;
-      kap[i] = den > 1e-9 ? (2 * cross) / den : 0;
-    }
-    const ks = new Float64Array(N);
-    for (let i = 0; i < N; i++) {
-      const a = closed ? (i - 1 + N) % N : Math.max(0, i - 1);
-      const b = closed ? (i + 1) % N : Math.min(N - 1, i + 1);
-      ks[i] = 0.25 * kap[a] + 0.5 * kap[i] + 0.25 * kap[b];
-    }
-    const kmax = new Float64Array(N);
-    for (let i = 0; i < N; i++) {
-      const a = closed ? (i - 1 + N) % N : Math.max(0, i - 1);
-      const b = closed ? (i + 1) % N : Math.min(N - 1, i + 1);
-      kmax[i] = Math.max(Math.abs(ks[a]), Math.abs(ks[i]), Math.abs(ks[b]));
-    }
-
-    return {
-      N, px, py, tx, ty, nx, ny, ds, cum, total, closed,
-      off, lx, ly, kap: ks, kmax, corridor,
-      ptsRef: points
-    };
-  }
-
-  /**
-   * 时间最优速度包络：
-   *   弯速上限 → 后向刹车传播（可循环多遍）→ 前向加速传播
-   * 返回单位 m/s 的逐点最大可行速度。
-   */
-  function computeSpeedProfile(model, perf, gripUtil) {
-    const N = model.N;
-    const grip = (perf.latGrip != null ? perf.latGrip : PHYS.latGrip) * (gripUtil != null ? gripUtil : 0.975);
-    const maxOmega = (perf.maxOmega != null ? perf.maxOmega : PHYS.maxOmega) * 0.995;
-    const vmax = perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0];
-    const brake = PHYS.brake * (perf.brakeMult != null ? perf.brakeMult : 1.0) * 0.96;
-
-    const v = new Float64Array(N);
-    for (let i = 0; i < N; i++) {
-      const k = model.kmax[i];
-      let c = vmax;
-      if (k > 1e-6) {
-        const vGrip = Math.sqrt(grip / k);
-        const vOmega = maxOmega / k;
-        if (vGrip < c) c = vGrip;
-        if (vOmega < c) c = vOmega;
-      }
-      v[i] = c;
-    }
-
-    for (let pass = 0; pass < 3; pass++) {
-      // 后向：必须在刹车点前把速度收下来
-      for (let i = N - 1; i >= 0; i--) {
-        const j = i + 1 < N ? i + 1 : (model.closed ? 0 : -1);
-        if (j < 0) continue;
-        const d = model.ds[i];
-        if (d <= 0) continue;
-        const lim = Math.sqrt(v[j] * v[j] + 2 * brake * d);
-        if (lim < v[i]) v[i] = lim;
-      }
-      // 前向：引擎能推到多快
-      for (let i = 0; i < N; i++) {
-        const j = i + 1 < N ? i + 1 : (model.closed ? 0 : -1);
-        if (j < 0) continue;
-        const d = model.ds[i];
-        if (d <= 0) continue;
-        const a = accelAt(perf, v[i]);
-        const lim = Math.sqrt(v[i] * v[i] + 2 * a * d);
-        if (lim < v[j]) v[j] = lim;
-      }
-    }
-
-    let lapTime = 0;
-    for (let i = 0; i < N; i++) lapTime += model.ds[i] / Math.max(v[i], 5);
-    return { v, lapTime, vmax, brake, gripUtil: gripUtil != null ? gripUtil : 0.975 };
-  }
-
-  /** 自动驾驶内部状态（每辆车一份） */
-  function createDriveState() {
-    return {
-      extra: 0,          // 超车/防守附加横向偏移（米，左正右负，相对中心线）
-      stuck: 0,
-      rev: 0,
-      moved: false,
-      lockedLat: null,   // 锁定的目标横向位置（米，相对中心线）
-      lockTimer: 0,      // 车道锁定时长
-      lingering: 0,      // 抽头后仍卡在前车身后的连续时长
-      abortCool: 0,      // 放弃超车后的冷却时间
-      blockT: 0          // 被前车压制时长（>1.2s 升级进攻）
-    };
-  }
-
-  /** 车相对中心线的带符号横向偏移（米，左正右负） */
-  function latOf(o, model) {
-    const i = ((o.nearIdx | 0) % model.N + model.N) % model.N;
-    return (o.x - model.px[i]) * model.nx[i] + (o.y - model.py[i]) * model.ny[i];
-  }
-
-  /**
-   * 找前方 maxDist 米内的下一个弯心（速度包络最低点），返回 { idx, dist, off }
-   * off 在弯道处指向弯外侧（最小曲率线取外圈），因此弯内侧 = -sign(off)。
-   */
-  function findNextApex(model, prof, idx, maxDist) {
-    const N = model.N;
-    let bestV = Infinity, best = null, acc = 0;
-    for (let k = 1; k < N; k++) {
-      acc += model.ds[(idx + k - 1) % N];
-      if (acc > maxDist) break;
-      const j = (idx + k) % N;
-      if (prof.v[j] < bestV) { bestV = prof.v[j]; best = { idx: j, dist: acc, off: model.off[j] }; }
-    }
-    if (!best || bestV > prof.vmax * 0.82) return null;   // 前方基本无实质弯道
-    return best;
-  }
-
-  /**
-   * 单帧决策：返回 { up, brake, steer }
-   * car      : 游戏车辆对象（x,y,angle,speed,nearIdx,perf）
-   * model    : buildTrackModel 结果
-   * prof     : computeSpeedProfile 结果
-   * others   : 全部车辆数组（含自己）
-   */
-  function stepAutopilot(car, model, prof, others, dt, opts, st) {
-    opts = opts || {};
-    const N = model.N;
-    const out = { up: false, brake: 0, steer: 0 };
-    const idx = ((car.nearIdx | 0) % N + N) % N;
-    const v = Math.abs(car.speed);
-    const perf = car.perf || {};
-    const A = AGGR_PRESETS[((opts.aggr != null ? opts.aggr : 1) | 0)] || AGGR_PRESETS[1];
-
-    if (!st) st = createDriveState();
-    st.extra = st.extra || 0;
-
-    // ---------- 受困倒车脱身 ----------
-    if (st.rev > 0) {
-      st.rev -= dt;
-      out.brake = 2;
-      return out;
-    }
-    if (st.moved) {
-      if (v < 1.0) st.stuck += dt;
-      else st.stuck = Math.max(0, st.stuck - dt * 2);
-      if (st.stuck > 2.0) { st.rev = 0.8; st.stuck = 0; out.brake = 2; return out; }
-    } else if (v > 4) {
-      st.moved = true;
-    }
-
-    // ---------- 1) 超车/避撞：全向邻车光栅扫描选线 + 跟车限速 ----------
-    let extraTarget = 0;
-    let followCap = Infinity;
-    let emergency = false;
-    let guardSteer = 0;
-
-    if (others && others.length > 1) {
-      const ca = Math.cos(car.angle), sa = Math.sin(car.angle);
-      const brake = prof.brake;
-      const carLatNow = latOf(car, model);
-      const baseLat = model.off[idx];          // 我们赛车线（理想线）在当前点的横向
-      const apex = findNextApex(model, prof, idx, 130);
-      const sharpCorner = apex ? Math.abs(model.kmax[apex.idx]) > 0.012 : false;
-
-      // 全向邻车感知（车宽包络、前后左右、追尾 TTC）
-      const nbs = [];
-      let directLead = null, directLeadS = Infinity;
-      for (let i = 0; i < others.length; i++) {
-        const o = others[i];
-        if (!o || o === car) continue;
-        const dx = o.x - car.x, dy = o.y - car.y;
-        const sLon = dx * ca + dy * sa;              // >0 前方
-        const dLat = -dx * sa + dy * ca;             // >0 左侧
-        if (Math.abs(sLon) > 70) continue;
-        const nb = { o, sLon, dLat, oLat: latOf(o, model), v: Math.abs(o.speed || 0) };
-        nbs.push(nb);
-        if (sLon > 0 && sLon < 48 && Math.abs(dLat) < CAR_WID + 0.45 && sLon < directLeadS) {
-          directLeadS = sLon; directLead = nb;
-        }
-      }
-
-      // 被前车压制计时（>1.2s 时跟车贴得更近，准备强攻）
-      const blocked = !!(directLead && directLead.sLon < 16 && Math.abs(directLead.dLat) < CAR_WID + 0.5
-        && (v > directLead.v - 0.5 || prof.v[idx] > directLead.v + 1.5));
-      st.blockT = blocked ? (st.blockT || 0) + dt : Math.max(0, (st.blockT || 0) - dt * 2);
-
-      // 贴身防刮擦反射（叠加到转向，不改变选线结果，用于单帧级快速反应）
-      for (let k = 0; k < nbs.length; k++) {
-        const nb = nbs[k];
-        if (Math.abs(nb.sLon) < CAR_LEN + 1.8 && Math.abs(nb.dLat) < CAR_WID + 1.35) {
-          const penetration = (CAR_WID + 1.35) - Math.abs(nb.dLat);
-          const push = clamp(penetration / 1.35, 0, 1) * 0.24;
-          guardSteer += (nb.dLat >= 0 ? -push : push);
-        }
-      }
-
-      const HARD_LAT_SEP = CAR_WID + 0.22;      // ~2.22m 极限防擦碰中心距
-      const safeSep = A.safeSep;
-      const minLat = -4.8, maxLat = 4.8;
-
-      // ===== 赛道横断面光栅扫描：在所有横向位置中挑最优 =====
-      // 综合：贴近理想线 / 横向平滑 / 车道锁定 / 弯道内线超车加分 / 逐车车宽冲突 / 后车追尾 TTC 避让
-      st.lockTimer = Math.max(0, (st.lockTimer || 0) - dt);
-      if (st.lockTimer === 0) st.lockedLat = null;
-
-      let bestCand = baseLat;
-      if (nbs.length > 0) {
-        let bestScore = -1e9;
-        for (let c = minLat; c <= maxLat + 0.001; c += 0.4) {
-          const cLat = clamp(c, minLat, maxLat);
-          let score = 0;
-          score -= Math.abs(cLat - baseLat) * (sharpCorner ? 1.8 : 0.75);   // 离线代价（急弯更贵）
-          score -= Math.abs(cLat - carLatNow) * 0.6;                          // 横向平滑
-          if (st.lockedLat !== null && Math.abs(cLat - st.lockedLat) < 1.0) score += 2.8; // 车道锁定惯性
-          if (directLead && apex) {                                          // 入弯内线超车加分
-            const inside = -Math.sign(apex.off);
-            if ((cLat - baseLat) * inside > 0.05) score += A.insideBonus;
-          }
-          for (let k = 0; k < nbs.length; k++) {
-            const nb = nbs[k];
-            const latDist = Math.abs(cLat - nb.oLat);
-            if (nb.sLon > -CAR_LEN - 1.5 && nb.sLon < CAR_LEN + 2.5) {
-              // 并排刚体禁区：占位必撞 → 重罚；贴身 → 缓冲斥力；禁穿模
-              if (latDist < HARD_LAT_SEP) score -= 5000 + (HARD_LAT_SEP - latDist) * 2000;
-              else if (latDist < safeSep + 0.4) score -= (safeSep + 0.4 - latDist) * 18;
-              if ((nb.oLat > carLatNow && cLat > nb.oLat - HARD_LAT_SEP * 0.8) ||
-                  (nb.oLat < carLatNow && cLat < nb.oLat + HARD_LAT_SEP * 0.8)) score -= 8000;
-            } else if (nb.sLon >= CAR_LEN + 2.5 && nb.sLon < 48) {
-              // 前车阻挡 / 超车走廊评估
-              const closing = v - nb.v + (prof.v[idx] - nb.v) * 0.4;
-              if (latDist < safeSep) {
-                const pw = clamp((48 - nb.sLon) / 40, 0.2, 1.5);
-                const sw = clamp(closing / 8, 0.3, 2.5);
-                const ov = (safeSep - latDist) / safeSep;
-                score -= 32 * pw * sw * ov;
-                if (nb.sLon < 14 && closing > 1.5) score -= 45 * ov;
-              } else if (nb.sLon < 25 && closing > 1.0 && latDist < safeSep + 1.2) {
-                score += 3.5;  // 紧贴前车安全边界的紧凑超车线
-              }
-            } else if (nb.sLon <= -CAR_LEN - 1.5 && nb.sLon > -70) {
-              // 后车追尾 TTC 预判避让
-              const rearGap = Math.max(0.2, -nb.sLon - CAR_LEN);
-              const myDecel = prof.v[idx] < v - 3 ? 8.5 : 0;
-              const rearClosing = (nb.v - v) + myDecel;
-              if (rearClosing > 1.5) {
-                const ttc = rearGap / rearClosing;
-                if (ttc < 2.0 && latDist < safeSep) {
-                  const urgency = clamp((2.0 - ttc) / 1.5, 0.2, 2.5);
-                  const ov = (safeSep - latDist) / safeSep;
-                  score -= 55 * urgency * ov;
-                }
-              }
-            }
-          }
-          if (score > bestScore) { bestScore = score; bestCand = cLat; }
-        }
-      }
-
-      // 车道锁定：明显偏离理想线时锁 1.6s 防抖，避免左右摇摆
-      if (Math.abs(bestCand - baseLat) > 0.9
-        && Math.abs(bestCand - (st.lockedLat != null ? st.lockedLat : 999)) > 0.8) {
-        st.lockedLat = bestCand; st.lockTimer = 1.6;
-      }
-
-      // 缠斗超时放弃：抽头后持续 A.abort 秒仍卡在前车 3m 外且无速度优势 → 强制回线 + 冷却
-      st.abortCool = Math.max(0, (st.abortCool || 0) - dt);
-      if (directLead) {
-        const offLine = Math.abs(st.extra) > 1.5;
-        const stillBehind = directLead.sLon > 3;
-        const notFaster = !(v > directLead.v + 2 || prof.v[idx] > directLead.v + 2);
-        st.lingering = (offLine && stillBehind && notFaster) ? (st.lingering || 0) + dt : 0;
-        if (st.lingering > A.abort) { st.abortCool = 1.2; st.lingering = 0; }
-      } else {
-        st.lingering = 0;
-      }
-      if (st.abortCool > 0) bestCand = baseLat;   // 冷却期回线
-
-      extraTarget = clamp(bestCand - baseLat, -5.2, 5.2);
-
-      // ===== 跟车限速 + 紧急制动 =====
-      if (directLead) {
-        const gap = directLead.sLon - CAR_LEN;
-        const closing = v - directLead.v;
-        if (gap < 1.0 && closing > 0.5 && Math.abs(directLead.dLat) < CAR_WID + 0.3) emergency = true;
-        const attacking = (st.blockT || 0) > 1.2;
-        // 选中的车道仍与前车横向重叠时才跟车限速；已抽头到净空车道则全油门
-        const latOverlap = Math.abs(bestCand - directLead.oLat) < safeSep;
-        if (latOverlap && directLead.sLon > 0 && gap < 9) {
-          const safeGap = Math.max(gap - (attacking ? A.gapAdd - 0.3 : A.gapAdd), 0.25);
-          const cap = Math.sqrt(directLead.v * directLead.v + 2 * brake * 0.85 * safeGap)
-            + Math.max(0, closing) * 0.12;
-          if (cap < followCap) followCap = cap;
-        }
-      }
-    }
-
-    // 偏移平滑（抽头 8m/s，回线 4.5m/s），避免来回摆头
-    const rate = Math.abs(extraTarget) > Math.abs(st.extra) ? 8.0 : 4.5;
-    const dExtra = clamp(extraTarget - st.extra, -rate * dt, rate * dt);
-    st.extra += dExtra;
-
-    // ---------- 2) 转向：纯追踪（在线上时曲率精确）+ 前瞻随速度伸缩 ----------
-    const look = clamp(7.5 + v * 0.38, 8.5, 58);
-    const stepIdx = Math.max(1, Math.round(look / Math.max(0.5, model.ds[idx])));
-    const j = model.closed ? (idx + stepIdx) % N : Math.min(idx + stepIdx, N - 1);
-
-    // 目标点 = 赛车线 + 超车偏移（相对中心线夹到沥青内）
-    let latTarget = model.off[j] + st.extra;
-    latTarget = clamp(latTarget, -5.0, 5.0);
-    const tx = model.px[j] + model.nx[j] * latTarget;
-    const ty = model.py[j] + model.ny[j] * latTarget;
-
-    const alpha = wrapAngle(Math.atan2(ty - car.y, tx - car.x) - car.angle);
-    const dist = Math.hypot(tx - car.x, ty - car.y) || 1;
-    const kappa = (2 * Math.sin(alpha)) / Math.max(dist, 1);
-
-    const latGrip = perf.latGrip != null ? perf.latGrip : PHYS.latGrip;
-    const maxOmega = perf.maxOmega != null ? perf.maxOmega : PHYS.maxOmega;
-    const omegaMax = Math.min(maxOmega, latGrip / Math.max(v, 1)) * Math.min(1, v / 3);
-
-    let steer = 0;
-    if (omegaMax > 1e-5) steer = clamp((v * kappa) / omegaMax, -1, 1);
-    steer = clamp(steer + clamp(guardSteer, -0.30, 0.30), -1, 1);  // 贴身防刮擦反射
-    out.steer = steer;
-
-    // ---------- 3) 纵向：速度包络 bang-bang ----------
-    const j1 = model.closed ? (idx + 1) % N : Math.min(idx + 1, N - 1);
-    let vt = Math.min(prof.v[idx], prof.v[j1]);
-
-    // 离线（超车/闪避偏离赛车线）弯速折损：偏离越远、弯越急，越要降速防推头
-    const offLineDist = Math.abs(latOf(car, model) - model.off[idx]);
-    if (offLineDist > 0.9) {
-      vt *= clamp(1 - (offLineDist - 0.9) * model.kmax[idx] * 1.35, 0.89, 1.0);
-    }
-
-    // 跟踪误差安全降速：相对"当前指令横向位置（赛车线 + 超车偏移）"的偏差，
-    // 不能用相对中心线的偏差——优化走线本身就有 ±4m 的合法偏移。
-    const eLat = (car.x - model.px[idx]) * model.nx[idx] + (car.y - model.py[idx]) * model.ny[idx];
-    const trackErr = Math.abs(eLat - (model.off[idx] + st.extra));
-    if (trackErr > 6.0) vt = Math.min(vt, 24);
-    else if (trackErr > 4.2) vt = Math.min(vt, 55);
-    else if (trackErr > 2.8) vt = Math.min(vt, 90);
-
-    if (followCap < vt) vt = followCap;
-    if (opts.speedScale) vt *= opts.speedScale;
-
-    if (emergency) {
-      out.brake = 2;
-      out.up = false;
-    } else if (v > vt + 0.6) {
-      out.brake = 2;
-    } else if (v > vt + 0.12) {
-      out.brake = 1;
-    } else if (v < vt - 0.05) {
-      out.up = true;
-    }
-    return out;
-  }
-  // ======================= CORE END =======================
-
-  /* ===================== 浏览器接入层 ===================== */
-  const LS_KEY = 'f1ai_ap_v1';
-  const settings = Object.assign({ enabled: true, grip: 99, corridor: 3.8, aggr: 1 }, readSettings());
-  function readSettings() {
-    try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {}; } catch (e) { return {}; }
-  }
-  function saveSettings() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(settings)); } catch (e) {}
-  }
-
-  const params = { gripUtil: settings.grip / 100, corridor: settings.corridor };
-
-  let gp = null, model = null, profile = null, profAge = 0;
-  let playerCar = null;
-  const driveState = createDriveState();
-  let ctrl = { up: false, brake: 0, steer: 0, left: false, right: false };
-  let origDesc = null;
-  let hookInstalled = false;
-  let lastPtsRef = null;
-  let lastPerf = null;
-  let trackId = null;
-  let ptsSourceLocked = false;   // 切换过赛道后 __gp.pts 快照已过期，禁止再用它覆盖模型
-  let rebuildBusy = false;
-  let switchBusy = false;
-  let frameCount = 0;
-
-  // ---------- 面板 ----------
-  const styleEl = document.createElement('style');
-  styleEl.textContent = `
-  #f1aiPanel{position:fixed;left:16px;top:338px;width:206px;z-index:30;
-    background:linear-gradient(180deg,rgba(8,14,22,.94),rgba(6,10,16,.9));
-    border:1px solid rgba(90,220,255,.28);border-radius:10px;padding:8px 10px 9px;
-    font-family:ui-monospace,Consolas,monospace;color:#cfe6f5;font-size:11px;
-    box-shadow:0 8px 26px rgba(0,0,0,.55);backdrop-filter:blur(6px);user-select:none}
-  #f1aiPanel .hd{display:flex;align-items:center;gap:6px;padding-bottom:6px;
-    border-bottom:1px solid rgba(90,220,255,.16);margin-bottom:6px}
-  #f1aiPanel .hd b{font-size:11px;letter-spacing:.1em;color:#7ef1ff}
-  #f1aiPanel .hd small{color:#6f8ba3;font-size:9px;margin-left:auto}
-  #f1aiPanel .dot{width:7px;height:7px;border-radius:50%;background:#3f5668;box-shadow:0 0 0 0 rgba(80,255,190,.5)}
-  #f1aiPanel.on .dot{background:#3dffb0;box-shadow:0 0 10px rgba(80,255,190,.85)}
-  #f1aiPanel .row{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px;color:#8aa6bd}
-  #f1aiPanel .row b{color:#f2f7ff;font-weight:600;font-variant-numeric:tabular-nums}
-  #f1aiPanel .row b.hi{color:#ffd166}
-  #f1aiPanel .row b.good{color:#4dffc0}
-  #f1aiPanel .btns{display:flex;gap:6px;margin-top:8px}
-  #f1aiPanel button{flex:1;cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:.08em;
-    color:#bfe9ff;background:rgba(30,80,110,.35);border:1px solid rgba(90,220,255,.35);
-    border-radius:6px;padding:5px 0}
-  #f1aiPanel button:hover{background:rgba(40,120,160,.45)}
-  #f1aiPanel button.off{color:#ff9a8a;border-color:rgba(255,120,100,.45);background:rgba(110,40,32,.3)}
-  #f1aiPanel .seg{display:flex;gap:3px}
-  #f1aiPanel .seg button{flex:1;padding:3px 0;font-size:10px}
-  #f1aiPanel .seg button.on{color:#06121c;background:#2fd7ff;border-color:#2fd7ff;font-weight:700}
-  #f1aiPanel input[type=range]{width:88px;accent-color:#2fd7ff;height:12px}
-  #f1aiPanel .foot{margin-top:7px;color:#5f7a90;font-size:9px;line-height:1.5;letter-spacing:.03em}
-  `;
-  document.head.appendChild(styleEl);
-
-  const panel = document.createElement('div');
-  panel.id = 'f1aiPanel';
-  panel.innerHTML = `
-    <div class="hd"><span class="dot"></span><b>AI AUTOPILOT</b><small>TIME-OPTIMAL</small></div>
-    <div class="row"><span>状态</span><b id="f1aiState">等待游戏</b></div>
-    <div class="row"><span>目标 / 实际</span><b id="f1aiSpeed" class="hi">-- / --</b></div>
-    <div class="row"><span>横向误差</span><b id="f1aiErr">--</b></div>
-    <div class="row"><span>理论圈速</span><b id="f1aiLap">--</b></div>
-    <div class="row"><span>抓地极限</span><input id="f1aiGrip" type="range" min="88" max="100" step="1" value="${settings.grip}"></div>
-    <div class="row"><span>走线宽度</span><input id="f1aiWide" type="range" min="34" max="50" step="1" value="${Math.round(settings.corridor * 10)}"></div>
-    <div class="row"><span>进攻强度</span><span class="seg" id="f1aiAggr">
-      <button data-v="0">稳</button><button data-v="1">均</button><button data-v="2">猛</button>
-    </span></div>
-    <div class="btns"><button id="f1aiToggle">ON</button><button id="f1aiRebuild">重算走线</button></div>
-    <div class="foot">F8 开关 · 进攻强度: 猛=更早抽头+更贴+更快放弃缠斗（碰撞风险↑），稳=保守</div>
-  `;
-  document.body.appendChild(panel);
-
-  const ui = {
-    state: panel.querySelector('#f1aiState'),
-    speed: panel.querySelector('#f1aiSpeed'),
-    err: panel.querySelector('#f1aiErr'),
-    lap: panel.querySelector('#f1aiLap'),
-    grip: panel.querySelector('#f1aiGrip'),
-    wide: panel.querySelector('#f1aiWide'),
-    toggle: panel.querySelector('#f1aiToggle'),
-    rebuild: panel.querySelector('#f1aiRebuild')
-  };
-
-  function syncToggleUI() {
-    panel.classList.toggle('on', !!settings.enabled);
-    ui.toggle.textContent = settings.enabled ? 'ON' : 'OFF';
-    ui.toggle.classList.toggle('off', !settings.enabled);
-  }
-  syncToggleUI();
-
-  ui.toggle.addEventListener('click', () => {
-    settings.enabled = !settings.enabled;
-    saveSettings(); syncToggleUI();
-  });
-  ui.grip.addEventListener('input', () => {
-    settings.grip = Number(ui.grip.value) || 99;
-    params.gripUtil = settings.grip / 100;
-    saveSettings();
-    if (model && playerCar) profile = computeSpeedProfile(model, playerCar.perf || {}, params.gripUtil);
-  });
-  ui.grip.addEventListener('change', () => {
-    // 松手后按新抓地水平重新选择走线族（3 条候选线预测圈速可能变化）
-    if (lastPtsRef) rebuild(lastPtsRef, playerCar && playerCar.perf);
-  });
-  ui.wide.addEventListener('change', () => {
-    settings.corridor = Number(ui.wide.value) / 10;
-    params.corridor = settings.corridor;
-    saveSettings();
-    if (lastPtsRef) rebuild(lastPtsRef, playerCar && playerCar.perf);
-  });
-  ui.rebuild.addEventListener('click', () => {
-    if (lastPtsRef) rebuild(lastPtsRef, playerCar && playerCar.perf);
-  });
-
-  const aggrBtns = Array.prototype.slice.call(panel.querySelectorAll('#f1aiAggr button'));
-  function syncAggrUI() {
-    aggrBtns.forEach(b => b.classList.toggle('on', Number(b.dataset.v) === settings.aggr));
-  }
-  syncAggrUI();
-  aggrBtns.forEach(b => b.addEventListener('click', () => {
-    settings.aggr = Number(b.dataset.v);
-    saveSettings(); syncAggrUI();
-  }));
-
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'F8') {
-      e.preventDefault();
-      settings.enabled = !settings.enabled;
-      saveSettings(); syncToggleUI();
-    }
-  }, true);
-
-  // ---------- 接管输入 ----------
-  function installInputHook(input) {
-    if (hookInstalled) return;
-    const keys = ['up', 'brake', 'left', 'right'];
-    origDesc = {};
-    try {
-      for (const k of keys) {
-        const d = Object.getOwnPropertyDescriptor(input, k);
-        if (d && d.get) origDesc[k] = d.get;
-      }
-      for (const k of keys) {
-        Object.defineProperty(input, k, {
-          configurable: true,
-          enumerable: true,
-          get() { return ctrl[k]; }
-        });
-      }
-      // 数值转向：物理层优先使用 input.steer（比左右按键更精确）
-      try {
-        Object.defineProperty(input, 'steer', {
-          configurable: true,
-          enumerable: true,
-          get() { return ctrl.steer; }
-        });
-      } catch (e) {
-        // 退化为左右按键：ctrl.left/right 已按 0.02 阈值同步
-      }
-      hookInstalled = true;
-    } catch (e) {
-      hookInstalled = false;
-      if (ui.state) ui.state.textContent = '输入接口不兼容';
+    } else if (nextCornerSign !== 0 && maxCurvAhead > 0.0075) {
+      // 规则 2：即将入弯 → 封锁内线！把内线与路肩的距离压缩到小于 1 个车宽（约 2.4m），让后车无法插刀
+      const insideWallLat = nextCornerSign * safeLimMid;
+      // 守在内线外侧约 1.6m 处：既封死内线通道，又比贴死路缘拥有更大的入弯半径
+      const blockInsideLat = insideWallLat - nextCornerSign * 1.4;
+      // 若后车正在往内线抽头，立即切向内线封堵；若后车在外线，则居中偏内兼顾入弯角度
+      const blendToInside = (pPredLat * nextCornerSign > -0.5) ? 0.85 : 0.55;
+      desiredLatMid = clamp(
+          raceLatMid * (1 - blendToInside) + blockInsideLat * blendToInside,
+          -safeLimMid,
+          safeLimMid
+      );
+    } else {
+      // 规则 3：直道巡航被追击 → 影子防守（跟随对手预判横向位置卡住尾流与抽头路线）
+      const maxDefendDev = 3.6; // 最大偏离赛车线距离，避免直道画龙损失极速
+      const shadowLat = clamp(pPredLat, raceLatMid - maxDefendDev, raceLatMid + maxDefendDev);
+      desiredLatMid = clamp(shadowLat, -safeLimMid, safeLimMid);
     }
   }
 
-  function releaseToKeyboard() {
-    if (!origDesc) { ctrl.up = false; ctrl.brake = 0; ctrl.steer = 0; return; }
-    ctrl.up = !!origDesc.up.call(gp.input);
-    ctrl.brake = origDesc.brake.call(gp.input);
-    const L = !!origDesc.left.call(gp.input);
-    const R = !!origDesc.right.call(gp.input);
-    ctrl.left = L; ctrl.right = R;
-    ctrl.steer = (R ? 1 : 0) - (L ? 1 : 0);
+  // 将目标横向偏移换算为相对于最优赛车线的战术偏移量，并做速率限制平滑
+  const rawTacOffset = desiredLatMid - raceLatMid;
+  const offsetRate = wantAttack ? 11.0 : (car._defendMode ? 7.5 : 5.0);
+  car._tacLat += clamp(rawTacOffset - car._tacLat, -offsetRate * dt, offsetRate * dt);
+  const activeLatOffset = car._tacLat;
+
+  /* ==== 5. 曲率自适应三点融合追踪转向 ==== */
+  const safeNear = getSafeHalfWidth(iNear, 1.55);
+  const safeMid  = safeLimMid;
+  const safeFar  = getSafeHalfWidth(iFar, 1.65);
+
+  // 近、中、远三点目标世界坐标计算（出弯直道时远点迅速回归最优线以获得最大出弯半径）
+  const farOffsetDecay = nonContExit ? 0.35 : (car._defendMode ? 0.65 : 0.85);
+  const latN = clamp(getRaceLat(iNear) + activeLatOffset, -safeNear, safeNear);
+  const latM = clamp(raceLatMid + activeLatOffset, -safeMid, safeMid);
+  const latF = clamp(getRaceLat(iFar) + activeLatOffset * farOffsetDecay, -safeFar, safeFar);
+
+  const txN = pts[iNear].x + nor[iNear].x * latN;
+  const tyN = pts[iNear].y + nor[iNear].y * latN;
+  const txM = pts[iMid].x  + nor[iMid].x  * latM;
+  const tyM = pts[iMid].y  + nor[iMid].y  * latM;
+  const txF = pts[iFar].x  + nor[iFar].x  * latF;
+  const tyF = pts[iFar].y  + nor[iFar].y  * latF;
+
+  const dxN = txN - car.x, dyN = tyN - car.y;
+  const dxM = txM - car.x, dyM = tyM - car.y;
+  const dxF = txF - car.x, dyF = tyF - car.y;
+
+  const aN = wrapAngle(Math.atan2(dyN, dxN) - car.angle);
+  const aM = wrapAngle(Math.atan2(dyM, dxM) - car.angle);
+  const aF = wrapAngle(Math.atan2(dyF, dxF) - car.angle);
+
+  // 自适应融合权重：非连续弯道出弯时加大中远点权重，提前拉直车头准备全油门
+  let wN = 0.25 + cornerIntensity * 0.26;
+  let wF = 0.48 - cornerIntensity * 0.28;
+  if (nonContExit) {
+    wN = Math.max(0.20, wN - 0.12);
+    wF = Math.min(0.55, wF + 0.15);
+  }
+  const wM = 1.0 - wN - wF;
+  const alpha = aN * wN + aM * wM + aF * wF;
+
+  const dist = (Math.hypot(dxF, dyF) * wF + Math.hypot(dxM, dyM) * wM + Math.hypot(dxN, dyN) * wN) || 1;
+  const kappa = 2 * Math.sin(alpha) / dist;
+  const omegaMax = Math.min(latGrip / Math.max(v, 1), maxOmega) * Math.min(1, v / 3);
+  let duty = clamp((v * kappa) / (omegaMax || 1), -1, 1);
+
+  // 叠加并排贴身防撞保护
+  if (sideGuard !== 0) {
+    duty = clamp(duty + clamp(sideGuard * 0.22, -0.35, 0.35), -1, 1);
   }
 
-  // ---------- 赛道模型构建 ----------
-  // 走线不是一个固定答案：普通弯"外-内-外"最小曲率最快，
-  // 但 180° 长弯（体育场环道）贴内侧的最短走线更快。
-  // 这里同时生成 3 条候选线，用速度包络给出的预测圈速自动选优。
-  const LINE_CANDIDATES = [1.0, 0.85, 0.7];
+  // 方向盘平滑滤波：弯中与攻防变线时极速响应，纯直道巡航时抑制高频抖动
+  const steerResp = (inCorner || wantAttack || sideGuard !== 0) ? 32 : 22;
+  const steerAlpha = Math.min(1, dt * steerResp);
+  out.steer = (out.steer || 0) + (duty - (out.steer || 0)) * steerAlpha;
+  out.left = out.steer < -0.05;
+  out.right = out.steer > 0.05;
 
-  function rebuild(points, perf) {
-    if (!points || !points.length) return;
-    rebuildBusy = true;
-    try {
-      const pf = perf || {};
-      let bestModel = null, bestProfile = null;
-      for (let i = 0; i < LINE_CANDIDATES.length; i++) {
-        const m = buildTrackModel(points, { corridor: params.corridor, blend: LINE_CANDIDATES[i] });
-        const pr = computeSpeedProfile(m, pf, params.gripUtil);
-        if (!bestProfile || pr.lapTime < bestProfile.lapTime) { bestModel = m; bestProfile = pr; }
-      }
-      model = bestModel;
-      profile = bestProfile;
-      lastPtsRef = points;
-      driveState.extra = 0; driveState.stuck = 0; driveState.rev = 0;
-      driveState.moved = false;
-      driveState.lockedLat = null; driveState.lockTimer = 0;
-      driveState.blockT = 0; driveState.lingering = 0; driveState.abortCool = 0;
-    } catch (e) {
-      model = null; profile = null;
-      if (ui.state) ui.state.textContent = '建模失败';
-    } finally {
-      rebuildBusy = false;
+  /* ==== 6. 纵向控制：预判防追尾 + 晚刹插刀 + 非连续弯道提前开油 ==== */
+  const brakeCap = PHYS.brake * (perf.brakeMult ?? 1.0);
+  const lightCap = brakeCap * PHYS.lightBrakeFactor;
+  const scanCapM = Math.max(320, (v * v) / (2 * brakeCap) + 80);
+  const scanSteps = Math.min(
+      Math.round(((v * v) / (2 * lightCap) + 80) / DS),
+      Math.round(scanCapM / DS)
+  );
+
+  // 若大幅偏离最优赛车线（例如内线晚刹超车或强行防守），弯心曲率半径会变小，需动态折算安全弯速
+  const offLineDist = Math.abs(activeLatOffset);
+  const linePenalty = (offLineDist > 1.8 && maxCurvAhead > 0.010)
+      ? clamp(1.0 - (offLineDist - 1.8) * 0.018, 0.92, 1.0)
+      : 1.0;
+
+  let env1 = cornerCap[idx] * linePenalty;
+  let env2 = cornerCap[idx] * linePenalty;
+  let aReq = 0;
+
+  for (let s = 1; s <= scanSteps; s++) {
+    const j = stepIdx(idx, s);
+    const d = s * DS;
+    // 远端恢复到最优线速度，近端应用偏移折算
+    const localPen = s * DS < 35 ? linePenalty : 1.0;
+    const cap = cornerCap[j] * localPen;
+    if (cap < v) {
+      const req = (v * v - cap * cap) / (2 * d);
+      if (req > aReq) aReq = req;
     }
+    const r1 = Math.sqrt(cap * cap + 2 * lightCap * d);
+    const r2 = Math.sqrt(cap * cap + 2 * brakeCap * 0.985 * d);
+    if (r1 < env1) env1 = r1;
+    if (r2 < env2) env2 = r2;
   }
 
-  // ---------- 切换赛道：__gp.pts 是快照，需从同源 iframe 取新几何 ----------
-  function fetchTrackPts(id) {
-    return new Promise((resolve) => {
-      const f = document.createElement('iframe');
-      f.setAttribute('aria-hidden', 'true');
-      f.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;border:0';
-      f.src = location.origin + location.pathname + '?track=' + encodeURIComponent(id);
-      let done = false;
-      const finish = (arr) => {
-        if (done) return;
-        done = true;
-        try { f.remove(); } catch (e) {}
-        resolve(arr);
-      };
-      f.onload = () => {
-        let n = 0;
-        const iv = setInterval(() => {
-          try {
-            const w = f.contentWindow;
-            const g = w && w.__gp;
-            if (g && g.pts && g.pts.length) {
-              clearInterval(iv);
-              finish(g.pts.map(p => ({ x: p.x, y: p.y })));
-            } else if (++n > 100) {
-              clearInterval(iv); finish(null);
-            }
-          } catch (e) { clearInterval(iv); finish(null); }
-        }, 100);
-      };
-      document.body.appendChild(f);
-      setTimeout(() => finish(null), 12000);
-    });
+  // ★ 晚刹插刀（Dive-Bomb）激活条件：处于进攻状态、已与前车横向错开进入超车走廊
+  const canDiveBomb = !!(wantAttack && closestAhead &&
+      closestAhead.geo.sLon < 24 && closestAhead.geo.sLon > -2 &&
+      Math.abs(myLat - closestAhead.oPredLat) > CAR_WIDTH + 0.35);
+
+  const envGo = canDiveBomb ? Math.min(env2, cornerCap[idx] * 1.02) : env1;
+
+  /* ---- ★ 前车预判防追尾与跟车限速 ---- */
+  let emergency = false;
+  for (let k = 0; k < aheadCars.length; k++) {
+    const item = aheadCars[k];
+    const geo = item.geo;
+    if (geo.sLon <= 0 || geo.sLon > 58) continue;
+
+    // 关键改进：如果本车已经抽头进入畅通的超车线（横向错开大于车宽+余量），直接无视前车限速全速超越！
+    const latClearance = Math.abs((myLat + myVLat * 0.2) - item.oPredLat);
+    if (latClearance > CAR_WIDTH + 0.55 && Math.abs(geo.dLat) > CAR_WIDTH + 0.45) {
+      continue;
+    }
+
+    const gap = geo.gapFrontRear;
+    const closing = v - item.car.speed;
+
+    // 紧急防撞触发：净间距极小且存在追尾速度差
+    if (gap < 1.15 && closing > 0.4 && Math.abs(geo.dLat) < CAR_WIDTH + 0.35) {
+      emergency = true;
+      break;
+    }
+
+    // 结合前车刹车灯（inBrake）超前折算前车 0.14 秒后的有效速度，防止前车急刹导致追尾
+    const lookAheadT = item.car.inBrake > 0 ? 0.14 : 0.05;
+    const predOppSpeed = Math.max(0, item.car.speed - item.oEffDecel * lookAheadT);
+    const reserveGap = aggressiveAttack ? 1.05 : 1.65;
+    const safeGap = Math.max(gap - reserveGap, 0.35);
+
+    const followCap = Math.sqrt(predOppSpeed * predOppSpeed + 2 * brakeCap * 0.92 * safeGap);
+    if (followCap < env1) env1 = followCap;
+    if (followCap < env2) env2 = followCap;
   }
 
-  async function onTrackChanged(id) {
-    if (switchBusy) return;
-    switchBusy = true;
-    if (ui.state) ui.state.textContent = '切换赛道…';
-    try {
-      const pts = await fetchTrackPts(id);
-      if (pts && pts.length) {
-        rebuild(pts, playerCar && playerCar.perf);
-      } else {
-        model = null; profile = null;
-        if (ui.state) ui.state.textContent = '请刷新页面';
-      }
-    } finally {
-      switchBusy = false;
-    }
+  /* ---- ★ 刹车与油门分档输出（严格遵循 brake > 0 时 up 无效的物理铁律） ---- */
+  const steerMag = Math.abs(out.steer);
+  // 摩擦圆保护：大角度转向时重刹会砍掉 23% 横向抓地，弯中大转向优先用 1 档轻刹维持循迹性
+  const heavySteerInCorner = inCorner && steerMag > 0.52 && v < cornerCap[idx] + 3.5;
+
+  if (emergency) {
+    out.brake = 2;
+  } else if (!canDiveBomb && aReq > lightCap * 1.03 && !heavySteerInCorner) {
+    out.brake = 2;
+  } else if (v > env2 + 0.18) {
+    out.brake = heavySteerInCorner && v < env2 + 1.8 ? 1 : 2;
+  } else if (v > envGo + 0.12) {
+    out.brake = 1;
+  } else {
+    out.brake = 0;
   }
 
-  // ---------- 主循环（注册在游戏 rAF 之后，晚一帧生效） ----------
-  function tick() {
-    requestAnimationFrame(tick);
-    if (!gp) return;
+  // ★ 非连续弯道与出弯直道激进提前开油：
+  // 只要无需重刹、车头已基本对准出弯方向（|alpha| 小），且前方曲率正在快速衰减，立即释放轻刹并全油门弹射！
+  const readyToLaunch = !emergency && out.brake <= 1 && (
+      (nonContExit && Math.abs(alpha) < 0.26 && v < cornerCap[idx] + 0.85) ||
+      (exitStraight && Math.abs(alpha) < 0.32 && v < cornerCap[iNear] + 1.2)
+  );
 
-    // 赛道切换检测（applyTrack 会写入 ?track=）
-    let tid = 'default';
-    try { tid = new URLSearchParams(location.search).get('track') || 'default'; } catch (e) {}
-    if (tid !== trackId) {
-      trackId = tid;
-      ptsSourceLocked = true;   // 从这里开始 __gp.pts 不再跟随 switchTrack 更新
-      if (lastPtsRef) onTrackChanged(tid === 'default' ? '' : tid);
-    }
-
-    // 首次加载：__gp.pts 才是权威几何
-    if (!ptsSourceLocked && gp.pts && gp.pts !== lastPtsRef && !rebuildBusy) {
-      rebuild(gp.pts, (gp.cars && (gp.cars.find(c => c.isPlayer) || gp.cars[0]) || {}).perf);
-    }
-
-    const cars = gp.cars;
-    if (!cars || !cars.length) return;
-    playerCar = cars.find(c => c.isPlayer) || cars[0];
-
-    if (!hookInstalled) installInputHook(gp.input);
-
-    // 玩家选车后性能对象才确定：按该车性能重新选一次走线族（不同车的最优走线可能不同）
-    if (playerCar && playerCar.perf && playerCar.perf !== lastPerf && !rebuildBusy) {
-      lastPerf = playerCar.perf;
-      if (lastPtsRef) rebuild(lastPtsRef, lastPerf);
-    }
-
-    // 调校面板会原地改 perf：周期性重建速度包络
-    profAge++;
-    if (model && profile && profAge % 30 === 0) {
-      profile = computeSpeedProfile(model, playerCar.perf || {}, params.gripUtil);
-    }
-
-    // 倒计时阶段（含 R 重开 / 换赛道后的重置）清空内部状态，避免上一局受困计数误触发倒车
-    if (gp.race && gp.race.state === 'countdown') {
-      driveState.extra = 0; driveState.stuck = 0; driveState.rev = 0;
-      driveState.moved = false;
-      driveState.lockedLat = null; driveState.lockTimer = 0;
-      driveState.blockT = 0; driveState.lingering = 0; driveState.abortCool = 0;
-    }
-
-    const racing = gp.started && gp.race && gp.race.state === 'racing';
-    const spectate = gp.mode === 'spectate';
-
-    if (!settings.enabled) {
-      releaseToKeyboard();
-      ui.state.textContent = '手动驾驶';
-      updateHud(0);
-      return;
-    }
-    if (spectate) {
-      ctrl.up = false; ctrl.brake = 0; ctrl.steer = 0; ctrl.left = ctrl.right = false;
-      ui.state.textContent = '观战模式';
-      return;
-    }
-    if (!racing || !model || !profile || rebuildBusy || switchBusy) {
-      ctrl.up = false; ctrl.brake = 0; ctrl.steer = 0; ctrl.left = ctrl.right = false;
-      ui.state.textContent = (rebuildBusy || switchBusy) ? '建模中…' : (model ? '等待发车' : '建模中…');
-      return;
-    }
-
-    const dt = 1 / 60;
-    const out = stepAutopilot(playerCar, model, profile, cars, dt, { aggr: settings.aggr }, driveState);
-    ctrl.up = out.up;
-    ctrl.brake = out.brake;
-    ctrl.steer = out.steer;
-    ctrl.left = out.steer < -0.02;
-    ctrl.right = out.steer > 0.02;
-
-    frameCount++;
-    if (frameCount % 6 === 0) updateHud(out.steer);
+  if (readyToLaunch) {
+    out.brake = 0; // 必须先将 brake 清零，out.up 才能在物理引擎中生效！
+    out.up = true;
+  } else if (out.brake === 0) {
+    // 弯中与直道全油门控制：出弯直道与进攻/防守状态不留速度余量，吃满 100% 驱动力
+    const throttleMargin = (exitStraight || nonContExit || wantAttack || car._defendMode) ? -0.15 : 0.03;
+    out.up = (v < cornerCap[idx] - throttleMargin) && !(sideSqueeze && v > cornerCap[idx] * 0.98);
+  } else {
+    out.up = false;
   }
 
-  function updateHud(steer) {
-    if (!playerCar || !model || !profile) return;
-    const N = model.N;
-    const idx = ((playerCar.nearIdx | 0) % N + N) % N;
-    const v = Math.abs(playerCar.speed);
-    const vt = profile.v[idx];
-    ui.state.textContent = settings.enabled ? '自动驾驶中' : '手动驾驶';
-    ui.state.className = settings.enabled ? 'good' : '';
-    ui.speed.textContent = `${Math.round(vt * 3.6)} / ${Math.round(v * 3.6)} km/h`;
-    const eLat = (playerCar.x - model.px[idx]) * model.nx[idx] + (playerCar.y - model.py[idx]) * model.ny[idx];
-    const trackErr = eLat - (model.off[idx] + driveState.extra);
-    ui.err.textContent = `${trackErr >= 0 ? 'L' : 'R'} ${Math.abs(trackErr).toFixed(2)} m`;
-    ui.lap.textContent = fmtLap(profile.lapTime);
-  }
-
-  function fmtLap(t) {
-    if (!isFinite(t) || t <= 0) return '--';
-    const m = Math.floor(t / 60);
-    const s = t - m * 60;
-    return `${m}:${s < 10 ? '0' : ''}${s.toFixed(2)}`;
-  }
-
-  function boot() {
-    gp = window.__gp;
-    if (!gp || !gp.pts || !gp.pts.length) return;
-    trackId = new URLSearchParams(location.search).get('track') || 'default';
-    const car = gp.cars && (gp.cars.find(c => c.isPlayer) || gp.cars[0]);
-    rebuild(gp.pts, car && car.perf);
-    requestAnimationFrame(tick);
-  }
-
-  // 等待游戏模块挂载 __gp
-  let waited = 0;
-  const waiter = setInterval(() => {
-    if (window.__gp && window.__gp.pts && window.__gp.pts.length) {
-      clearInterval(waiter);
-      boot();
-    } else if (++waited > 300) {
-      clearInterval(waiter);
-      ui.state.textContent = '未找到游戏接口';
-    }
-  }, 200);
-})();
+  // 写入调试可视化探针（开启视图工具「AI 探测线」可见当前动态攻防目标点）
+  out.targetX = txM;
+  out.targetY = tyM;
+  out.targetSpeed = env1;
+};

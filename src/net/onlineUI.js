@@ -18,6 +18,8 @@ let boardTrackId = null;
 let roomLaps = 0;                  // 房主自定义圈数（0 = 赛道默认）
 let intentionalClose = false;      // 用户主动断开（不触发自动重连）
 let reconnectTries = 0;
+let lastLobbyInteract = 0;         // 上次在大厅列表里的操作时间（避免刷新打断点击）
+let lobbyRefreshTimer = 0;
 
 const ADDR_KEY = "gp_server_url";
 const NICK_KEY = "gp_nickname";
@@ -27,7 +29,14 @@ function $(id) { return document.getElementById(id); }
 function defaultServerAddr() {
   const saved = localStorage.getItem(ADDR_KEY);
   if (saved) return saved;
-  return `ws://${location.hostname || "localhost"}:8080`;
+  // 生产环境：前后端同源部署（nginx 反代 /ws、/api），默认走同源地址
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  if (!location.port || location.port === "80" || location.port === "443") {
+    return `${proto}//${location.host}`;
+  }
+  // 本地 vite dev(8080) 直连后端 8081
+  if (location.port === "8080") return `${proto}//${location.hostname}:8081`;
+  return `${proto}//${location.host}`;
 }
 
 export function initOnlineUI(callbacks = {}) {
@@ -77,6 +86,9 @@ export function initOnlineUI(callbacks = {}) {
 
   el.lobbyBody.addEventListener("click", onLobbyClick);
   el.lobbyBody.addEventListener("change", onLobbyChange);
+  // 玩家正在大厅里操作（点击/选择/输入）时，服务端推送的刷新延后执行，避免把按钮/下拉删掉导致点不中
+  el.lobbyBody.addEventListener("pointerdown", markLobbyInteract, true);
+  el.lobbyBody.addEventListener("keydown", markLobbyInteract, true);
   el.roomView.addEventListener("click", onRoomClick);
   el.roomView.addEventListener("change", onRoomChange);
 
@@ -90,6 +102,34 @@ export function initOnlineUI(callbacks = {}) {
     if (me) { myCarId = me.carId; myReady = me.ready; }
     renderRoom();
     switchView("room");
+  });
+
+  // 服务端推送的大厅视图（房间列表 / 在线人数）：房间增删、开赛、结束都会即时下发
+  conn.on("lobby", (msg) => {
+    const s = conn.session;
+    if (!s) return;
+    if (Array.isArray(msg.rooms)) s.rooms = msg.rooms;
+    if (msg.online != null) s.online = msg.online;
+    // 自己所在房间的成员/状态也同步（例如别人加入、房主改赛道、比赛开打）
+    if (room) {
+      const fresh = (msg.rooms || []).find(r => r.id === room.id);
+      if (fresh) {
+        room = { ...room, ...fresh };
+        const me = room.players.find(p => p.id === (conn.session?.sid || conn.session?.playerId));
+        if (me) { myCarId = me.carId; myReady = me.ready; }
+        if (!el.roomView.classList.contains("hidden")) renderRoom();
+      }
+    }
+    refreshLobby();
+  });
+
+  // 服务端推送的榜单变化（练习成绩上传 / 房间比赛完赛）
+  conn.on("boards", (msg) => {
+    const s = conn.session;
+    if (!s || !msg.trackId) return;
+    if (!s.leaderboards) s.leaderboards = {};
+    s.leaderboards[msg.trackId] = msg.entries || [];
+    refreshLobby();
   });
 
   // 服务端确认退出房间：清掉本地房间态，回到大厅（比赛中的退出由服务端判负并广播）
@@ -159,6 +199,8 @@ export function hideOnline() {
 // 返回是否真的在房间里（供上层决定是否需要额外提示）。
 export function leaveOnlineRoom() {
   if (!room) return false;
+  // 先让主流程把自己正在进行的比赛彻底停掉（只退自己这辆车，其他车友的比赛照常进行）
+  cb.onBeforeLeaveRoom?.();
   if (conn.isOpen()) conn.send({ t: "room_leave" });
   room = null;
   myReady = false;
@@ -205,17 +247,51 @@ async function connect() {
 }
 
 // ---- 大厅 ----
+function lobbyInfoText() {
+  const s = conn.session;
+  if (!s) return "";
+  const online = s.online != null ? ` · 🟢 ${s.online} 人在线` : "";
+  return `已连接 ${conn.url} · 身份 ${s.nickname}${online}`;
+}
+
 function renderLobby() {
   const s = conn.session;
   if (!s) return;
-  const online = s.online != null ? ` · 🟢 ${s.online} 人在线` : "";
-  el.connInfo.textContent = `已连接 ${conn.url} · 身份 ${s.nickname}${online}`;
+  el.connInfo.textContent = lobbyInfoText();
+  renderLobbyBody();
+}
+
+function markLobbyInteract() {
+  lastLobbyInteract = performance.now();
+}
+
+// 实时刷新：数据变了就重绘，但绝不在玩家正在点击/选择的瞬间重建 DOM
+function refreshLobby() {
+  const s = conn.session;
+  if (!s || !el.wrap || el.wrap.classList.contains("hidden")) return;
+  el.connInfo.textContent = lobbyInfoText();
+  if (el.lobby.classList.contains("hidden")) return;
+  if (performance.now() - lastLobbyInteract < 500) {
+    if (!lobbyRefreshTimer) {
+      lobbyRefreshTimer = setTimeout(() => {
+        lobbyRefreshTimer = 0;
+        refreshLobby();
+      }, 450);
+    }
+    return;
+  }
   renderLobbyBody();
 }
 
 function renderLobbyBody() {
-  if (currentTab === "boards") el.lobbyBody.innerHTML = boardsHtml();
-  else el.lobbyBody.innerHTML = roomsHtml();
+  // 保留创建房间表单的选择，避免刷新把玩家选好的赛道/开关冲掉
+  const prevTrack = $("createTrackSel")?.value;
+  const prevFillAI = $("createFillAI")?.checked;
+  el.lobbyBody.innerHTML = currentTab === "boards" ? boardsHtml() : roomsHtml();
+  const trackSel = $("createTrackSel");
+  const fillAI = $("createFillAI");
+  if (trackSel && prevTrack) trackSel.value = prevTrack;
+  if (fillAI && prevFillAI !== undefined) fillAI.checked = prevFillAI;
 }
 
 function boardsHtml() {
@@ -331,8 +407,9 @@ function renderRoom() {
         <button class="results-btn online-btn" id="roomReadyBtn">${myReady ? "取消就绪" : "✔ 准备就绪"}</button>
       </div>
     <div class="online-room-actions">
+      ${isHost ? `
       <button class="results-btn primary online-btn" id="roomStartBtn" ${canStart ? "" : "disabled"}
-        title="${canStart ? "全员就绪，开赛！" : "房主在全员选车并就绪后可开赛"}">🏁 开始比赛</button>
+        title="${canStart ? "全员就绪，开赛！" : "房主在全员选车并就绪后可开赛"}">🏁 开始比赛</button>` : ""}
       <button class="results-btn online-btn ${isAutopilotOn() ? "on" : ""}" id="roomAutopilotBtn"
         title="开启后由算法驾驶你的赛车（本地运行，支持自定义算法）">🤖 自动驾驶：${isAutopilotOn() ? "开" : "关"}</button>
       <button class="results-btn online-btn" id="roomLeaveBtn">← 离开房间</button>

@@ -425,6 +425,31 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+// 无渲染快进用的空特效桩：不产生刹车痕/扬尘，避免快进时刷爆粒子池
+const FX_SILENT = { addSkid() {}, addDust() {}, clearEffects() {} };
+
+// 单人局（场上只有自己一个真人：单人计时 / 与 AI 对战）自己冲线后，
+// 剩余 AI 直接无渲染快进到全部完赛 —— 不再一帧一帧实时期待 AI 跑完剩下的圈。
+function simulateRemainingToEnd(maxSimMs = 300000) {
+  const dt = 1 / 30;
+  const maxSteps = Math.ceil((maxSimMs / 1000) / dt);
+  for (let s = 0; s < maxSteps; s++) {
+    activeCars.length = 0;
+    for (const c of cars) if (!c.finished) activeCars.push(c);
+    if (activeCars.length === 0) break;
+    advanceSimClock(dt * 1000);
+    for (let i = 0; i < cars.length; i++) {
+      const car = cars[i];
+      if (car.finished) continue;        // 自己的车已冲线，成绩锁定不再推进
+      driveAI(car, aiInputs[i], dt, activeCars);
+      stepCar(car, dt, aiInputs[i], FX_SILENT);
+      updateCarLap(car, simClock);
+    }
+    if (race.state === "racing") resolveCarCollisions(cars);
+  }
+  // 兜底：极少数卡死/出界的车保持未完赛，结算里按里程排在后段
+}
+
 function update(dt) {
   if (!started || isModalOpen) return;
 
@@ -519,6 +544,19 @@ function update(dt) {
     resolveCarCollisions(cars);
   }
 
+  // 单人局：自己冲线后直接把剩余 AI 无渲染快进到终局，立刻出成绩
+  // （观战模式除外——那是全 AI 表演赛，要一直看着跑）
+  const myCar = cars[playerIndex];
+  if (!finishAt && mode !== "spectate" && myCar && myCar.finished && !cars.every(c => c.finished)) {
+    simulateRemainingToEnd();
+    // 快进跑完后重新判定冠军（可能有人比你先冲线）
+    winner = null;
+    for (const c of cars) {
+      if (c.finished && (!winner || (c.total || 0) < (winner.total || 0))) winner = c;
+    }
+    finishAt = performance.now() - 3000;   // 让本帧末尾立刻弹出结算大屏
+  }
+
   // 检查是否全员完赛；未完赛时用超时兜底，避免一辆车卡死导致永远不结算
   const allFinished = cars.every(c => c.finished);
   if (allFinished && !finishAt) {
@@ -564,8 +602,9 @@ function draw() {
   }
 
   // 绘制所有赛车（从后向前绘制，主焦点赛车最后绘制避免被遮挡）
+  // retired = 已退出房间的车友：直接消失，不在赛道上留下幽灵车
   for (let i = 0; i < cars.length; i++) {
-    if (i !== focusIndex) drawCar(ctx, cars[i]);
+    if (i !== focusIndex && !cars[i].retired) drawCar(ctx, cars[i]);
   }
   if (cars[focusIndex]) {
     drawCar(ctx, cars[focusIndex]);
@@ -709,6 +748,23 @@ function closeConfirmModal() {
   syncModalOpen();
 }
 
+// 只退出"自己这辆车"的在线比赛：停止本地渲染与状态上报，不动服务器上的其他车手。
+// 用于房间内点「离开房间」/ 断线重连后看到房间界面等场景：
+// 之前这里不处理比赛态，会出现"已经退出房间，但本地比赛还在跑"的情况。
+function exitLocalNetRace() {
+  if (mode !== "onlinerace") return;
+  stopNetRace();
+  hideResults();
+  hideMsg(true);
+  resetSimClock(0);
+  mode = "online";
+  started = false;
+  resultsShown = false;
+  finishAt = 0;
+  winner = null;
+  updateTopControls();
+}
+
 // 主动离开在线流程：终止/认输在线比赛 + 退出房间。
 // 必须在切回主菜单前调用，否则服务端仍把你留在房间里，房主一开赛会被拽回对局。
 function leaveOnlineSession() {
@@ -796,6 +852,8 @@ function initStartFlow() {
     onStartPractice: startOnlinePractice,
     onExit: () => backToMainMenu(),
     onOpenAutopilot: () => openAutopilot(),
+    // 退出房间前：把自己正在跑的比赛彻底停掉（认输/移出由服务端统一处理，其他车友不受影响）
+    onBeforeLeaveRoom: exitLocalNetRace,
     onDisconnected: () => {
       // 在线比赛中掉线：终止比赛退回主菜单
       if (mode === "onlinerace") {
@@ -1176,8 +1234,12 @@ function frame(ts) {
   const activeCar = cars[focusIndex] || cars[0];
   const activeCtrl = isAIDriven(focusIndex) ? aiInputs[focusIndex] : input;
 
-  updateCamera(activeCar, dt);
-  fx.updateEffects(dt);
+  // 倍速下镜头/粒子必须按"模拟时间"推进：
+  // 车辆以 N 倍速前进，若镜头仍按真实时间慢慢追（时间常数 ~0.24s），
+  // 4× 时稳态滞后就会被放大 4 倍，车会被甩到画面边缘甚至屏幕外。
+  const visualDt = mode === "onlinerace" ? dt : dt * speedMult;
+  updateCamera(activeCar, visualDt);
+  fx.updateEffects(visualDt);
   // 弹窗（赛道选择 / 开局重选 / 结算大屏）打开时引擎声回落怠速
   audio.updateAudio(activeCar, activeCtrl, dt, race.state === "racing" && !isModalOpen && !resultsShown);
   tickMsg(performance.now());

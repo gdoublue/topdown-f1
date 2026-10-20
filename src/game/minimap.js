@@ -114,7 +114,7 @@ export function drawMinimap(cars, activeIdx = 0) {
   const carList = Array.isArray(cars) ? cars : [cars];
   for (let i = 0; i < carList.length; i++) {
     const c = carList[i];
-    if (!c) continue;
+    if (!c || c.retired) continue;
     const isFollow = i === activeIdx;
     const px = miniOffX + c.x * miniScale;
     const py = miniOffY + c.y * miniScale;

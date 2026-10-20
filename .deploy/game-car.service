@@ -1,0 +1,26 @@
+[Unit]
+Description=Top-down F1 game server (HTTP REST + WebSocket)
+Documentation=file:///opt/game-car/server/index.js
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gamecar
+Group=gamecar
+WorkingDirectory=/opt/game-car/server
+Environment=NODE_ENV=production
+Environment=PORT=8081
+ExecStart=/usr/local/bin/node index.js
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

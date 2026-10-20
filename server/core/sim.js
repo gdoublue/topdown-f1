@@ -10,7 +10,7 @@ import { activateContext, createTrackContext } from "../../src/track/geometry.js
 import { createCar, stepCar, nearestIndex, finishedCarInput, resolveCarCollisions, getCarDistance } from "../../src/car/physics.js";
 import { applyCarConfig, createAIInput, driveAI, AI_CONFIGS } from "../../src/game/ai.js";
 import { createRaceState, initCarRaceState, updateCarLap } from "../../src/game/race.js";
-import { TOTAL_LAPS, PHYS } from "../../src/config.js";
+import { TOTAL_LAPS, PHYS, setRaceLaps } from "../../src/config.js";
 import { TRACK_MIN_LAP_MS, DEFAULT_MIN_LAP_MS } from "../config.js";
 
 const FX_STUB = { addSkid() {}, addDust() {}, clearEffects() {} };
@@ -83,7 +83,7 @@ export class RaceSim {
     });
   }
 
-  // 客户端状态上报（~12Hz）：速度做粗粒度合理性钳制
+  // 客户端状态上报（~30Hz）：速度做粗粒度合理性钳制
   setPlayerState(sid, s, now) {
     const g = this.ghosts.get(sid);
     if (!g) return;
@@ -123,6 +123,39 @@ export class RaceSim {
     });
   }
 
+  // 玩家退出房间 / 掉线：该车彻底退赛（判负留名次），
+  // 后续快照不再下发这台车 —— 其他人既不会被挡路，也不会看到一辆停在赛道上的幽灵车。
+  retirePlayer(sid) {
+    const g = this.ghosts.get(sid);
+    if (!g) return;
+    this.forfeitPlayer(sid);
+    g.gone = true;
+  }
+
+  // 真人都已完赛（或已退赛）？
+  humansAllDone() {
+    return this.ghosts.size > 0 && [...this.ghosts.keys()].every(sid => this.finishReports.has(sid));
+  }
+
+  // 单人房（真人 < 2）：真人跑完就直接把剩余的 AI 圈无渲染快进到终局。
+  // 做法是按 30Hz 步长空跑模拟（不广播快照、不渲染），让 AI 用真实成绩冲线，
+  // 玩家不用再干等 AI 把剩下的两三圈跑完。
+  fastForwardToEnd(now, maxSimMs = 300000) {
+    if (this.ended) return;
+    const dt = 1 / 30;
+    const limit = now + maxSimMs;
+    let t = now;
+    while (!this.ended && t < limit) {
+      t += dt * 1000;
+      this.tick(dt, t);
+    }
+    if (!this.ended) {
+      // 兜底：AI 卡死/出界时强制终局，未完赛车按里程排名
+      this.ended = true;
+      this.race.state = "finished";
+    }
+  }
+
   // 玩家完赛上报（本地计时）；服务器做合理性校验
   reportFinish(sid, r) {
     const g = this.ghosts.get(sid);
@@ -140,6 +173,7 @@ export class RaceSim {
 
   tick(dt, now) {
     activateContext(this.trackCtx);   // 多房间轮流 tick：切到本房间赛道（缓存下 O(1)）
+    setRaceLaps(this.maxLaps);        // 房间自定义圈数：AI 计圈必须按房间设定（否则会多跑/少跑）
 
     if (this.race.state === "countdown") {
       this.race.countdown -= dt;
@@ -211,11 +245,14 @@ export class RaceSim {
       }
     }
 
-    // 终局判定：全部人类已上报完赛 且 全部 AI 完赛；或超时 150s
+    // 终局判定：全部人类已上报完赛 且 全部 AI 完赛；或超时兜底
+    // 超时阈值按圈数放宽（理论最短圈 × 圈数 × 1.8 + 60s 缓冲）：
+    // 固定 150s 会把长赛道多圈的比赛提前掐断，导致所有人被记成未完赛。
     if (!this.ended) {
       const allHumanDone = [...this.ghosts.keys()].every(sid => this.finishReports.has(sid));
       const allAIDone = this.aiEntries.every(e => e.car.finished);
-      const timeout = now - this.race.raceStart > 150000;
+      const minLap = TRACK_MIN_LAP_MS[this.room.trackId] ?? DEFAULT_MIN_LAP_MS;
+      const timeout = now - this.race.raceStart > minLap * this.maxLaps * 1.8 + 60000;
       if ((allHumanDone && allAIDone) || timeout) {
         this.ended = true;
         this.race.state = "finished";
@@ -246,7 +283,7 @@ export class RaceSim {
       state: this.race.state,
       countdown: Math.max(0, Math.ceil(this.race.countdown || 0)),
       cars: [
-        ...[...this.ghosts.values()].map(g => ({ i: g.sid, ...carSnap(g.car) })),
+        ...[...this.ghosts.values()].filter(g => !g.gone).map(g => ({ i: g.sid, ...carSnap(g.car) })),
         ...this.aiEntries.map(e => ({ i: "ai:" + e.car.algorithm, ...carSnap(e.car) })),
       ],
     };
@@ -280,6 +317,7 @@ export class RaceSim {
         shortName: c.shortName,
         color: c.color,
         finished: !!c.finished,
+        forfeited: false,   // 必须显式给出：缺字段会让排序里的 forfeited 比较恒为"不同"，AI 永远排在真人前面
         valid: 1,
         totalMs: Math.round(c.total || 0),
         bestLapMs: c.best ? Math.round(c.best) : 0,

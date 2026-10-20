@@ -91,6 +91,8 @@
     <a href="#out">可写：out</a>
     <a href="#track">可读：赛道数据</a>
     <a href="#tools">工具函数</a>
+    <a href="#apexcap">getApexReleaseCap 详解</a>
+    <a href="#traffic">跟车/超车返回值</a>
     <a href="#coord">坐标系与单位</a>
     <a href="#physics">物理边界</a>
     <a href="#example">示例</a>
@@ -129,6 +131,26 @@
       <tr><td><code>otherCars</code></td><td>只读</td><td>场上车辆数组（<b>包含你自己</b>，只含未完赛车），每项结构与 <code>car</code> 相同，见 <a href="#others">第 3 节</a>。</td></tr>
     </tbody>
   </table>
+
+  <h3>运行机制（这几点最容易踩坑）</h3>
+  <ul>
+    <li><b><code>out</code> 是每帧复用的同一个对象</b>：<code>out.up</code> / <code>out.brake</code> / <code>out.steer</code>
+      每帧都必须显式赋值，不写就会沿用上一帧的值（例如提前 <code>return</code> 时刹车会一直踩着）。</li>
+    <li><b>调用时机</b>：每个物理子步调用一次。3 秒倒计时、弹窗打开（含参数说明/结算）、冲线之后都不调用。
+      弹窗打开期间比赛暂停，可以边跑边改代码。</li>
+    <li><b>倍速快进会放大调用频率</b>：按 <code>+</code> / <code>-</code> 切 2×~16× 时，一帧会切多个物理子步
+      （最多 32 步/帧），算法要够轻，别在里面做大数组分配或长循环。</li>
+    <li><b>抛异常会中断该帧</b>：异常会让这一帧剩下的物理与渲染全部跳过（画面像卡住）。有风险的除法、
+      数组越界用 <code>try/catch</code> 或条件判断挡住。</li>
+    <li><b>输出 NaN 会毁掉车辆状态</b>：<code>out.steer = NaN</code> 会让车坐标变 NaN，画面上直接消失。
+      算完用 <code>Number.isFinite(v) ? v : 0</code> 兜底。</li>
+    <li><b>编译失败不会停车</b>：状态栏显示 <code>✗</code> 时，车继续用上一次编译成功的算法；
+      从未成功过则退回该车内置 AI，而不是停在原地。</li>
+    <li><b>代码自动保存</b>：编辑器内容与开关状态存在浏览器本地（localStorage），刷新页面不丢；
+      「恢复默认 superDriver」按钮可一键还原。</li>
+    <li><b>不要改 <code>car</code> / <code>car.perf</code></b>：它们是共享对象，改性能不会即时反映到弯速表缓存，
+      也会污染内置算法；在线成绩由服务器校验。</li>
+  </ul>
 </div>
 
 <h2 id="car">2. 可以读取：<code>car</code>（你的车，只读）</h2>
@@ -151,6 +173,9 @@
     <tr><td><code>car.inUp</code></td><td>bool</td><td>上一步是否踩油门。</td></tr>
     <tr><td><code>car.inSteer</code></td><td>-1 ~ 1</td><td>上一步的方向输入，与车身横摆方向一致。</td></tr>
     <tr><td><code>car.accel</code></td><td>m/s²</td><td>上一步的实际纵向加速度（负值 = 减速）。</td></tr>
+    <tr><td><code>car.best</code> / <code>car.last</code> / <code>car.total</code></td><td>毫秒</td><td>最快圈 / 上一圈 / 总用时（<code>null</code> = 还没有成绩）；<code>car.lapTimes</code> 是每圈数组。</td></tr>
+    <tr><td><code>car.gridPos</code> / <code>car.idx</code></td><td>索引</td><td>发车格位（0 = 杆位）/ 上一步的最近采样点下标（<code>nearIdx</code> 的历史值，可算横向移动量）。</td></tr>
+    <tr><td><code>car.id</code> / <code>car.name</code> / <code>car.color</code></td><td>-</td><td>车辆 id、全名、主题色，用于分支或调试打印。</td></tr>
     <tr><td><code>car.perf</code></td><td>-</td><td>本车性能配置，见下表。</td></tr>
     <tr><td><code>car.nickname</code> / <code>car.shortName</code> / <code>car.number</code></td><td>-</td><td>显示用信息。</td></tr>
   </tbody>
@@ -320,10 +345,12 @@ if (geo.gapFrontRear &lt; 0 &amp;&amp; geo.gapLateral &lt; 0) { /* 已经贴上�
     <tr><td><code>out.up</code> <span class="tag rw">可写</span></td><td>bool</td><td>油门。只有在 <code>brake === 0</code> 时才生效。</td></tr>
     <tr><td><code>out.brake</code> <span class="tag rw">可写</span></td><td>0 / 1 / 2</td><td>0 松开、1 轻刹（45% 制动力）、2 重刹（100%）。刹车优先级高于油门。</td></tr>
     <tr><td><code>out.left</code> / <code>out.right</code></td><td>bool</td><td>旧式方向键模拟。<b>只在你把 <code>out.steer</code> 写成非数字时才生效</b>，建议直接用 <code>out.steer</code>。</td></tr>
-    <tr><td><code>out.targetX</code> / <code>out.targetY</code> / <code>out.targetSpeed</code></td><td>数字</td><td>只用于「AI 探测线」可视化（视图工具里打开），不影响物理。</td></tr>
+    <tr><td><code>out.targetX</code> / <code>out.targetY</code> / <code>out.targetSpeed</code></td><td>数字</td><td>只用于「AI 探测线」可视化（视图工具面板里打开开关），不影响物理。注意<b>单人模式下不绘制</b>，对战 AI / 观战 / 在线对战才看得到。</td></tr>
   </tbody>
 </table>
-<p class="dim">约定：<code>out.brake</code> 必须是数字 0/1/2；<code>out.up</code> 必须是布尔值。</p>
+<p class="dim">约定：<code>out.up</code> 按真值判断（写 <code>1</code> / <code>"x"</code> 也算踩油门）；
+<code>out.brake</code> 必须是数字：<b>只有严格等于 <code>2</code> 才是重刹</b>，其它任何正数（含 <code>1</code>、<code>1.5</code>、<code>3</code>）都按轻刹 45% 处理，<code>0</code> / 负数 / 不写 = 松开；
+<code>out.steer</code> 会被钳到 -1~1。</p>
 
 <h2 id="track">5. 可以读取：赛道数据（自动注入）</h2>
 <table>
@@ -360,18 +387,132 @@ if (geo.gapFrontRear &lt; 0 &amp;&amp; geo.gapLateral &lt; 0) { /* 已经贴上�
   例如 <code>const j = track.idxAt(car.trackS + 30);</code> 直接拿到 30 米后的采样点。
 </p>
 
+<h3>没有注入、别写错名字的东西</h3>
+<table>
+  <thead><tr><th>你可能会想写</th><th>正确写法</th></tr></thead>
+  <tbody>
+    <tr><td><code>isLinear</code></td><td><code>track.isLinear</code></td></tr>
+    <tr><td><code>HW</code> / <code>LAP_LENGTH</code></td><td><code>track.HW</code> / <code>track.length</code>（每条赛道不同）</td></tr>
+    <tr><td><code>rcurvS</code>（未平滑原始曲率）、<code>vTarget</code>（AI 目标速度表）</td><td>不注入；曲率统一用 <code>curvS</code>，弯速用两张 <code>*Cap</code> 表</td></tr>
+    <tr><td><code>import</code> / <code>require</code> / 访问其他模块</td><td>不支持。代码是 <code>new Function</code> 编译的纯函数体，只能用它注入的标识符 + <code>Math</code> / <code>console</code> 等浏览器全局</td></tr>
+  </tbody>
+</table>
+
+<h3>环形赛道 vs 直线冲刺</h3>
+<ul>
+  <li><code>N</code>、<code>DS</code> 每条赛道都不一样，不要把下标写成常数、也不要把"米"直接当下标用。</li>
+  <li><b>环形</b>：前进 <code>step</code> 个采样点写 <code>(i + step) % N</code>（负数要先 <code>+N</code> 再取模）。</li>
+  <li><b>直线冲刺</b>：赛道不闭合，必须 <code>Math.min(i + step, N - 1)</code> 或 <code>track.idxAt(米)</code>；
+      照环形写 <code>% N</code> 会让"前方"绕回起点，前车/弯道判断直接错乱。</li>
+</ul>
+
 <h2 id="tools">6. 可直接调用的工具函数</h2>
 <table>
   <thead><tr><th>函数</th><th>说明</th></tr></thead>
   <tbody>
     <tr><td><code>clamp(v, a, b)</code></td><td>把 v 限制在 [a, b]。</td></tr>
     <tr><td><code>wrapAngle(a)</code></td><td>把角度差归一化到 (-π, π]，算航向误差必用。</td></tr>
-    <tr><td><code>getSuperCornerCap(perf)</code></td><td>返回每个采样点的弯中极限速度表（<code>Float32Array</code>，单位 m/s，96% 抓地利用率）。直接查表当目标速度。</td></tr>
+    <tr><td><code>getSuperCornerCap(perf)</code></td><td>返回每个采样点的弯中极限速度表（<code>Float32Array</code>，单位 m/s，96% 抓地利用率，<b>±30m 对称窗口</b>）。直接查表当目标速度。</td></tr>
+    <tr><td><code>getApexReleaseCap(perf)</code></td><td>内置 geminiDriver 在用的「过弯心即释放」弯速表：<b>非对称窗口 −2m ~ +10.5m</b>、孤立弯出弯允许外抛走线（等效曲率 ×0.86）、抓地利用率 96.5%。出弯约 10m 就解除限速，比上面那张表更快。</td></tr>
     <tr><td><code>evaluateTrafficAndOvertake(car, otherCars, ti, dt)</code></td><td>内置跟车 / 超车决策。返回 <code>{ targetX, targetY, shouldSlow, speedCap, steerBias, emergencyBrake, isOvertaking }</code>。</td></tr>
     <tr><td><code>getCarDistance(a, b)</code></td><td>返回 <code>{ sLon, dLat, gapFrontRear, gapLateral, distCenter }</code>。sLon &gt; 0 表示 b 在 a 前方；gap 为净空隙（负值 = 包围盒重叠）。</td></tr>
     <tr><td><code>superDriver(car, out, dt, otherCars)</code></td><td>游戏内置的完整算法（双前瞻 + 时间最优刹车规划 + 超车状态机）。可以直接调用，或者先调用它再覆盖个别 <code>out</code> 字段。</td></tr>
   </tbody>
 </table>
+
+<p class="dim">
+  <b>两张弯速表怎么选：</b>
+  <code>getSuperCornerCap</code> 用前后各 30m 的对称窗口，弯后 30m 内仍会被弯心限速压着，偏保守；
+  <code>getApexReleaseCap</code> 是 geminiDriver 在用的非对称窗口（只看身后 2m、身前 10.5m），过弯心约 10m 后就允许加速，
+  且识别到孤立弯时会按外抛走线把等效曲率打 0.86 折，出弯更快。想追极限用后者，想稳一点用前者。
+  两个函数都按 <code>perf</code> + 当前赛道做缓存，每帧调用没有额外开销。
+</p>
+
+<h3 id="apexcap">6.1 <code>getApexReleaseCap(perf)</code> 是什么</h3>
+<div class="card">
+  <p>
+    它<b>不是 car 或 out 上的字段，也不是参数</b>，而是系统注入到你算法作用域里的一个<b>查询函数</b>：
+    传入一份车辆性能配置，返回这辆车在当前赛道上<b>每个采样点的极限过弯速度表</b>。
+    内置算法 <code>geminiDriver</code> / <code>superDriver</code> 的纵向控速就是查这张表。
+  </p>
+<pre><code>const cap = getApexReleaseCap(car.perf);   // Float32Array，长度 = N，单位 m/s（×3.6 = km/h）
+const j   = (car.nearIdx + Math.round(30 / DS)) % N;
+const vLimit = cap[j];                     // 前方 30m 处最多能跑多快
+if (Math.abs(car.speed) &gt; vLimit) out.brake = 1;</code></pre>
+
+  <h3>它回答的是什么问题</h3>
+  <p class="dim">
+    只回答「<b>这一个采样点，最多能用多快的速度通过</b>」——不考虑交通、不考虑你现在在哪。
+    交通 / 超车 / 走线偏移请用 <code>evaluateTrafficAndOvertake(...)</code> 和 <code>lineX / lineY</code>。
+    它本质上就是一张长度为 <code>N</code> 的只读速度表，查表是 O(1)。
+  </p>
+
+  <h3>名字里的 "Apex Release"（过弯心即释放）</h3>
+  <table>
+    <thead><tr><th>项</th><th><code>getSuperCornerCap</code></th><th><code>getApexReleaseCap</code></th></tr></thead>
+    <tbody>
+      <tr><td>观察窗口</td><td>前后各 30m（对称）</td><td><b>身后 2m / 身前 10.5m</b>（非对称）</td></tr>
+      <tr><td>出弯表现</td><td>过弯心后仍被弯心限速压约 30m，保守</td><td>过弯心约 10m 后即解除限速，可提前加油</td></tr>
+      <tr><td>孤立弯出弯</td><td>无额外处理</td><td>判定为非连续弯，等效曲率 ×0.86（外抛走线放大半径）</td></tr>
+      <tr><td>抓地利用率</td><td>96%</td><td><b>96.5%</b>（更贴近极限）</td></tr>
+      <tr><td>使用方</td><td>固定 30m 窗口的通用弯速</td><td>内置 <code>geminiDriver</code> 实际在用的表</td></tr>
+    </tbody>
+  </table>
+  <p class="dim">
+    每点的值 = <code>min(沥青极速, √(A_LAT × R), maxOmega / k)</code>，
+    其中 <code>k</code> 是该点附近窗口内的最大曲率，<code>R = 1/k</code>，
+    <code>A_LAT = latGrip × min(1, 0.965 × cornerGripMult)</code>。连续 S 弯不做 0.86 折损。
+  </p>
+
+  <h3>三条使用约定</h3>
+  <ul>
+    <li><b>按 <code>perf</code> 对象 + 当前赛道双键缓存</b>：每帧调用没有额外开销，换赛道后自动失效重建，不用手动清。</li>
+    <li><b>返回的是共享缓存数组，只读</b>：不要写 <code>cap[i] = ...</code>，所有用同一份 <code>perf</code> 的车（含 AI）共用这张表，改了会污染别人。</li>
+    <li><b>必须传真实的性能对象</b>：<code>getApexReleaseCap(car.perf)</code>；手工拼一个假对象会得到错误限速（缺字段时回落到 <code>PHYS</code> 默认值）。</li>
+  </ul>
+
+  <h3>最小用法：纯追踪 + 这张表控速</h3>
+<pre><code>function driver(car, out, dt) {
+  const v = Math.abs(car.speed);
+  const i = car.nearIdx % N;
+
+  // 方向：朝赛车线前瞻点打
+  const j = (i + Math.round((12 + v * 0.55) / DS)) % N;
+  const err = wrapAngle(Math.atan2(lineY[j] - car.y, lineX[j] - car.x) - car.angle);
+  out.steer = clamp(err * 1.8, -1, 1);
+
+  // 纵向：查表，超速就刹
+  const cap = getApexReleaseCap(car.perf);
+  const vLimit = cap[j];
+  out.brake = v &gt; vLimit + 6 ? 2 : v &gt; vLimit + 1 ? 1 : 0;
+  out.up = out.brake === 0 &amp;&amp; v &lt; vLimit;
+}</code></pre>
+</div>
+
+<h3 id="traffic">6.2 <code>evaluateTrafficAndOvertake(car, otherCars, ti, dt)</code> 返回值</h3>
+<table>
+  <thead><tr><th>字段</th><th>类型 / 单位</th><th>怎么用</th></tr></thead>
+  <tbody>
+    <tr><td><code>targetX</code> / <code>targetY</code></td><td>米</td><td>已经叠加了超车侧移的推荐目标点，可以直接当纯追踪的瞄准点。</td></tr>
+    <tr><td><code>shouldSlow</code></td><td>bool</td><td>是否应跟车降速（同车道前车太近）。为 <code>false</code> 时别用 <code>speedCap</code>。</td></tr>
+    <tr><td><code>speedCap</code></td><td>m/s</td><td>跟车限速（约等于前车速度 ×0.97）；无阻挡时为 <code>Infinity</code>。</td></tr>
+    <tr><td><code>steerBias</code></td><td>-0.14 ~ 0.14</td><td>并排时的防挤碰方向偏置，直接加到你的 <code>out.steer</code> 上。</td></tr>
+    <tr><td><code>emergencyBrake</code></td><td>bool</td><td>贴到前车了，立刻 <code>out.brake = 2</code>。</td></tr>
+    <tr><td><code>isOvertaking</code></td><td>bool</td><td>当前侧向偏移已超过 0.6m（正在抽头/变线），可用来切换策略。</td></tr>
+  </tbody>
+</table>
+<pre><code>const v  = Math.abs(car.speed);
+const ti = (car.nearIdx + Math.round((16 + v * 0.5) / DS)) % N;   // 前瞻下标必须合法
+const tr = evaluateTrafficAndOvertake(car, otherCars, ti, dt);
+
+out.brake = tr.emergencyBrake ? 2 : (tr.shouldSlow &amp;&amp; v &gt; tr.speedCap ? 1 : 0);
+const err = wrapAngle(Math.atan2(tr.targetY - car.y, tr.targetX - car.x) - car.angle);
+out.steer = clamp(err * 1.8 + tr.steerBias, -1, 1);
+out.up    = out.brake === 0;</code></pre>
+<p class="dim">
+  <b>有状态</b>：这个函数会读写 <code>car._latOffset</code> 来平滑侧移，所以每帧只调用一次（不要在同一帧里对多个前瞻下标各调一次，
+  也不要在内置 <code>superDriver</code> 之后再调用它，两者会抢同一个偏移量）。<code>ti</code> 越界会读到 <code>undefined</code> 并算出 NaN。
+</p>
 
 <h2 id="coord">7. 坐标系与单位</h2>
 <ul>
@@ -418,12 +559,20 @@ function driver(car, out, dt) {
 
 <h2 id="tips">10. 注意事项</h2>
 <ul>
-  <li><b>调用频率</b>：每个物理子步调用一次（约 30~120 次/秒）。不要在函数里做重循环或大数组分配。</li>
-  <li><b>状态保存在 car 上</b>：内置算法用 <code>car._cruiseStuck</code> 之类的字段存记忆；你自己的算法也可以挂字段，开赛时会随车重置。</li>
-  <li><b>可以不要地读取 input</b>：开启自动驾驶后键盘输入完全不生效，你的车只认 <code>out</code>。</li>
+  <li><b>调用频率</b>：每个物理子步一次（正常约 60 次/秒）。按 <code>+</code> / <code>-</code> 开倍速快进时同一帧会切多个子步
+    （最多 32 步/帧），调用次数同步放大，因此不要在函数里做重循环、大数组分配或 <code>console.log</code>。</li>
+  <li><b>状态保存在 car 上</b>：内置算法用 <code>car._cruiseStuck</code> 之类的字段存记忆；你自己的算法也可以挂
+    <code>car._myState</code> 这类字段，换车/重开时新车辆对象会自然重置。</li>
+  <li><b>不要再读 keyboard input</b>：开启自动驾驶后键盘输入完全不生效，你的车只认 <code>out</code>（<code>car.inUp</code> /
+    <code>car.inBrake</code> 反映的就是你自己上一帧写出去的值）。</li>
   <li><b>在线对战</b>：算法在你本地运行，驱动力由你的客户端上报；服务器仍会按赛道最短圈做成绩合理性校验。</li>
-  <li><b>切换赛道</b>：<code>lineX</code> / <code>pts</code> / <code>getSuperCornerCap</code> 等会在换赛道后重建，系统会自动用新数据重新编译你的代码，不需要重开页面。</li>
-  <li><b>开关入口</b>：选车面板或在线房间里的「🤖 自动驾驶」按钮；开/关状态会记在浏览器里。</li>
+  <li><b>切换赛道</b>：<code>lineX</code> / <code>pts</code> / <code>getSuperCornerCap</code> 等会在换赛道后重建，系统会自动用新数据重新编译你的代码，
+    不需要重开页面。<b>注意重编译等于重新执行整段代码</b>，写在顶层的 <code>let</code> / <code>const</code> 状态会被重置。</li>
+  <li><b>开关入口</b>：选车面板或在线房间里的「🤖 自动驾驶」按钮；开/关状态会记在浏览器里。比赛中途切换立即生效
+    （关闭时交还键盘控制，不重开赛）。</li>
+  <li><b>调试手段</b>：<code>console.log</code> 可用；把前瞻点写进 <code>out.targetX/targetY</code> 并在视图工具里打开「AI 探测线」，
+    能直接在赛道上看到你的瞄准点（单人模式不绘制）；浏览器控制台里还有 <code>window.__gp</code> 调试入口
+    （<code>__gp.cars</code> / <code>__gp.race</code> 等，属于内部接口，可能随版本变动）。</li>
 </ul>
 
 <a class="back" href="./">← 返回游戏</a>

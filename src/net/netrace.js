@@ -6,6 +6,8 @@
 //    - 连续浮点渲染时钟（Continuous Render Clock）：突破离散 tick 限制，支持 60/120/144Hz 丝滑插值
 //    - 航位推算（Dead Reckoning）：网络微抖动时按最后已知航向与速度惯性向前延伸，绝不急刹卡顿
 //    - 动态时钟漂移对齐（Clock Drift Adjustment）：平滑适应网络抖动
+//    - 指数平滑（Exponential Smoothing）：抹掉 30Hz 关键帧的台阶，杜绝"幻灯片式"卡帧观感
+//    - 自车 30Hz 状态上报，保证每帧都有新关键帧可插值
 // 3. 联网碰撞（QQ 飞车非对称碰撞模型）：
 //    - 自车与远端车本地碰撞检测（getCarDistance），自车即时硬分离与减速阻挡（0 延迟、绝不穿模）
 //    - 后车追尾前车时，后车承担动量损失，前车速度保持（公平无穿车漏洞、不被后方顶飞）
@@ -22,8 +24,15 @@ import { conn } from "./connection.js";
 import * as audio from "../game/audio.js";
 
 const SIM_TICK_HZ = 30;                 // 服务端物理模拟与快照广播基准频率（30Hz）
-const INTERPOLATION_DELAY_TICKS = 2.5;  // 连续插值延迟缓冲（~83ms，兼顾超低延迟与平滑抗抖动）
-const STATE_HZ_MS = 80;                 // 自车状态上报间隔（~12Hz）
+const INTERPOLATION_DELAY_TICKS = 3.0;  // 连续插值延迟缓冲（~100ms，保证任何时候都有"未来关键帧"可插值）
+// 自车状态上报间隔：对齐服务端 30Hz 物理步（每个 tick 都能拿到新坐标）。
+// 之前是 80ms(12.5Hz)，服务端会连续 2~3 个 tick 转发同一个坐标，
+// 别的玩家看到的就是"停-跳-停"的幻灯片；30Hz 上报后每个快照都有新位置，插值变成匀速直线。
+const STATE_HZ_MS = 33;
+// 远端车渲染平滑时间常数（秒）：抹平网络抖动与偶发的重复 tick，附带极小的跟随滞后。
+const SMOOTH_TAU_HUMAN = 0.035;
+const SMOOTH_TAU_AI = 0.018;
+const SMOOTH_TAU_ANGLE = 0.028;
 
 let active = false;
 let myId = null;
@@ -99,7 +108,7 @@ export function startNetRace(msg, mySessionId) {
       car.number = c.number || cfg.number;
     }
     cars.push(car);
-    entries.push({ netId: c.id, isMe: car.isPlayer, car, buf: [], pushX: 0, pushY: 0 });
+    entries.push({ netId: c.id, isMe: car.isPlayer, car, buf: [], pushX: 0, pushY: 0, synced: false });
   });
 
   active = true;
@@ -179,10 +188,10 @@ function updateInterpolationClock(dt) {
   renderTick += dt * SIM_TICK_HZ * advanceRate;
 }
 
-// 远端车辆高精度平滑插值 + 航位推算（Dead Reckoning）+ 碰撞视觉位移衰减
+// 远端车辆高精度平滑插值 + 航位推算（Dead Reckoning）+ 指数平滑去阶梯 + 碰撞视觉位移衰减
 function interpolateRemoteCars(dt) {
   for (const e of entries) {
-    if (e.isMe || e.buf.length === 0) continue;
+    if (e.isMe || e.buf.length === 0 || e.car.retired) continue;
     const buf = e.buf;
     const c = e.car;
 
@@ -191,17 +200,19 @@ function interpolateRemoteCars(dt) {
       buf.shift();
     }
 
+    // ---- 1. 按渲染时钟算出"目标位姿" ----
+    let tx, ty, ta, tv;
     if (buf.length === 1 || renderTick <= buf[0].tick) {
       const s = buf[0];
-      c.x = s.x; c.y = s.y; c.angle = s.a; c.speed = s.v;
+      tx = s.x; ty = s.y; ta = s.a; tv = s.v;
     } else if (renderTick >= buf[buf.length - 1].tick) {
-      // 航位推算（Dead Reckoning）：若网络抖动短暂未收到新快照，沿最后已知航向与速度惯性平滑延伸
+      // 航位推算（Dead Reckoning）：网络抖动短暂未收到新快照时，沿最后已知航向与速度惯性平滑延伸
       const last = buf[buf.length - 1];
       const extrapDt = Math.min(0.25, Math.max(0, (renderTick - last.tick) / SIM_TICK_HZ));
-      c.x = last.x + Math.cos(last.a) * last.v * extrapDt;
-      c.y = last.y + Math.sin(last.a) * last.v * extrapDt;
-      c.angle = last.a;
-      c.speed = last.v;
+      tx = last.x + Math.cos(last.a) * last.v * extrapDt;
+      ty = last.y + Math.sin(last.a) * last.v * extrapDt;
+      ta = last.a;
+      tv = last.v;
     } else {
       // 区间连续双快照高精度插值（alpha 在 [0, 1] 间完全连续）
       let s0 = buf[0], s1 = buf[buf.length - 1];
@@ -214,11 +225,28 @@ function interpolateRemoteCars(dt) {
       }
       const span = Math.max(0.0001, s1.tick - s0.tick);
       const alpha = Math.min(1, Math.max(0, (renderTick - s0.tick) / span));
+      tx = s0.x + (s1.x - s0.x) * alpha;
+      ty = s0.y + (s1.y - s0.y) * alpha;
+      ta = s0.a + wrapAngle(s1.a - s0.a) * alpha;
+      tv = s0.v + (s1.v - s0.v) * alpha;
+    }
 
-      c.x = s0.x + (s1.x - s0.x) * alpha;
-      c.y = s0.y + (s1.y - s0.y) * alpha;
-      c.angle = s0.a + wrapAngle(s1.a - s0.a) * alpha;
-      c.speed = s0.v + (s1.v - s0.v) * alpha;
+    // ---- 2. 指数平滑：抹掉关键帧"停-跳-停"的台阶与网络抖动 ----
+    // 对手坐标以 30Hz 上报，服务端转发时同一坐标可能连续出现在 1~2 个 tick 里，
+    // 直接照抄关键帧会让别家车看起来像 PPT 逐帧跳动；一阶低通让渲染位姿始终连续逼近目标，
+    // 目标跳跃时被摊成一段平滑加速，而不是瞬移（稳态只多出 ~2m 的跟随量）。
+    if (!e.synced) {
+      e.synced = true;
+      c.x = tx; c.y = ty; c.angle = ta; c.speed = tv;
+    } else {
+      const tauPos = e.netId.startsWith("ai:") ? SMOOTH_TAU_AI : SMOOTH_TAU_HUMAN;
+      const kPos = 1 - Math.exp(-dt / tauPos);
+      const kAng = 1 - Math.exp(-dt / SMOOTH_TAU_ANGLE);
+      const kSpd = 1 - Math.exp(-dt / 0.08);
+      c.x += (tx - c.x) * kPos;
+      c.y += (ty - c.y) * kPos;
+      c.angle += wrapAngle(ta - c.angle) * kAng;
+      c.speed += (tv - c.speed) * kSpd;
     }
 
     // 叠加碰撞弹开的视觉排斥偏移，并快速指数阻尼衰减回 0
@@ -406,9 +434,21 @@ function onRaceEnd(msg) {
   }
 }
 
+// 有车友退出房间/认输：把他的车从本场比赛抹掉（自己这辆车由 leaveOnlineRoom 统一处理）
+function onPlayerForfeit(msg) {
+  if (!active) return;
+  const e = entries.find(x => x.netId === msg.sid);
+  if (!e || e.isMe) return;
+  e.car.retired = true;
+  e.car.finished = true;      // 不再参与本地碰撞判定
+  e.car.total = 9999999;      // 排名沉底
+  e.buf.length = 0;
+}
+
 export function bindNetRaceHandlers() {
   conn.on("snapshot", onSnapshot);
   conn.on("race_end", onRaceEnd);
+  conn.on("player_forfeit", onPlayerForfeit);
 }
 
 export function forfeitNetRace() {
