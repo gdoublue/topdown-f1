@@ -2,12 +2,17 @@
 //
 // 1. 自车：完全本地 60fps 模拟（与单机同款物理），零网络延迟——手感与单机一致
 //    完赛时本地计时并向服务器上报成绩（服务器做合理性校验与排名）
-// 2. 远端车（人类+AI）：
-//    - 连续浮点渲染时钟（Continuous Render Clock）：突破离散 tick 限制，支持 60/120/144Hz 丝滑插值
-//    - 航位推算（Dead Reckoning）：网络微抖动时按最后已知航向与速度惯性向前延伸，绝不急刹卡顿
-//    - 动态时钟漂移对齐（Clock Drift Adjustment）：平滑适应网络抖动
-//    - 指数平滑（Exponential Smoothing）：抹掉 30Hz 关键帧的台阶，杜绝"幻灯片式"卡帧观感
-//    - 自车 30Hz 状态上报，保证每帧都有新关键帧可插值
+// 2. 远端车（人类+AI）—— 固定延时播放缓冲 + 时间戳样条插值（见 remoteSync.js）：
+//    - 渲染时钟只锚在服务端快照时间戳 ts 上（均匀 tick 轴）：一次锁定时钟偏移，
+//      之后按本机 dt 恒速推进，不随任何包跳变 —— 真人采样再不均匀也推不动它，
+//      AI 因此保持改造前的丝滑匀速
+//    - 远端统一延后 REMOTE_DELAY_MS 播放（FPS 式插值缓冲）：宁可看"过去式"残影，
+//      也不让不均匀到达的坐标直接驱动画面
+//    - 60Hz 上报 + 服务端收到即转发（peer_state）：把缓冲需要覆盖的"空档"从
+//      66ms（33ms 采样 + 33ms 快照节拍）压到 ~17ms，播放延迟因此从 120ms 降到 80ms
+//    - 发送端采样时间戳 st：真人真实采样间隔被完整保留，不被 33ms 网格量化
+//    - 非均匀 Catmull-Rom 样条插值：关键帧处速度连续，不会"快一帧慢一帧"
+//    - 断流速度外推（Dead Reckoning）+ 12ms 微平滑兜底，绝不急刹卡顿
 // 3. 联网碰撞（QQ 飞车非对称碰撞模型）：
 //    - 自车与远端车本地碰撞检测（getCarDistance），自车即时硬分离与减速阻挡（0 延迟、绝不穿模）
 //    - 后车追尾前车时，后车承担动量损失，前车速度保持（公平无穿车漏洞、不被后方顶飞）
@@ -21,18 +26,26 @@ import { updateCarLap } from "../game/race.js";
 import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput } from "../game/ai.js";
 import { race as globalRace, simClock } from "../game/race.js";
 import { conn } from "./connection.js";
+import { sampleRemote, createClockOffset, createPlayoutClock } from "./remoteSync.js";
 import * as audio from "../game/audio.js";
 
-const SIM_TICK_HZ = 30;                 // 服务端物理模拟与快照广播基准频率（30Hz）
-const INTERPOLATION_DELAY_TICKS = 3.0;  // 连续插值延迟缓冲（~100ms，保证任何时候都有"未来关键帧"可插值）
-// 自车状态上报间隔：对齐服务端 30Hz 物理步（每个 tick 都能拿到新坐标）。
-// 之前是 80ms(12.5Hz)，服务端会连续 2~3 个 tick 转发同一个坐标，
-// 别的玩家看到的就是"停-跳-停"的幻灯片；30Hz 上报后每个快照都有新位置，插值变成匀速直线。
-const STATE_HZ_MS = 33;
-// 远端车渲染平滑时间常数（秒）：抹平网络抖动与偶发的重复 tick，附带极小的跟随滞后。
-const SMOOTH_TAU_HUMAN = 0.035;
-const SMOOTH_TAU_AI = 0.018;
-const SMOOTH_TAU_ANGLE = 0.028;
+// 自车状态上报：60Hz 固定节拍（用累积器驱动，与渲染帧率完全解耦）。
+// 上报越密，接收端需要覆盖的"采样空档"越小 → 远端播放延迟可以压得越低；
+// 同时别人看你过弯也更顺。代价约 12KB/s/人（JSON 文本帧），完全可接受。
+// 30fps 的客户端会自动退化成逐帧上报（33ms），不会报错。
+const SAMPLE_HZ = 60;
+const SAMPLE_MS = 1000 / SAMPLE_HZ;
+// 远端固定播放延迟（FPS 式插值缓冲）。
+// 预算 = 一个上报间隔(16.7ms) + 网络抖动余量。服务端改成"收到即转发"后，
+// 预算里不再含 0~33ms 的快照节拍等待，因此从 120ms 压到 80ms：
+//   实测（48 组抖动×发送频率扫描）60Hz 上报 + 抖动≤60ms 时断流外推 0%，
+//   30Hz 上报（低端机）+ 抖动 40ms 时约 0.8%，靠航位推算 + 12ms 平滑吸收。
+// 网络质量好的局可以试 70（再省 10ms，抖动>40ms 的玩家会开始依赖外推）。
+const REMOTE_DELAY_MS = 80;
+// 位姿平滑常数（秒）：只用于吸收残余抖动/修正跳变，稳态滞后 < 1m（不再是 3~4m 的追赶量）
+const SMOOTH_TAU_HUMAN = 0.012;
+const SMOOTH_TAU_AI = 0.010;
+const SMOOTH_TAU_ANGLE = 0.014;
 
 let active = false;
 let myId = null;
@@ -43,10 +56,13 @@ const autoOthers = [];
 export function setNetAutopilot(on, driver) {
   netAutopilot = { on: !!on, driver: driver || null };
 }
-let entries = [];                       // { netId, isMe, car, buf: [], pushX: 0, pushY: 0 }
-let lastStateSent = 0;
-let latestServerTick = -1;
-let renderTick = -1;                    // 浮点连续渲染时钟（支持高刷 60/120/144Hz 连续插值）
+let entries = [];                       // { netId, isMe, car, buf: [], off, pushX, pushY }
+// 渲染时间轴：全部用"本地 performance.now 毫秒"表达。
+// 唯一驱动源 = 服务端快照时间戳（均匀 tick），实体样本只被插值、不推动时钟。
+const clock = createPlayoutClock({ delayMs: REMOTE_DELAY_MS });
+// 服务器时钟 → 本机时钟：热机取最小值后【一次锁定】，再也不随包跳变
+const srvClock = createClockOffset();
+let sampleAcc = 0;                      // 上报节拍累积器（与帧率无关）
 let serverState = "countdown";
 let finishReported = false;
 let finishResults = null;
@@ -69,8 +85,9 @@ export function startNetRace(msg, mySessionId) {
   myId = mySessionId;
   finishResults = null;
   finishReported = false;
-  latestServerTick = -1;
-  renderTick = -1;
+  clock.reset();
+  srvClock.reset();
+  sampleAcc = 0;
   lastBumpSoundTime = 0;
   serverState = "countdown";
   globalRace.state = "countdown";
@@ -108,7 +125,13 @@ export function startNetRace(msg, mySessionId) {
       car.number = c.number || cfg.number;
     }
     cars.push(car);
-    entries.push({ netId: c.id, isMe: car.isPlayer, car, buf: [], pushX: 0, pushY: 0, synced: false });
+    entries.push({
+      netId: c.id, isMe: car.isPlayer, car,
+      buf: [],            // 采样缓冲：{ t(本地ms), x, y, a, v }
+      off: createClockOffset(),   // 该车"发送端时钟 → 本机时钟"偏移（热机后锁定）
+      pushX: 0, pushY: 0,
+      synced: false,
+    });
   });
 
   active = true;
@@ -119,8 +142,40 @@ export function stopNetRace() {
   active = false;
   entries = [];
   finishResults = null;
-  latestServerTick = -1;
-  renderTick = -1;
+  clock.reset();
+  srvClock.reset();
+}
+
+// 写入一条已定位到"本机时钟毫秒"的远端样本。
+// 同一时刻的重复样本（服务端多 tick 转发同一状态 / 即时中继与快照重叠）只更新末样本，
+// 不制造零宽区间，避免插值段长为 0 时速度算出无穷大。
+function pushSample(e, t, x, y, a, v) {
+  const buf = e.buf;
+  const last = buf[buf.length - 1];
+  if (last && t <= last.t + 0.5) {
+    last.x = x; last.y = y; last.a = a; last.v = v;
+    return last.t;
+  }
+  buf.push({ t, x, y, a, v });
+  if (buf.length > 60) buf.shift();
+  return t;
+}
+
+// 真人样本：st 来自对方本机帧，用它自己的锁定偏移换算到本机时钟。
+// 只用于给这辆车定位，永远不参与渲染时钟推进（时钟只认服务器快照 ts）。
+function pushHumanSample(e, st, x, y, a, v, recvAt) {
+  const stx = st != null ? st : recvAt;   // 老客户端没有 st 时退化为接收时刻
+  return pushSample(e, stx + e.off.observe(recvAt, stx), x, y, a, v);
+}
+
+// 玩家采样即时中继（服务端收到即转发，不等 30Hz 快照节拍）。
+// 只补位姿样本；圈数/成绩/完赛状态仍以权威快照为准，两套数据不打架。
+function onPeerState(msg) {
+  if (!active) return;
+  const e = entries.find(x => x.netId === msg.i);
+  if (!e || e.isMe) return;
+  const st = (typeof msg.st === "number" && msg.st > 0) ? msg.st : null;
+  pushHumanSample(e, st, msg.x, msg.y, msg.a, msg.v, performance.now());
 }
 
 function onSnapshot(msg) {
@@ -137,16 +192,35 @@ function onSnapshot(msg) {
     }
   }
 
-  latestServerTick = Math.max(latestServerTick, msg.tick);
-  if (renderTick < 0) {
-    renderTick = msg.tick - INTERPOLATION_DELAY_TICKS;
-  }
+  const recvAt = performance.now();
+
+  // ---- 均匀参考轴：服务端快照时间戳 ts ----
+  // ts 就是服务器 tick 逻辑时钟（每 tick 严格 +33.3ms），AI 样本的 st 与它同源。
+  // 用最小 (到达时刻 − 服务器时刻) 一次锁定时钟偏移（= 本机与服务器的时钟差 + 最小链路延迟）：
+  // 网络抖动只会让某个观测值变大，取最小值天然把它滤掉，偏移不会随包跳变。
+  // 这一步是"AI 丝滑"的根：时钟只认这条均匀轴，不认任何一辆车的采样节奏。
+  const hasTs = typeof msg.ts === "number" && msg.ts > 0;
+  const srvOff = hasTs ? srvClock.observe(recvAt, msg.ts) : 0;
+  if (hasTs) clock.noteRef(msg.ts + srvOff);
+  let legacyRef = -1;   // 老服务端（快照无 ts）的退化参考
 
   for (const sc of msg.cars) {
     const e = entries.find(x => x.netId === sc.i);
     if (!e || e.isMe) continue;
-    e.buf.push({ tick: msg.tick, x: sc.x, y: sc.y, a: sc.a, v: sc.v });
-    if (e.buf.length > 45) e.buf.shift();
+
+    // ---- 样本时刻：统一换算成"本机单调时钟毫秒"，只用于定位样本，不推进时钟 ----
+    //  · AI：诞生于服务器 tick 网格，直接投到参考轴上（与渲染时钟同源，绝对均匀）
+    //  · 真人：诞生于对方本机某一帧，用"该实体的最小延迟"换算（st 的真实间隔被保留）
+    const isAI = sc.i.startsWith("ai:");
+    const st = (typeof sc.st === "number" && sc.st > 0) ? sc.st : null;
+
+    if (isAI && hasTs && st != null) {
+      pushSample(e, st + srvOff, sc.x, sc.y, sc.a, sc.v);
+    } else {
+      const t = pushHumanSample(e, st, sc.x, sc.y, sc.a, sc.v, recvAt);
+      // 没有服务端时间戳时，AI 的均匀样本仍可当参考轴（真人样本绝不参与）
+      if (!hasTs && isAI && st != null && t > legacyRef) legacyRef = t;
+    }
 
     // 比赛进度/成绩以服务器快照中继为准
     e.car.lap = sc.lap;
@@ -154,87 +228,38 @@ function onSnapshot(msg) {
     e.car.finished = !!sc.fin;
     e.car.total = sc.tot || null;
     if (sc.best) e.car.best = sc.best;
-    // 对手踏板状态（AI 由服务器模拟、玩家由 12Hz 上报中继）
+    // 对手踏板状态（AI 由服务器模拟、玩家由 30Hz 上报中继）
     e.car.inBrake = sc.b | 0;
     e.car.inUp = !!sc.u;
     e.car.inSteer = sc.s || 0;
   }
+
+  if (legacyRef > 0) clock.noteRef(legacyRef);
 }
 
-// 推进连续浮点渲染时钟（带微调追赶与防漂移）
-function updateInterpolationClock(dt) {
-  if (latestServerTick < 0) return;
-  if (renderTick < 0) {
-    renderTick = latestServerTick - INTERPOLATION_DELAY_TICKS;
-    return;
-  }
 
-  const targetTick = latestServerTick - INTERPOLATION_DELAY_TICKS;
-  const error = targetTick - renderTick;
 
-  let advanceRate = 1.0;
-  if (Math.abs(error) > 8.0) {
-    // 发生网络掉线重连或严重滞后：直接对齐目标
-    renderTick = targetTick;
-  } else if (error > 0.05) {
-    // 渲染时钟滞后（网络恢复或新包积压）：以微加速平滑追赶（最多 +18%）
-    advanceRate = 1.0 + Math.min(0.18, error * 0.12);
-  } else if (error < -0.05) {
-    // 渲染时钟超前（网络抖动新包迟到）：以微减速平滑等待（最多 -18%）
-    advanceRate = Math.max(0.82, 1.0 + error * 0.12);
-  }
-
-  // 基于真实流逝时间 dt 连续平滑推进浮点 tick（突破 30Hz 阶梯停滞）
-  renderTick += dt * SIM_TICK_HZ * advanceRate;
-}
-
-// 远端车辆高精度平滑插值 + 航位推算（Dead Reckoning）+ 指数平滑去阶梯 + 碰撞视觉位移衰减
+// 远端车辆：在"最新时刻 − REMOTE_DELAY_MS"处采样（固定延时缓冲），
+// 用 Catmull-Rom 样条（C1 连续，关键帧处速度无突变）+ 断流外推 + 微平滑重建位姿。
+//
+// 为什么不用线性插值：真人样本间隔并不严格相等（33~79ms），线性插值会让速度
+// 在每个关键帧处跳变 —— 看起来就是"一快一慢"的抽搐。样条用相邻样本差分求切线，
+// 整条曲线速度连续；再叠加极小的指数平滑兜住残余抖动。
 function interpolateRemoteCars(dt) {
   for (const e of entries) {
     if (e.isMe || e.buf.length === 0 || e.car.retired) continue;
     const buf = e.buf;
     const c = e.car;
 
-    // 清理过旧快照缓存（保留到 renderTick 前 1 个 tick 即可）
-    while (buf.length > 2 && buf[1].tick < renderTick - 1.0) {
-      buf.shift();
-    }
+    // 清理已经播放过去的旧样本（保留 1 个历史点用于求切线）
+    while (buf.length > 3 && buf[1].t < clock.renderMs - 80) buf.shift();
 
-    // ---- 1. 按渲染时钟算出"目标位姿" ----
-    let tx, ty, ta, tv;
-    if (buf.length === 1 || renderTick <= buf[0].tick) {
-      const s = buf[0];
-      tx = s.x; ty = s.y; ta = s.a; tv = s.v;
-    } else if (renderTick >= buf[buf.length - 1].tick) {
-      // 航位推算（Dead Reckoning）：网络抖动短暂未收到新快照时，沿最后已知航向与速度惯性平滑延伸
-      const last = buf[buf.length - 1];
-      const extrapDt = Math.min(0.25, Math.max(0, (renderTick - last.tick) / SIM_TICK_HZ));
-      tx = last.x + Math.cos(last.a) * last.v * extrapDt;
-      ty = last.y + Math.sin(last.a) * last.v * extrapDt;
-      ta = last.a;
-      tv = last.v;
-    } else {
-      // 区间连续双快照高精度插值（alpha 在 [0, 1] 间完全连续）
-      let s0 = buf[0], s1 = buf[buf.length - 1];
-      for (let i = 0; i < buf.length - 1; i++) {
-        if (buf[i].tick <= renderTick && buf[i + 1].tick >= renderTick) {
-          s0 = buf[i];
-          s1 = buf[i + 1];
-          break;
-        }
-      }
-      const span = Math.max(0.0001, s1.tick - s0.tick);
-      const alpha = Math.min(1, Math.max(0, (renderTick - s0.tick) / span));
-      tx = s0.x + (s1.x - s0.x) * alpha;
-      ty = s0.y + (s1.y - s0.y) * alpha;
-      ta = s0.a + wrapAngle(s1.a - s0.a) * alpha;
-      tv = s0.v + (s1.v - s0.v) * alpha;
-    }
+    // ---- 1. 按渲染时间轴解算"目标位姿"（样条插值 / 断流外推）----
+    const res = sampleRemote(buf, clock.renderMs, 250);
+    if (!res) continue;
+    const tx = res.x, ty = res.y, ta = res.a, tv = res.v;
 
-    // ---- 2. 指数平滑：抹掉关键帧"停-跳-停"的台阶与网络抖动 ----
-    // 对手坐标以 30Hz 上报，服务端转发时同一坐标可能连续出现在 1~2 个 tick 里，
-    // 直接照抄关键帧会让别家车看起来像 PPT 逐帧跳动；一阶低通让渲染位姿始终连续逼近目标，
-    // 目标跳跃时被摊成一段平滑加速，而不是瞬移（稳态只多出 ~2m 的跟随量）。
+    // ---- 2. 微平滑：只兜残余抖动/外推回收时的跳变（12ms 时间常数，稳态滞后 < 1m）----
     if (!e.synced) {
       e.synced = true;
       c.x = tx; c.y = ty; c.angle = ta; c.speed = tv;
@@ -262,10 +287,21 @@ function interpolateRemoteCars(dt) {
   }
 }
 
-// QQ 飞车式客户端非对称碰撞系统：
-// - 自车 100% 本地即时结算（0 延迟、0 抖动、绝不回滚）
-// - 自车追尾前车时承担冲量损失减速并向后弹开，阻止穿车；前车速度保持（保护领先者）
-// - 远端车被撞时施加轻量弹性视觉排斥，带火花扬尘、车身震动与碰撞音效
+// QQ 飞车式客户端非对称碰撞系统
+//
+// 【坐标权威】不存在"以被撞方为准"或"以撞人方为准"——而是【各以自己为准】：
+//   · 自己的车：100% 本地权威，绝不被远端坐标改写（零延迟、0 抖动、绝不回滚）
+//   · 远处的车：它的权威轨迹由它自己算，你只在【你自己的屏幕上】叠加一个视觉排斥
+//     偏移（pushX/pushY，指数衰减回 0），绝不会回写、也不会发给服务器
+//   · 服务器不裁决真人之间的碰撞（幽灵竞速）：只有 AI 对真人做单向防穿（AI 让步）。
+//     这样任何人都无法靠"我这边判你撞我"去改变别人的比赛结果。
+//
+// 【动量权威】判定用两车平均航向（getCarDistance），sLon > 0 表示对方在我前方：
+//   · 我在后面（追尾方）→ 我承担 45% 速度差损失并被向后硬分离，绝不穿模
+//   · 我在前面（被追尾）→ 速度严格保持，不被后车顶飞
+//   · 侧面并排 → 双方对称的轻微摩擦
+//   注意：双方看到的都是对方 ~70ms 前的坐标，并排/斜向混战时可能两边都判自己"在后"，
+//   于是双方各自减速（双罚）。压缩播放延迟就是在压缩这种误判窗口。
 function resolveClientCarCollisions(meCar, fx, dt) {
   if (!meCar || serverState !== "racing") return;
 
@@ -384,22 +420,30 @@ export function updateNetRace(dt, localInput, now, fx) {
   }
 
   // ---- 2. 远端车：连续浮点时间高精度插值 + 航位推算 ----
-  updateInterpolationClock(dt);
+  clock.update(dt);
   interpolateRemoteCars(dt);
 
   // ---- 3. QQ 飞车式客户端非对称碰撞与打击感响应 ----
   if (me) {
     resolveClientCarCollisions(me.car, fx, dt);
 
-    // ---- 4. 状态上报 ~12Hz（带碰撞后的真实物理状态） ----
+    // ---- 4. 状态上报：固定 33.3ms 节拍（累积器驱动，30/60/144fps 的间隔完全一致）----
+    // 同时上报采样时刻 st（本机单调时钟），接收端据此重建真实时间轴，
+    // 这样"帧率不同的玩家"在别人眼里也是匀速运动。
     const c = me.car;
-    if (now - lastStateSent >= STATE_HZ_MS && conn.isOpen()) {
-      lastStateSent = now;
+    sampleAcc += dt * 1000;
+    if (sampleAcc >= SAMPLE_MS) {
+      sampleAcc -= SAMPLE_MS;
+      if (sampleAcc > SAMPLE_MS) sampleAcc = 0;   // 长卡顿后不要补发一串旧状态
+      if (!conn.isOpen()) return event;
       conn.send({
         t: "car_state",
-        x: Math.round(c.x * 10) / 10,
-        y: Math.round(c.y * 10) / 10,
-        angle: Math.round(c.angle * 1000) / 1000,
+        // 采样时刻保留 2 位小数：位置是连续量，时间戳只精确到 1ms 会引入
+        // ±0.5ms 的采样时刻误差（≈3% 的间隔失真），别人看来就是快慢不均
+        st: Math.round(now * 100) / 100,
+        x: Math.round(c.x * 100) / 100,
+        y: Math.round(c.y * 100) / 100,
+        angle: Math.round(c.angle * 10000) / 10000,
         speed: Math.round(c.speed * 10) / 10,
         lap: c.lap,
         rd: Math.round(c.raceDist || 0),
@@ -447,6 +491,7 @@ function onPlayerForfeit(msg) {
 
 export function bindNetRaceHandlers() {
   conn.on("snapshot", onSnapshot);
+  conn.on("peer_state", onPeerState);
   conn.on("race_end", onRaceEnd);
   conn.on("player_forfeit", onPlayerForfeit);
 }

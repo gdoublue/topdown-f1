@@ -60,6 +60,29 @@ export function broadcastBoards(trackId) {
   }
 }
 
+// 玩家采样即时中继：只带位姿（圈数/成绩仍以 30Hz 权威快照为准，避免两套数据打架）。
+// 只发给同房间其他人，不回发本人（自车本来就是本地权威，不需要自己的回声）。
+// 用服务端已钳制过的位姿（sim.setPlayerState 清洗过），不直接透传客户端原始字段。
+function relayPeerState(room, sid) {
+  if (!room || room.members.size < 2) return;
+  const g = room.sim?.ghosts?.get(sid);
+  if (!g || g.gone || g.forfeited) return;
+  const c = g.car;
+  const msg = JSON.stringify({
+    t: "peer_state",
+    i: sid,
+    st: g.st || 0,
+    x: Math.round(c.x * 100) / 100,
+    y: Math.round(c.y * 100) / 100,
+    a: Math.round(c.angle * 10000) / 10000,
+    v: Math.round(c.speed * 10) / 10,
+  });
+  for (const m of room.members.values()) {
+    if (m.session.id === sid) continue;
+    if (m.session.ws.readyState === 1) m.session.ws.send(msg);
+  }
+}
+
 function attachHeartbeat(wss) {
   const timer = setInterval(() => {
     for (const [ws, s] of sessions) {
@@ -283,7 +306,10 @@ function route(session, msg) {
       const room = findRoomOf(session.id);
       if (!room) return send(ws, { t: "error", code: "not_in_room" });
       const patch = {};
-      if (msg.carId !== undefined) patch.carId = String(msg.carId).slice(0, 32);
+      if (msg.carId !== undefined && msg.carId !== null) {
+        const cid = String(msg.carId).slice(0, 32);
+        patch.carId = (cid && cid !== "null") ? cid : null;   // 防 "null" 字符串污染选车状态
+      }
       if (msg.ready !== undefined) patch.ready = !!msg.ready;
       if (msg.scriptId !== undefined) patch.scriptId = String(msg.scriptId).slice(0, 48);
       room.setMember(session.id, patch);
@@ -299,10 +325,14 @@ function route(session, msg) {
     }
 
     case "car_state": {
-      // 高频消息（~30Hz）：玩家本地模拟状态上报 → 中继展示
+      // 高频消息（30~60Hz）：玩家本地模拟状态上报 → 中继展示
       const room = findRoomOf(session.id);
       if (room?.sim && !room.sim.destroyed) {
         room.sim.setPlayerState(session.id, msg, performance.now());
+        // 收到即转发，不等下一个 30Hz 快照节拍 —— 省掉 0~33ms 的中继等待。
+        // 这 33ms 会直接加进"远端必须先缓冲多少毫秒才不断流"的预算里，
+        // 砍掉它，其他玩家的固定播放延迟才能从 120ms 压到 70ms。
+        relayPeerState(room, session.id);
       }
       break;
     }
@@ -324,10 +354,16 @@ function route(session, msg) {
       if (room.state === "racing" || room.state === "countdown") {
         return send(ws, { t: "error", code: "already_racing" });
       }
-      // 校验：所有成员已选车并就绪
+      // 校验：所有成员已选车；除房主外都必须"准备就绪"（房主随时可开赛）
       const members = [...room.members.values()];
-      if (!members.every(m => m.carId && m.ready)) {
-        return send(ws, { t: "error", code: "not_all_ready" });
+      // 自愈：房主的就绪位可能被旧客户端/异常状态弄脏，开赛前无条件纠正
+      const hostMember = room.members.get(room.hostId);
+      if (hostMember && !hostMember.ready) hostMember.ready = true;
+      if (!members.every(m => m.carId && (m.ready || m.session.id === room.hostId))) {
+        const stuck = members
+          .filter(m => !(m.carId && (m.ready || m.session.id === room.hostId)))
+          .map(m => m.session.player?.nickname || "车手");
+        return send(ws, { t: "error", code: "not_all_ready", msg: stuck.join("、") + " 未选车/未就绪" });
       }
       try {
         if (msg.laps) room.laps = Math.max(1, Math.min(50, Math.round(Number(msg.laps))));

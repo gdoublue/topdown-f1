@@ -26,6 +26,7 @@ export class RaceSim {
     this.ghosts = new Map();          // sid -> 幽灵（客户端中继状态）
     this.finishReports = new Map();   // sid -> { totalMs, bestLapMs, laps, valid }
     this.tickNo = 0;
+    this.simMs = 0;                    // 模拟逻辑时钟（毫秒）：AI 车样本的时间戳来源，均匀步进
     this.ended = false;
     this.endBroadcast = false;
     this.maxLaps = room.laps || this.trackCtx.track?.laps || TOTAL_LAPS;
@@ -105,6 +106,10 @@ export class RaceSim {
     const near = nearestIndex(c.x, c.y, c.nearIdx >= 0 ? c.nearIdx : -1);
     c.nearIdx = near.i; c.trackS = near.s;   // AI 避让感知需要
     g.lastAt = now;
+    // 采样时刻由发送端给出（毫秒，客户端自己的单调时钟）：
+    // 服务端只是原样中继，不再用"收到时刻"或"快照 tick"给样本打时间戳，
+    // 否则一帧样本会被对齐到 33ms 网格，接收端插值必然出现快慢交替的顿挫。
+    g.st = Number(s.st) || 0;
   }
 
   // 玩家认输 / 放弃比赛
@@ -174,6 +179,7 @@ export class RaceSim {
   tick(dt, now) {
     activateContext(this.trackCtx);   // 多房间轮流 tick：切到本房间赛道（缓存下 O(1)）
     setRaceLaps(this.maxLaps);        // 房间自定义圈数：AI 计圈必须按房间设定（否则会多跑/少跑）
+    this.simMs += dt * 1000;          // 逻辑时钟：AI 样本时间戳 = 这个均匀步进的时钟
 
     if (this.race.state === "countdown") {
       this.race.countdown -= dt;
@@ -197,13 +203,11 @@ export class RaceSim {
     for (const g of this.ghosts.values()) if (!g.car.finished) carList.push(g.car);
 
     for (const e of this.aiEntries) {
-      let ctrl;
-      if (e.car.finished) {
-        ctrl = finishedCarInput(e.car, e.aiInput);
-      } else {
-        driveAI(e.car, e.aiInput, dt, carList);
-        ctrl = e.aiInput;
-      }
+      // 完赛车也必须继续跑 AI 决策：finishedCarInput 只接管"纵向"（收油到巡航速度），
+      // 转向仍然取自 aiInput.steer。之前完赛后跳过 driveAI，舵角被冻结在冲线那一帧，
+      // 车会保持那个舵角径直开出赛道 —— 这就是"在线对战里 AI 跑完就不按赛道走"的原因。
+      driveAI(e.car, e.aiInput, dt, carList);
+      const ctrl = e.car.finished ? finishedCarInput(e.car, e.aiInput) : e.aiInput;
       stepCar(e.car, dt, ctrl, FX_STUB);
       updateCarLap(e.car, now, this.race);
     }
@@ -262,11 +266,16 @@ export class RaceSim {
 
   // 快照：AI 权威状态 + 人类中继状态
   snapshot() {
-    const carSnap = (c) => ({
-      x: Math.round(c.x * 10) / 10,
-      y: Math.round(c.y * 10) / 10,
-      a: Math.round(c.angle * 1000) / 1000,
+    // 快照时间戳 = 本房间的模拟逻辑时钟（每 tick 严格 +33.3ms）。
+    // 这是客户端的【唯一渲染时间轴】：它均匀、单调、与任何玩家的帧率/网络无关，
+    // 客户端据此锁定播放时钟，真人样本只被插值、不参与推进。
+    const ts = Math.round(this.simMs * 100) / 100;
+    const carSnap = (c, st) => ({
+      x: Math.round(c.x * 100) / 100,
+      y: Math.round(c.y * 100) / 100,
+      a: Math.round(c.angle * 10000) / 10000,
       v: Math.round(c.speed * 10) / 10,
+      st: Math.round((st || 0) * 100) / 100,
       lap: c.lap,
       rd: Math.round(c.raceDist || 0),
       fin: c.finished ? 1 : 0,
@@ -280,11 +289,15 @@ export class RaceSim {
     return {
       t: "snapshot",
       tick: this.tickNo++,
+      ts,
       state: this.race.state,
       countdown: Math.max(0, Math.ceil(this.race.countdown || 0)),
       cars: [
-        ...[...this.ghosts.values()].filter(g => !g.gone).map(g => ({ i: g.sid, ...carSnap(g.car) })),
-        ...this.aiEntries.map(e => ({ i: "ai:" + e.car.algorithm, ...carSnap(e.car) })),
+        // st = 该样本的采样时刻（各自时钟域）：
+        //  · 真人：客户端上报时自己打的时间戳，服务端原样中继（真实采样间隔不被量化）
+        //  · AI：与 snapshot.ts 完全一致 —— 服务器均匀 tick 网格上的一个精确点
+        ...[...this.ghosts.values()].filter(g => !g.gone).map(g => ({ i: g.sid, ...carSnap(g.car, g.st || 0) })),
+        ...this.aiEntries.map(e => ({ i: "ai:" + e.car.algorithm, ...carSnap(e.car, ts) })),
       ],
     };
   }
