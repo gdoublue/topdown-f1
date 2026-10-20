@@ -104,14 +104,19 @@ export function setupAudio() {
 }
 
 // 每帧调用：转速、换挡、轮胎声
+// 注：ctrl 可能来自 AI 输入池（倍速/切视角/在线模式索引不匹配时可能是 undefined），
+// 这里统一兜底成"松油门滑行"，避免一帧异常把整个渲染循环打断。
+const NO_CTRL = { up: false, brake: 0 };
+
 export function updateAudio(car, input, dt, racing) {
-  if (!ready) return;
+  if (!ready || !car) return;
+  const ctrl = input || NO_CTRL;
   const t = actx.currentTime;
   const spd = Math.abs(car.speed);
   const vmax = PHYS.maxSpeed[0];
 
   const target = racing
-    ? clamp(spd / vmax * 0.85 + (input.up ? 0.15 : 0), 0, 1)
+    ? clamp(spd / vmax * 0.85 + (ctrl.up ? 0.15 : 0), 0, 1)
     : 0.06;   // 怠速
   rpm += (target - rpm) * Math.min(1, dt * 3.5);
 
@@ -133,7 +138,7 @@ export function updateAudio(car, input, dt, racing) {
   screechGain.gain.setTargetAtTime(skid ? 0.22 : 0, t, skid ? 0.05 : 0.12);
 
   // 背景音乐：只在油门实际生效（比赛中按住 J/W 且未刹车）时播放
-  const musicOn = racing && input.up && input.brake === 0;
+  const musicOn = racing && ctrl.up && ctrl.brake === 0;
   bgOn = musicOn;
   bgGain.gain.setTargetAtTime(musicOn ? BG_VOLUME : 0, t, musicOn ? 0.25 : 0.4);
 }

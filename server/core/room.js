@@ -24,15 +24,19 @@ export class Room {
   addMember(session) {
     if (this.members.size >= this.maxPlayers) return { ok: false, reason: "room_full" };
     if (this.members.has(session.id)) return { ok: false, reason: "already_in" };
-    this.members.set(session.id, { session, carId: null, ready: false, scriptId: null });
+    // 房主不需要"准备就绪"：进场即视为已就绪，随时可以开赛
+    const isHost = this.hostId === session.id;
+    this.members.set(session.id, { session, carId: null, ready: isHost, scriptId: null });
     return { ok: true };
   }
 
   removeMember(sessionId) {
     const existed = this.members.delete(sessionId);
-    // 房主离开：转移给最早加入的成员
+    // 房主离开：转移给最早加入的成员（新房东同样免准备就绪）
     if (existed && this.hostId === sessionId && this.members.size > 0) {
       this.hostId = this.members.keys().next().value;
+      const next = this.members.get(this.hostId);
+      if (next) next.ready = true;
     }
     return existed;
   }
@@ -44,8 +48,10 @@ export class Room {
     return true;
   }
 
+  // 房主免准备就绪：只要求房主选好车、其他人选车 + 就绪
   isEveryoneReady() {
-    return this.members.size > 0 && [...this.members.values()].every(m => m.ready && m.carId);
+    return this.members.size > 0 && [...this.members.values()]
+      .every(m => !!m.carId && (m.session.id === this.hostId || m.ready));
   }
 
   view() {

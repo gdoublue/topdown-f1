@@ -82,6 +82,9 @@ function shuffle(array) {
 
 // 该下标车辆是否由 AI 驾驶（观战模式全为 AI；对战模式除玩家外全为 AI；自动驾驶时玩家车也交给算法）
 function isAIDriven(i) {
+  // 在线对战：本机赛车的自动驾驶由 netrace 内部驱动，且 aiInputs 不参与维护，
+  // 这里必须返回 false，否则会去取一个不存在的 aiInputs[i]（undefined）。
+  if (mode === "onlinerace") return false;
   if (mode === "spectate") return true;
   if (i === playerIndex && isAutopilotOn()) return true;
   return mode === "vs" && i !== playerIndex;
@@ -1232,7 +1235,9 @@ function frame(ts) {
   if (mode === "spectate" && finishAt && !resultsShown && performance.now() - finishAt > AI_RESTART_DELAY) reset();
 
   const activeCar = cars[focusIndex] || cars[0];
-  const activeCtrl = isAIDriven(focusIndex) ? aiInputs[focusIndex] : input;
+  if (!activeCar) return;   // 极端情况下车辆池已清空（退出比赛途中）：本帧跳过渲染，避免空引用
+  // AI 输入池只在与 cars 同源建立时才有对应项（在线模式/切视角后可能为空），缺项时退回玩家输入
+  const activeCtrl = (isAIDriven(focusIndex) ? aiInputs[focusIndex] : input) || input;
 
   // 倍速下镜头/粒子必须按"模拟时间"推进：
   // 车辆以 N 倍速前进，若镜头仍按真实时间慢慢追（时间常数 ~0.24s），

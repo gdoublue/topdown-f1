@@ -17,6 +17,13 @@ function newId(prefix) {
   return prefix + "_" + crypto.randomBytes(8).toString("hex");
 }
 
+// 没填昵称时的默认昵称：友好的随机车手名（不再用指纹前缀拼 "Pilot-xxxx"，
+// 那种看着就像浏览器签名，房间里别人根本认不出是谁）
+const NICK_POOL = ["闪电", "追风", "弯心", "涡轮", "夜行", "漂移", "雷霆", "赤焰", "疾风", "超车"];
+function randomNickname() {
+  return NICK_POOL[Math.floor(Math.random() * NICK_POOL.length)] + "-" + crypto.randomInt(10, 99);
+}
+
 // 注册或识别玩家；返回 { player, created }
 export function registerPlayer(fingerprint, nickname) {
   const db = loadDb();
@@ -29,7 +36,7 @@ export function registerPlayer(fingerprint, nickname) {
     player = {
       id: newId("plr"),
       fingerprint: fp,
-      nickname: sanitizeNickname(nickname) || "Pilot-" + fp.slice(0, 4),
+      nickname: sanitizeNickname(nickname) || randomNickname(),
       firstSeen: Date.now(),
       lastSeen: Date.now(),
       races: 0,

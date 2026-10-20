@@ -20,11 +20,31 @@ let intentionalClose = false;      // 用户主动断开（不触发自动重连
 let reconnectTries = 0;
 let lastLobbyInteract = 0;         // 上次在大厅列表里的操作时间（避免刷新打断点击）
 let lobbyRefreshTimer = 0;
+let autoCarRoomId = null;          // 已为哪个房间自动同步过默认车（避免重复发送）
+let roomError = "";                // 服务端拒绝原因（not_all_ready 等），展示 4 秒
+let roomErrorTimer = 0;
 
 const ADDR_KEY = "gp_server_url";
 const NICK_KEY = "gp_nickname";
 
 function $(id) { return document.getElementById(id); }
+
+// 车型显示名（"红牛 #1"）：排行榜/房间列表都别直接怼内部 id（vector-pursuit 之类）
+function carLabel(carId) {
+  if (!carId) return "";
+  const cfg = AI_CONFIGS.find(c => c.id === carId);
+  return cfg ? cfg.shortName : String(carId);
+}
+
+function trackLabel(trackId) {
+  const t = TRACKS.find(x => x.id === trackId);
+  return t ? `${t.flag} ${t.name}` : String(trackId || "");
+}
+
+// 没填昵称时给一个可编辑的默认昵称（避免大厅里显示成指纹派生的 "Pilot-xxxx"）
+function defaultNickname() {
+  return "车手" + String(Math.floor(1000 + Math.random() * 9000));
+}
 
 function defaultServerAddr() {
   const saved = localStorage.getItem(ADDR_KEY);
@@ -59,7 +79,7 @@ export function initOnlineUI(callbacks = {}) {
   if (!el.wrap) return;
 
   el.addrInput.value = defaultServerAddr();
-  el.nickInput.value = localStorage.getItem(NICK_KEY) || "";
+  el.nickInput.value = localStorage.getItem(NICK_KEY) || defaultNickname();
   el.connectBtn.addEventListener("click", connect);
   // 返回主菜单：房间/比赛的退出由主流程统一处理（会先 room_leave / 认输）
   el.exitBtn?.addEventListener("click", () => cb.onExit?.());
@@ -92,6 +112,20 @@ export function initOnlineUI(callbacks = {}) {
   el.roomView.addEventListener("click", onRoomClick);
   el.roomView.addEventListener("change", onRoomChange);
 
+  // 服务端拒绝（not_all_ready / not_host / already_racing ...）必须可见，
+  // 否则"点击没反应"根本无从排查
+  conn.on("error", (msg) => {
+    roomError = errorText(msg);
+    if (roomErrorTimer) clearTimeout(roomErrorTimer);
+    roomErrorTimer = setTimeout(() => {
+      roomError = "";
+      renderRoom();
+      renderLobbyBody();
+    }, 4000);
+    if (room && !el.roomView.classList.contains("hidden")) renderRoom();
+    else renderLobbyBody();
+  });
+
   conn.on("room_update", (msg) => {
     room = msg.room || null;
     if (!room) { renderLobby(); switchView("lobby"); return; }
@@ -100,6 +134,9 @@ export function initOnlineUI(callbacks = {}) {
     const mySid = conn.session?.sid || conn.session?.playerId;
     const me = room.players.find(p => p.id === mySid);
     if (me) { myCarId = me.carId; myReady = me.ready; }
+    // 页面上的"选择赛车"下拉默认就显示了一台车 → 同步给服务器，
+    // 否则别人看到的是"未选车"（房主也就永远开不了赛）
+    syncRoomSelfState(me);
     renderRoom();
     switchView("room");
   });
@@ -137,10 +174,12 @@ export function initOnlineUI(callbacks = {}) {
     room = null;
     myReady = false;
     lastRoomId = null;
+    autoCarRoomId = null;
     if (conn.isOpen()) { renderLobby(); switchView("lobby"); }
   });
   conn.on("_closed", () => {
     room = null;
+    autoCarRoomId = null;
     if (intentionalClose) { intentionalClose = false; return; }
     cb.onDisconnected?.();   // 比赛中掉线：主流程退回菜单
     attemptReconnect();
@@ -205,6 +244,7 @@ export function leaveOnlineRoom() {
   room = null;
   myReady = false;
   lastRoomId = null;          // 断线重连后不要自动回到已退出的房间
+  autoCarRoomId = null;       // 下次进房重新同步默认选车
   if (conn.isOpen()) { renderLobby(); switchView("lobby"); }
   return true;
 }
@@ -287,7 +327,8 @@ function renderLobbyBody() {
   // 保留创建房间表单的选择，避免刷新把玩家选好的赛道/开关冲掉
   const prevTrack = $("createTrackSel")?.value;
   const prevFillAI = $("createFillAI")?.checked;
-  el.lobbyBody.innerHTML = currentTab === "boards" ? boardsHtml() : roomsHtml();
+  el.lobbyBody.innerHTML = (roomError ? `<p class="online-error">⚠️ ${escapeHtml(roomError)}</p>` : "")
+    + (currentTab === "boards" ? boardsHtml() : roomsHtml());
   const trackSel = $("createTrackSel");
   const fillAI = $("createFillAI");
   if (trackSel && prevTrack) trackSel.value = prevTrack;
@@ -300,12 +341,20 @@ function boardsHtml() {
     `<button class="online-chip ${t.id === boardTrackId ? "active" : ""}" data-board-track="${t.id}">
       ${t.flag} ${t.name}</button>`).join("");
   const entries = (s.leaderboards[boardTrackId] || []);
+  const head = `
+      <div class="online-row online-head">
+        <b class="ol-rank">#</b>
+        <span class="ol-name">车手</span>
+        <span class="ol-car">车型</span>
+        <span class="ol-time">最快单圈</span>
+        <span class="ol-src">来源</span>
+      </div>`;
   const rows = entries.length
     ? entries.map(r => `
         <div class="online-row">
           <b class="ol-rank">${r.rank}</b>
           <span class="ol-name">${escapeHtml(r.nickname)}</span>
-          <span class="ol-car">${escapeHtml(r.carId)}</span>
+          <span class="ol-car">🏎 ${escapeHtml(carLabel(r.carId) || "未知车型")}</span>
           <span class="ol-time">${fmtMs(r.bestLapMs)}</span>
           <span class="ol-src">${r.source === "online_race" ? "对战" : "练习"}</span>
         </div>`).join("")
@@ -313,19 +362,28 @@ function boardsHtml() {
   return `
     <p class="track-modal-desc">各赛道最快单圈榜 · 前往"单人在线练习"刷圈即可上传成绩</p>
     <div class="online-chips">${chips}</div>
-    <div class="online-list">${rows}</div>`;
+    <div class="online-list">${entries.length ? head : ""}${rows}</div>`;
 }
 
 function roomsHtml() {
   const s = conn.session;
   const roomRows = s.rooms?.length
-    ? s.rooms.map(r => `
+    ? s.rooms.map(r => {
+      // 列表里认人靠昵称：房主 + 房内玩家昵称，房间号只作副标题
+      const host = r.players?.find(p => p.id === r.hostId);
+      const hostName = host?.nickname || "未命名房主";
+      const names = (r.players || []).map(p => p.nickname).filter(Boolean);
+      const others = names.filter(n => n !== hostName);
+      return `
         <div class="online-row">
-          <b class="ol-rank">${r.id}</b>
-          <span class="ol-name">${r.trackId}${r.fillAI === false ? " · 纯玩家" : " · 含 AI"}</span>
-          <span class="ol-car">${r.playerCount}/${r.maxPlayers} 人 · ${r.state === "racing" ? "比赛中" : "等待中"}</span>
+          <b class="ol-rank">👑</b>
+          <span class="ol-name">${escapeHtml(hostName)}<small class="ol-sub">${r.id}</small></span>
+          <span class="ol-car">${escapeHtml(trackLabel(r.trackId))} · ${r.playerCount}/${r.maxPlayers} 人${r.fillAI === false ? " · 纯玩家" : " · 含 AI"}</span>
+          <span class="ol-sub ol-players">${escapeHtml(others.length ? "车内：" + others.join("、") : "车内只有房主")}</span>
+          <span class="ol-src">${r.state === "racing" ? "比赛中" : "等待中"}</span>
           <button class="vt-mini" data-join-room="${r.id}">加入</button>
-        </div>`).join("")
+        </div>`;
+    }).join("")
     : `<div class="online-empty">暂无房间，创建一个吧</div>`;
   const trackOpts = s.tracks.map(t => `<option value="${t.id}">${t.flag} ${t.name}</option>`).join("");
   return `
@@ -357,27 +415,82 @@ function onLobbyClick(e) {
 
 function onLobbyChange() { /* 预留 */ }
 
+// 服务端错误码 → 人话
+function errorText(msg) {
+  if (msg.code === "not_all_ready" && msg.msg) return "无法开赛：" + msg.msg;
+  const map = {
+    not_all_ready: "还有玩家未选车或未就绪，暂时无法开赛",
+    already_racing: "比赛已经在进行中",
+    not_host: "只有房主可以开赛",
+    room_full: "房间已满员",
+    room_not_found: "房间已解散",
+    not_in_room: "你已不在房间里，请重新进入",
+    not_authed: "连接尚未完成认证，请重新连接",
+    server_full: "服务器房间数已满，稍后再试",
+    start_failed: "开赛失败" + (msg.msg ? "：" + msg.msg : ""),
+  };
+  return map[msg.code] || ("操作失败：" + (msg.msg || msg.code || "未知错误"));
+}
+
 // ---- 房间 ----
+// 进房时的自状态同步：
+//  1) "选择赛车"下拉默认就选中了一台车，但那只是本地 UI 状态，必须发给服务器，
+//     否则别人看到的是"未选车"，开赛校验也过不了；
+//  2) 房主补发一次 ready=true —— 新服务端虽然免房主就绪，但这样对旧服务端也兼容，
+//     房主永远不会因为"没就绪"卡住开赛。
+function syncRoomSelfState(me) {
+  if (!room) return;
+  const mySid = conn.session?.sid || conn.session?.playerId;
+  const isHost = room.hostId === mySid;
+  const needCar = !me?.carId && autoCarRoomId !== room.id;
+  const needReady = isHost && me != null && !me.ready;
+  if (!needCar && !needReady) {
+    if (me?.carId) autoCarRoomId = room.id;
+    return;
+  }
+  autoCarRoomId = room.id;
+  const patch = {};
+  if (needCar) {
+    const used = new Set(room.players.map(p => p.carId).filter(Boolean));
+    const picked = (AI_CONFIGS.find(c => !used.has(c.id)) || AI_CONFIGS[0]).id;
+    myCarId = picked;
+    patch.carId = picked;
+  }
+  if (needReady) { myReady = true; patch.ready = true; }
+  if (conn.isOpen() && Object.keys(patch).length) conn.send({ t: "room_set", ...patch });
+}
+
 function renderRoom() {
   if (!room) return;
   const mySid = conn.session?.sid || conn.session?.playerId;
   const isHost = room.hostId === mySid;
   const me = room.players.find(p => p.id === mySid);
-  const players = room.players.map(p => `
+  const players = room.players.map(p => {
+    const isHostRow = p.id === room.hostId;
+    return `
     <div class="online-row">
-      <b class="ol-rank">${p.id === room.hostId ? "👑" : "·"}</b>
-      <span class="ol-name">${escapeHtml(p.nickname || p.id)}${p.id === mySid ? " (你)" : ""}</span>
-      <span class="ol-car">${p.carId ? escapeHtml(p.carId) : "未选车"}</span>
-      <span class="ol-src">${p.ready ? "✅ 已就绪" : "⌛ 准备中"}</span>
-    </div>`).join("");
+      <b class="ol-rank">${isHostRow ? "👑" : "·"}</b>
+      <span class="ol-name">${escapeHtml(p.nickname || "车手")}${p.id === mySid ? " (你)" : ""}</span>
+      <span class="ol-car">${p.carId ? "🏎 " + escapeHtml(carLabel(p.carId)) : "未选车"}</span>
+      <span class="ol-src">${isHostRow ? "房主 · 免准备" : (p.ready ? "✅ 已就绪" : "⌛ 准备中")}</span>
+    </div>`;
+  }).join("");
 
   const track = TRACKS.find(t => t.id === room.trackId);
   const trackOpts = TRACKS.map(t =>
     `<option value="${t.id}" ${t.id === room.trackId ? "selected" : ""}>${t.flag} ${t.name}</option>`).join("");
   const carOpts = AI_CONFIGS.map(c =>
     `<option value="${c.id}" ${c.id === myCarId ? "selected" : ""}>${c.shortName} (#${c.number})</option>`).join("");
+  // 房主不需要准备就绪：只要自己选好车、其他玩家全部"选车 + 就绪"即可开赛
   const othersReady = room.players.filter(p => p.id !== room.hostId).every(p => p.carId && p.ready);
-  const canStart = isHost && room.players.length > 0 && !!myCarId && myReady && othersReady;
+  const canStart = isHost && room.players.length > 0 && !!myCarId && othersReady;
+  // 禁用时把原因直接写在按钮上，避免"看着能点、点了没反应"
+  const waitingNames = room.players
+    .filter(p => p.id !== room.hostId && (!p.carId || !p.ready))
+    .map(p => p.nickname || "车手");
+  const startReason = !myCarId
+    ? "先选择你的赛车"
+    : (waitingNames.length ? `等待 ${waitingNames.join("、")} 就绪` : "全员就绪，开赛！");
   // AI 补位数量与服务器一致：maxPlayers - 真人数量（最多 7 台，AI_CONFIGS 只有 7 套配置）
   const aiCount = room.fillAI
     ? Math.max(0, Math.min(AI_CONFIGS.length, (room.maxPlayers || 8) - room.players.length))
@@ -396,6 +509,7 @@ function renderRoom() {
       · ${room.playerCount}/${room.maxPlayers} 人
     </p>
     <div class="online-list">${players}</div>
+    ${roomError ? `<p class="online-error">⚠️ ${escapeHtml(roomError)}</p>` : ""}
     ${isHost ? `
       <div class="online-create">
         <label>赛道 <select id="roomTrackSel">${trackOpts}</select></label>
@@ -404,12 +518,14 @@ function renderRoom() {
       </div>` : ""}
       <div class="online-create">
         <label>选择赛车 <select id="roomCarSel">${carOpts}</select></label>
-        <button class="results-btn online-btn" id="roomReadyBtn">${myReady ? "取消就绪" : "✔ 准备就绪"}</button>
+        ${isHost
+      ? `<span class="ol-sub">房主无需准备，选好车即可开赛</span>`
+      : `<button class="results-btn online-btn" id="roomReadyBtn">${myReady ? "取消就绪" : "✔ 准备就绪"}</button>`}
       </div>
     <div class="online-room-actions">
       ${isHost ? `
       <button class="results-btn primary online-btn" id="roomStartBtn" ${canStart ? "" : "disabled"}
-        title="${canStart ? "全员就绪，开赛！" : "房主在全员选车并就绪后可开赛"}">🏁 开始比赛</button>` : ""}
+        title="${startReason}（房主无需准备）">${canStart ? "🏁 开始比赛" : "⏳ " + startReason}</button>` : ""}
       <button class="results-btn online-btn ${isAutopilotOn() ? "on" : ""}" id="roomAutopilotBtn"
         title="开启后由算法驾驶你的赛车（本地运行，支持自定义算法）">🤖 自动驾驶：${isAutopilotOn() ? "开" : "关"}</button>
       <button class="results-btn online-btn" id="roomLeaveBtn">← 离开房间</button>
@@ -431,7 +547,10 @@ function onRoomClick(e) {
   }
   if (e.target.closest("#roomReadyBtn")) {
     myReady = !myReady;
-    conn.send({ t: "room_set", ready: myReady, carId: myCarId });
+    // carId 为空时不要带上：服务端会把 null 转成字符串 "null" 污染选车状态
+    conn.send(myCarId
+      ? { t: "room_set", ready: myReady, carId: myCarId }
+      : { t: "room_set", ready: myReady });
   }
 }
 

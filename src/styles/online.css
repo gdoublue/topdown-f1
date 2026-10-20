@@ -31,6 +31,23 @@
 }
 #nicknameInput:focus { border-color: #ffd166; }
 .online-btn { padding: 10px 16px; font-size: 13px; max-width: none; }
+/* 禁用态必须可见：否则"开始比赛"按钮看着能点、点了没反应，无从排查 */
+.online-btn:disabled,
+.results-btn:disabled {
+  opacity: 0.45;
+  filter: grayscale(0.8);
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+.online-error {
+  margin: 6px 0 0;
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 107, 107, 0.45);
+  background: rgba(255, 107, 107, 0.12);
+  border-radius: 8px;
+  color: #ffb4b4;
+  font-size: 12px;
+}
 
 /* 在线面板顶栏：始终提供"返回主菜单"（会自动离开房间/终止比赛） */
 .online-topbar {
@@ -115,11 +132,28 @@
   font-size: 13px;
   color: #e2e8f0;
 }
+.online-head {
+  background: transparent;
+  border-color: transparent;
+  padding: 2px 12px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: #64748b;
+}
 .ol-rank { color: #ffd166; min-width: 28px; text-align: center; }
 .ol-name { flex: 1.2; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ol-car { flex: 1; color: #94a3b8; font-size: 12px; }
 .ol-time { font-variant-numeric: tabular-nums; color: #38bdf8; font-weight: 700; }
-.ol-src { font-size: 10px; color: #64748b; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 1px 5px; }
+.ol-src { font-size: 10px; color: #64748b; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+/* 昵称旁的副标题：房间号 / 提示语 / 车内玩家昵称 */
+.ol-sub { color: #64748b; font-size: 11px; font-weight: 400; margin-left: 6px; }
+.ol-players {
+  flex: 0.9;
+  margin-left: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .online-empty { color: #64748b; font-size: 12px; text-align: center; padding: 18px 0; }
 .online-create {
   display: flex;
