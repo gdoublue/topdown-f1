@@ -18,12 +18,12 @@
 //    - 后车追尾前车时，后车承担动量损失，前车速度保持（公平无穿车漏洞、不被后方顶飞）
 //    - 远端车受击时叠加微量平滑弹性排斥（Visual Pushback），带接触火花扬尘、车身震动与碰撞音效
 // 4. 比赛时钟（倒计时/开赛/结束）由服务器权威驱动
-import { switchTrack, N, LAP_LENGTH, isLinear } from "../track/geometry.js";
+import { switchTrack, LAP_LENGTH, isLinear, indexAtDistance } from "../track/geometry.js";
 import { setRaceLaps } from "../config.js";
 import { createCar, stepCar, finishedCarInput, getCarDistance } from "../car/physics.js";
 import { getRandomLivery } from "../car/render.js";
 import { updateCarLap } from "../game/race.js";
-import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput, DS } from "../game/ai.js";
+import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput } from "../game/ai.js";
 import { race as globalRace, simClock } from "../game/race.js";
 import { conn } from "./connection.js";
 import { sampleRemote, createClockOffset, createPlayoutClock } from "./remoteSync.js";
@@ -244,10 +244,9 @@ function onSnapshot(msg) {
       const s = isLinear
         ? Math.max(0, Math.min(lapLen, rd))
         : (((rd - (lapNo - 1) * lapLen) % lapLen) + lapLen) % lapLen;
-      const n = Math.max(1, N);
-      const i = Math.round(s / Math.max(0.1, DS));
       e.car.trackS = s;
-      e.car.nearIdx = isLinear ? Math.max(0, Math.min(n - 1, i)) : ((i % n) + n) % n;
+      // 按 cumDist 精确换算（采样点不是按米均匀的，round(s / DS) 误差可达一倍）
+      e.car.nearIdx = indexAtDistance(s);
       e.car.idx = e.car.nearIdx;
     }
   }

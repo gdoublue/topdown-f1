@@ -245,6 +245,33 @@ export function switchTrack(trackId) {
   return activateContext(createTrackContext(trackId));
 }
 
+/* 沿赛道物理距离（米）→ 最近采样下标。
+   注意：采样点按 Catmull-Rom 的**参数**均匀，不是按米均匀（直道段距可能是弯道的 2 倍），
+   所以不能用 round(米 / DS) —— DS 只是平均间距。这里按 cumDist 二分，误差 ≤1 个采样点。
+   环形赛道自动取模；直线冲刺赛道钳制到 0 ~ N-1（cumDist[N] 在直线赛道是计时里程，不可用）。 */
+export function indexAtDistance(meters) {
+  const n = N;
+  if (n <= 0) return 0;
+  const m = Number(meters) || 0;
+  if (isLinear) {
+    const t = Math.max(0, Math.min(cumDist[n - 1], m));
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cumDist[mid] <= t) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+  const L = LAP_LENGTH || cumDist[n] || 1;
+  const t = ((m % L) + L) % L;
+  let lo = 0, hi = n;                      // cumDist[0] = 0 … cumDist[N] = L
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (cumDist[mid] <= t) lo = mid; else hi = mid - 1;
+  }
+  return lo % n;
+}
+
 // 模块加载时立即初始化当前赛道
 // 尝试从浏览器 URL 读取 track 参数 (如果存在 window)
 let initId = DEFAULT_TRACK_ID;

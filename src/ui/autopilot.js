@@ -4,7 +4,7 @@
 // 通过 out.up / out.brake / out.steer 输出控制量。默认内容是内置 superDriver 的源码
 // （直接 Function.prototype.toString 取真实实现，永远和游戏内算法保持一致）。
 import {
-  N, pts, nor, hw, curvS, onTrackChange,
+  N, pts, nor, hw, curvS, onTrackChange, indexAtDistance,
   currentTrackId, LAP_LENGTH, HW, isLinear, kerbFlag
 } from "../track/geometry.js";
 import { getTrack } from "../track/tracks.js";
@@ -54,13 +54,10 @@ const TRACK_API = {
   get DS() { return DS; },
   get HW() { return HW; },                                              // 基础半宽（米）
   get kerbFlag() { return kerbFlag; },                                  // 1 = 该采样点有路缘石
-  // 沿赛道距离（米）→ 采样下标：统一按真实采样间距 DS 换算
-  // （直线冲刺赛道的采样点覆盖整条 11km 沥青，不能拿 6km 计赛长度当比例尺）
+  // 沿赛道物理距离（米）→ 最近采样下标（按 cumDist 精确换算，误差 ≤1 个点）
+  // 环形自动取模、直线自动钳制；不能用 round(米/DS)，采样点不是按米均匀的
   idxAt(meters) {
-    const n = Math.max(1, N);
-    const i = Math.round((Number(meters) || 0) / Math.max(0.1, DS));
-    if (isLinear) return Math.max(0, Math.min(n - 1, i));
-    return ((i % n) + n) % n;
+    return indexAtDistance(meters);
   },
 };
 

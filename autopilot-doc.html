@@ -388,7 +388,8 @@ if (geo.gapFrontRear &lt; 0 &amp;&amp; geo.gapLateral &lt; 0) { /* 已经贴上�
     <tr><td><code>hw[i]</code></td><td>该点赛道半宽（米）。路面内 0 ~ hw，外侧是路肩 / 草地。</td></tr>
     <tr><td><code>curvS[i]</code></td><td>平滑后的有符号曲率（1/m，±9 点滑动平均）。<code>|curvS| &gt; 1/110</code> 就是系统判定"要铺路缘石"的弯道，可直接拿来做弯道阈值；半径 = <code>1/|curvS|</code>。</td></tr>
     <tr><td><code>lineX[i]</code> / <code>lineY[i]</code></td><td>预计算的最优赛车线：横向被限制在 ±(hw - 3.4) 内（即离沥青边缘至少 3.4m），弯中贴内侧。跟这条线通常最快。</td></tr>
-    <tr><td><code>DS</code></td><td>真实采样间距（米），把「米」换算成「下标」时用：<code>idx + 距离 / DS</code>。直线冲刺赛道的 DS 按整条沥青（11km）算，不等于 <code>track.length / N</code>。</td></tr>
+    <tr><td><code>DS</code></td><td><b>平均</b>采样间距（米）。采样点按曲线参数均匀、不是按米均匀（直道一段可能是弯道的两倍长），所以
+      <code>idx + 距离 / DS</code> 只是近似——精确换算请用 <code>track.idxAt(米)</code>。直线冲刺赛道的 DS 按整条沥青（11km）算，不等于 <code>track.length / N</code>。</td></tr>
     <tr><td><code>PHYS</code></td><td>全局物理常量：<code>brake</code>(61.6)、<code>lightBrakeFactor</code>(0.45)、<code>latGrip</code>、<code>maxOmega</code>、<code>maxSpeed</code>、<code>accelCurve</code> 等。</td></tr>
     <tr><td><code>CAR_LENGTH</code> / <code>CAR_WIDTH</code></td><td>车身包围盒 <b>5.6m × 2.0m</b>（车头车尾各 2.8m、左右各 1.0m），详见 <a href="#spacing">车距与车身尺寸</a>。</td></tr>
   </tbody>
@@ -405,7 +406,7 @@ if (geo.gapFrontRear &lt; 0 &amp;&amp; geo.gapLateral &lt; 0) { /* 已经贴上�
     <tr><td><code>track.isLinear</code></td><td>是否直线冲刺赛道（起点→终点不闭合）。</td></tr>
     <tr><td><code>track.N</code> / <code>track.DS</code> / <code>track.HW</code></td><td>采样点数 / 采样间距（米）/ 基础半宽（米）。</td></tr>
     <tr><td><code>track.kerbFlag[i]</code></td><td><code>1</code> = 该采样点铺了红白路缘石（可以放心压）。</td></tr>
-    <tr><td><code>track.idxAt(米)</code></td><td>沿赛道的物理距离 → 采样下标（按真实采样间距 DS 换算）；环形赛道自动取模，直线赛道自动钳制到 0 ~ N-1。<b>两种赛道都能安全用</b>，推荐替代手写 <code>% N</code>。</td></tr>
+    <tr><td><code>track.idxAt(米)</code></td><td>沿赛道的物理距离 → 采样下标（按真实里程二分，误差 ≤1 个点）；环形赛道自动取模，直线赛道自动钳制到 0 ~ N-1。<b>两种赛道都能安全用</b>，推荐替代手写 <code>% N</code> 和 <code>距离 / DS</code>。</td></tr>
   </tbody>
 </table>
 <p class="dim">
@@ -614,7 +615,8 @@ function driver(car, out, dt) {
   <li><b>离线批量测速（无头台架）</b>：仓库里的 <code>scripts/autopilot-bench.mjs</code> 用真实物理跑你的算法，不用开浏览器：
     <code>node scripts/autopilot-bench.mjs --algo=我的算法.js --track=all --car=all</code>（<code>--mode=vs|duel</code> 还能测缠斗）。
     它跑的就是加固后的引擎，越权写入会被拦截并逐条列出，所以成绩只代表"只控制自己的车"能达到的水平；
-    <code>--raw</code> 可复现加固前的行为（裸对象），只用于对照审计。</li>
+    <code>--raw</code> 可复现加固前的行为（裸对象），只用于对照审计。
+    <b>逐步教程（写法 / 调试套路 / 报错速查 / 基线回归）见仓库的 <code>scripts/autopilot-bench.md</code></b>。</li>
 </ul>
 
 <a class="back" href="./">← 返回游戏</a>

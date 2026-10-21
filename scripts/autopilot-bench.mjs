@@ -10,6 +10,7 @@
  * 两个用途：
  *   1. 玩家：改完算法先在这里跑，秒级拿到圈速，不用开浏览器；
  *   2. 开发者：同一算法跑全部赛车 / 全部赛道，检查新车发布后的公平性。
+ * 完整用法 / 调试套路 / 报错速查：scripts/autopilot-bench.md
  *
  * 公平性：默认就是引擎加固后的真实行为 ——
  *   · 编译与注入完全复用 src/ui/autopilot.js（vm 域里跑，拿不到 window/document/localStorage/fetch）；
@@ -74,9 +75,11 @@ const USAGE = `
   --seed=<n>            随机种子，缺省 1（同一 seed 结果可复现）
   --random-grid         发车位随机（缺省固定发车位，便于对比）
   --raw                 复现加固前的引擎行为（裸对象 + 真实赛道数组），只审计、不拦截
-  --ignore-errors       算法抛异常时继续跑（用松油滑行替代，最多记 3 次）
+  --ignore-errors       算法抛异常时继续跑（用松油滑行替代）；不加则 3 次异常后中止本场
   --max-seconds=<n>     单场仿真上限（秒），缺省按圈数给足
-  --json                输出 JSON（便于 CI / 表格工具）
+  --json                输出 JSON 到 stdout（便于管道 / CI）
+  --json=<文件>         直接写 JSON 文件（UTF-8，绕开 shell 重定向的编码问题）
+  --baseline=<json>     与上次保存的结果对比（表格里加一列 Δ 最快圈）
   --verbose             打印每圈、异常、违规明细与 console.log
   --list                列出可用赛道 / 赛车 / 内置算法
   -h, --help            显示本帮助
@@ -87,7 +90,7 @@ function parseArgs(argv) {
     algos: [], tracks: null, cars: null, laps: null, mode: "solo",
     dt: 1 / 60, jitter: false, seed: 1, strict: true, json: false,
     verbose: false, randomGrid: false, ignoreErrors: false, maxSeconds: 0,
-    list: false, help: false,
+    baseline: null, jsonFile: null, list: false, help: false,
   };
   for (const a of argv) {
     if (a === "-h" || a === "--help") { o.help = true; continue; }
@@ -104,7 +107,8 @@ function parseArgs(argv) {
       continue;
     }
     const [, k, v] = m;
-    if (k === "algo") o.algos.push(v);
+    if (k === "json") { o.json = true; if (v) o.jsonFile = v; }
+    else if (k === "algo") o.algos.push(v);
     else if (k === "track") o.tracks = v;
     else if (k === "car") o.cars = v;
     else if (k === "laps") o.laps = Math.max(1, Math.round(Number(v) || 1));
@@ -112,6 +116,7 @@ function parseArgs(argv) {
     else if (k === "dt") o.dt = Math.max(1 / 500, Number(v) || 1 / 60);
     else if (k === "seed") o.seed = Number(v) >>> 0;
     else if (k === "max-seconds") o.maxSeconds = Number(v) || 0;
+    else if (k === "baseline") o.baseline = v;
     else throw new Error(`未知参数：--${k}（--help 看用法）`);
   }
   if (!["solo", "vs", "duel"].includes(o.mode)) throw new Error("--mode 只能是 solo / vs / duel");
@@ -585,7 +590,42 @@ function pad(s, n) {
   return s + " ".repeat(Math.max(0, n - w));
 }
 
-function printTable(results) {
+// 解析 JSON：容忍前面混进来的日志（npm 会把脚本横幅打到 stdout）
+function parseLoose(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const a = text.indexOf("[");
+    const b = text.lastIndexOf("]");
+    if (a >= 0 && b > a) return JSON.parse(text.slice(a, b + 1));
+    return JSON.parse(text);   // 抛出原始错误
+  }
+}
+
+// 读 JSON 文件：UTF-8（含 BOM）→ 失败再按 UTF-16LE 读（Windows PowerShell 5.1 的 `>` 重定向）
+function readJsonFile(file) {
+  const raw = fs.readFileSync(file);
+  const utf8 = raw.toString("utf8").replace(/^\uFEFF/, "");
+  try {
+    return parseLoose(utf8);
+  } catch {
+    return parseLoose(raw.toString("utf16le").replace(/^\uFEFF/, ""));
+  }
+}
+
+// 基线：--json 存下来的结果数组，按 赛道|车|算法 建索引
+function loadBaseline(file) {
+  const rows = readJsonFile(file);
+  if (!Array.isArray(rows)) throw new Error(`基线文件格式不对（应该是 --json 的输出数组）：${file}`);
+  const map = new Map();
+  for (const r of rows) {
+    if (!r || !r.me) continue;
+    map.set(`${r.trackId}|${r.carId}|${r.algo}`, r);
+  }
+  return map;
+}
+
+function printTable(results, baseline) {
   const head = `${pad("算法", 15)}│ ${pad("赛车", 18)}│ ${pad("最快圈", 10)}│ ${pad("总时", 11)}│ ${pad("各圈", 28)}│ ${pad("平均", 10)}│ ${pad("极速", 10)}│ ${pad("草地", 6)}│ 违规/异常`;
   console.log(head);
   console.log("─".repeat(head.length));
@@ -596,10 +636,20 @@ function printTable(results) {
     const trackLen = getTrack(r.trackId).length;
     const avg = me.bestLapMs ? Math.round((trackLen / (me.bestLapMs / 1000)) * 3.6) : null;
     const flag = (r.violations ? `⚠${r.violations}` : "0") + " / " + (r.errors ? `✗${r.errors}` : "0");
+    // 基线对比：Δ 最快圈（负数 = 变快）
+    let delta = "";
+    if (baseline) {
+      const base = baseline.get(`${r.trackId}|${r.carId}|${r.algo}`);
+      if (!base) delta = "  Δ 新增";
+      else if (base.me.bestLapMs != null && me.bestLapMs != null) {
+        const d = (me.bestLapMs - base.me.bestLapMs) / 1000;
+        delta = `  Δ ${d > 0 ? "+" : ""}${d.toFixed(3)}s`;
+      } else delta = "  Δ 无法对比";
+    }
     console.log(
       `${pad(r.algo, 15)}│ ${pad(r.carName, 18)}│ ${pad(fmtMs(me.bestLapMs), 10)}│ ${pad(fmtMs(me.totalMs), 11)}│ `
       + `${pad(laps || "—", 28)}│ ${pad(avg == null ? "—" : avg + " km/h", 10)}│ ${pad(me.topSpeedKmh + " km/h", 10)}│ `
-      + `${pad(me.grassPct + "%", 6)}│ ${flag}`
+      + `${pad(me.grassPct + "%", 6)}│ ${flag}${delta}`
     );
     if (r.rows.length > 1) {
       const others = r.rows.filter((x) => !x.isMine)
@@ -662,12 +712,16 @@ function main() {
     for (const id of trackIds) if (!TRACKS.some((t) => t.id === id)) throw new Error(`未知赛道：${id}`);
     for (const id of carIds) if (!AI_CONFIGS.some((c) => c.id === id)) throw new Error(`未知赛车：${id}`);
 
+    const baseline = opt.baseline ? loadBaseline(opt.baseline) : null;
+
     if (!opt.json) {
       console.log("\n=== 无头算法台架 · TOPDOWN F1 ===");
       console.log(`算法：${algos.map((a) => (a.builtin ? `${a.name}(内置)` : a.name)).join(" / ")}`);
       console.log(`赛道：${trackIds.join(" / ")} | 赛车：${carIds.length === AI_CONFIGS.length ? "全部" : carIds.join(" / ")}`);
       console.log(`模式：${opt.mode} | 圈数：${opt.laps} | 步长：1/${Math.round(1 / opt.dt)}${opt.jitter ? " ± 抖动" : ""}`
-        + ` | seed：${opt.seed} | ${opt.strict ? "引擎沙箱（只读视图 + 只读注入数据）" : "RAW（加固前行为，仅审计用）"}\n`);
+        + ` | seed：${opt.seed} | ${opt.strict ? "引擎沙箱（只读视图 + 只读注入数据）" : "RAW（加固前行为，仅审计用）"}`);
+      if (baseline) console.log(`基线：${opt.baseline}（${baseline.size} 条记录，Δ 负数 = 变快）`);
+      console.log("");
     }
 
     const results = [];
@@ -694,9 +748,15 @@ function main() {
     }
 
     if (opt.json) {
-      console.log(JSON.stringify(results, null, 2));
+      const text = JSON.stringify(results, null, 2);
+      if (opt.jsonFile) {
+        fs.writeFileSync(opt.jsonFile, text, "utf8");
+        console.log(`✓ 结果已写入 ${opt.jsonFile}（${results.length} 条）`);
+      } else {
+        console.log(text);
+      }
     } else {
-      printTable(results);
+      printTable(results, baseline);
       const bad = results.filter((r) => r.violations > 0 || r.errors > 0);
       if (bad.length) {
         console.log(`\n⚠ ${bad.length} 场存在越权写入或运行异常，成绩需要打折看（见上表）。`);
