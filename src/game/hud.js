@@ -22,9 +22,12 @@ export function initHud(aiMode = false, onSelectCar = null) {
     el[id] = document.getElementById(id);
   }
 
-  if (isAI) {
-    document.body.classList.add("ai-mode");
+  // 必须"跟着模式走"而不是只加不删：否则打过一局在线/对战之后，
+  // 回到单人时 #stats / #speedo 仍被 ai-mode 隐藏，排位榜和遥测条却一直挂着
+  // （显示的还是上一局的旧数据）
+  document.body.classList.toggle("ai-mode", !!isAI);
 
+  if (isAI) {
     // 在排行榜容器上使用全局事件委托，保证点击 100% 灵敏响应，不受 DOM 刷新影响
     if (el.standingsList) {
       const handleRowClick = (e) => {

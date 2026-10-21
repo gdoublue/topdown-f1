@@ -350,3 +350,27 @@ body.ai-mode #help { bottom: 96px; }
   letter-spacing: 0.5px;
 }
 
+/* 自动驾驶开关：顶栏第三行（"重选模式 / 退出比赛"下方）。
+   父级 #hud 是 pointer-events:none，pointer-events:auto 由 .home-pill 提供。
+   选择器用 .panel.autopilot-pill（2 个类）压过 .home-pill（1 个类），
+   避免 menus.css 后加载把 top / 配色覆盖回去。 */
+.panel.autopilot-pill {
+  top: 100px;
+  color: #7dd3fc;
+  border-color: rgba(125, 211, 252, 0.35);
+}
+.panel.autopilot-pill:hover {
+  color: #fff;
+  border-color: #7dd3fc;
+  background: rgba(125, 211, 252, 0.14);
+}
+.panel.autopilot-pill.on {
+  color: #4ade80;
+  border-color: rgba(74, 222, 128, 0.5);
+  background: rgba(74, 222, 128, 0.14);
+}
+.panel.autopilot-pill.on:hover {
+  border-color: #4ade80;
+  background: rgba(74, 222, 128, 0.22);
+}
+

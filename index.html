@@ -26,7 +26,7 @@
         <span>VIEW</span>
         <small>视图工具</small>
       </div>
-      <div class="vt-row">
+      <div class="vt-row" id="aiLineRow">
         <span class="vt-name">AI 探测线</span>
         <button id="aiLineToggle" class="vt-switch" aria-pressed="false" title="显示 / 隐藏 AI 前瞻目标点与引线（默认关闭）"><i></i></button>
       </div>
@@ -34,7 +34,7 @@
         <span class="vt-name">视野缩放</span>
         <input id="zoomRange" type="range" min="0.1" max="3.5" step="0.05" value="1" title="手动调节镜头远近（越大越近）" />
       </div>
-      <div class="vt-row">
+      <div class="vt-row" id="speedRow">
         <span class="vt-name">比赛倍速</span>
         <div id="speedChips" class="speed-chips" title="快进比赛（在线对战不受影响）· 快捷键 + / -"></div>
       </div>
@@ -55,12 +55,14 @@
     <!-- 比赛中随时重选模式 / 赛车 -->
     <button id="reopenStartBtn" class="panel home-pill" title="重新选择玩法模式与赛车">⟲ 重选模式</button>
     <button id="quitOnlineBtn" class="panel danger-pill hidden" title="退出在线比赛（多人对战将判定为认输）">🏳️ 退出比赛</button>
+    <!-- 自动驾驶开关：随时随地由玩家自己决定（在线换视角时会自动接管，可点这里关掉） -->
+    <button id="autopilotPill" class="panel home-pill autopilot-pill" title="自动驾驶：由算法驾驶你的赛车，随时可开关（快捷键 B）">🤖 自动驾驶：关</button>
 
     <!-- AI 模式实时排位榜 (点击切换视图) -->
     <div class="panel" id="standingsPanel">
       <div class="panel-header">
         <span>LIVE STANDINGS</span>
-        <small>点击切换视角</small>
+        <small id="standingsHint">点击切换视角</small>
       </div>
       <div id="standingsList"></div>
     </div>

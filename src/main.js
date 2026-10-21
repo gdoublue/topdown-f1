@@ -17,7 +17,7 @@ import {
 } from "./ui/menuPanels.js";
 import { trackThumbUrl } from "./ui/trackThumb.js";
 import {
-  initAutopilot, isAutopilotOn, getAutopilotDriver, openAutopilot, onAutopilotChange
+  initAutopilot, isAutopilotOn, getAutopilotDriver, openAutopilot, onAutopilotChange, toggleAutopilot
 } from "./ui/autopilot.js";
 import { initMinimap, drawMinimap } from "./game/minimap.js";
 import * as audio from "./game/audio.js";
@@ -55,6 +55,7 @@ let cars = [];
 let aiInputs = [];
 const activeCars = [];   // 未完赛车辆（复用数组，供 AI 避让感知；完赛车已幽灵化）
 let focusIndex = 0;
+let focusAutopilot = false;   // 在线换视角时临时接管用（切回自己的车要交还键盘）
 let finishAt = 0;
 let firstFinishAt = 0;   // 首车冲线时刻（模拟时钟）：用于掉队兜底
 const STALL_FINISH_MS = 20000;      // 首车完赛后 20s 仍未全员完赛 → 强制结算
@@ -136,9 +137,51 @@ function setupCars() {
 
 function switchFocusCar(idx) {
   if (idx < 0 || idx >= cars.length) return;
+  const target = cars[idx];
   focusIndex = idx;
-  resetCamera(cars[focusIndex]);
-  audio.syncCarAudio(cars[focusIndex]);
+  resetCamera(target);
+  audio.syncCarAudio(target);
+
+  // 在线对战允许换视角，但你的车不能没人开：
+  //  · 换到别人视角时若自动驾驶没开 → 用【玩家本地算法】临时接管（不写偏好设置）
+  //  · 切回自己的车 → 若这次接管是换视角引起的，就把键盘交还
+  if (mode !== "onlinerace") return;
+  if (!target.isPlayer) {
+    if (!isAutopilotOn()) {
+      focusAutopilot = true;
+      toggleAutopilot(true, { persist: false });
+      updateHelpText();
+      showMsg("自动驾驶接管", "看别人视角时，你的车由本地算法驾驶", 1800);
+    }
+  } else if (focusAutopilot) {
+    releaseFocusAutopilot();
+  }
+}
+
+// 页面上的自动驾驶开关：顶栏胶囊点击 / 快捷键 B 都走这里，开不开由玩家决定
+function toggleAutopilotQuick() {
+  if (mode === "spectate") return;   // 全 AI 观战没有"自己的车"可交出去
+  const next = !isAutopilotOn();
+  focusAutopilot = false;            // 手动开关之后就不再算"换视角临时接管"
+  toggleAutopilot(next);
+  // 关掉自动驾驶时把镜头收回自己的车，否则等于蒙着眼睛开
+  if (!next) {
+    const myIdx = mode === "onlinerace"
+      ? cars.findIndex(c => c.isPlayer)
+      : (mode === "vs" ? playerIndex : -1);
+    if (myIdx >= 0 && myIdx !== focusIndex) switchFocusCar(myIdx);
+  }
+  updateHelpText();
+}
+
+// 交还键盘：只关掉"因为换视角而自动打开"的那次自动驾驶
+// silent：退出比赛/回大厅等场景，不要弹提示（此时屏幕已被弹窗占据）
+function releaseFocusAutopilot(silent = false) {
+  if (!focusAutopilot) return;
+  focusAutopilot = false;
+  toggleAutopilot(false, { persist: false });
+  updateHelpText();
+  if (!silent) showMsg("已交还键盘", "自动驾驶已关闭", 1200);
 }
 setOnSelectCar(switchFocusCar);
 
@@ -378,8 +421,19 @@ window.addEventListener("keydown", (e) => {
     document.getElementById("trackStartBtn")?.click();
     return;
   }
+  // B：快捷开关自动驾驶（弹窗打开、焦点在输入框/代码框里时不触发）
+  if ((e.key === "b" || e.key === "B") && !isModalOpen) {
+    const tag = (e.target && e.target.tagName) || "";
+    if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") {
+      e.preventDefault();
+      toggleAutopilotQuick();
+      return;
+    }
+  }
   if (e.key === "t" || e.key === "T") {
     e.preventDefault();
+    // 在线对战：赛道由房间统一决定，客户端不提供切换入口（否则本地赛道会和服务端错位）
+    if (mode === "onlinerace") return;
     if (isModalOpen) cancelTrackModal();
     else openTrackModal(false);
     return;
@@ -418,7 +472,8 @@ window.addEventListener("keydown", (e) => {
     cycleSpeed(-1);
     return;
   }
-  if (mode === "vs" || mode === "spectate") {
+  // 换视角：对战/观战/在线都支持（在线换走会自动开自动驾驶，见 switchFocusCar）
+  if (mode === "vs" || mode === "spectate" || mode === "onlinerace") {
     if (e.key >= "1" && e.key <= String(cars.length)) {
       switchFocusCar(Number(e.key) - 1);
     } else if (e.key === "Tab") {
@@ -654,6 +709,7 @@ function selectMode(m) {
 function backToModeStep() {
   leaveOnlineSession();
   mode = null;
+  releaseFocusAutopilot(true);   // 离开对局：把"换视角临时接管"的自动驾驶还回去
   onlinePractice = false;
   started = false;
   resultsShown = false;
@@ -694,6 +750,7 @@ function startGame() {
   winner = null;
   updateTrackUI();
   updateHelpText();
+  updateTopControls();   // 从在线对局切回单机/对战时，把联机里隐藏的控件恢复回来
   // 开局先选赛道；URL 显式指定过 ?track= 则直接开赛
   if (!startedOnce && mode !== "spectate") { startedOnce = true; openTrackModal(true); }
 }
@@ -703,26 +760,29 @@ function startGame() {
 function updateTopControls() {
   const reopenBtn = document.getElementById("reopenStartBtn");
   const quitOnlineBtn = document.getElementById("quitOnlineBtn");
-  const trackPill = document.getElementById("trackSwitcherPill");
+  const online = mode === "onlinerace";
 
-  if (mode === "onlinerace") {
+  if (online) {
     if (reopenBtn) reopenBtn.classList.add("hidden");
     if (quitOnlineBtn) quitOnlineBtn.classList.remove("hidden");
-    if (trackPill) {
-      trackPill.style.cursor = "default";
-      trackPill.title = "在线对战：赛道由房间统一决定";
-    }
   } else {
     if (reopenBtn) {
       reopenBtn.classList.remove("hidden");
       reopenBtn.textContent = "⟲ 重选模式";
     }
     if (quitOnlineBtn) quitOnlineBtn.classList.add("hidden");
-    if (trackPill) {
-      trackPill.style.cursor = "pointer";
-      trackPill.title = "点击切换赛道";
-    }
   }
+
+  // 联机专属裁剪：这些入口在在线对战里要么无效、要么有害，直接不出现
+  //  · 赛道切换胶囊：赛道由房间统一决定，点了会把本地赛道改掉，和服务器全盘错位
+  //  · 比赛倍速：本地快进对服务器实时比赛无效（快捷键 +/- 也已屏蔽）
+  //  · AI 探测线：调试用的 AI 前瞻引线，联机里属于额外信息
+  for (const id of ["trackSwitcherPill", "speedRow", "aiLineRow"]) {
+    document.getElementById(id)?.classList.toggle("hidden", online);
+  }
+
+  // 全 AI 观战模式没有"自己的车可交给算法"，这个开关没有意义
+  document.getElementById("autopilotPill")?.classList.toggle("hidden", mode === "spectate");
 }
 
 function openConfirmModal(title, desc, onConfirm) {
@@ -761,6 +821,7 @@ function exitLocalNetRace() {
   hideMsg(true);
   resetSimClock(0);
   mode = "online";
+  releaseFocusAutopilot(true);
   started = false;
   resultsShown = false;
   finishAt = 0;
@@ -795,6 +856,7 @@ function exitToOnlineLobby() {
   finishAt = 0;
   winner = null;
   mode = "online";
+  releaseFocusAutopilot(true);
   try { location.hash = "#/online"; } catch (e) {}
   resetSimClock(0);
 
@@ -811,13 +873,17 @@ function updateHelpText() {
   // 自动驾驶开启时给个明确提示（键盘操作不再作用于你的车）
   const auto = isAutopilotOn() ? "<br>🤖 自动驾驶中：你的赛车由算法驾驶（Esc → 重选模式 可关闭）" : "";
   if (mode === "onlinerace") {
-    help.innerHTML = "在线竞速 · QQ飞车即时碰撞 · 零延迟手感 · J 油门　K 轻刹　L 重刹 · 1-7 换视角 · Esc 退出 (认输)" + auto;
+    // 在线：可以换视角，但换走时自己的车会临时交给算法；Esc 是"退出/认输"而不是重选模式
+    const focusAuto = focusAutopilot
+      ? "<br>🤖 正在看别人的视角：你的车已交给本地算法驾驶（切回自己的车即交还键盘）"
+      : (isAutopilotOn() ? "<br>🤖 自动驾驶中：你的赛车由算法驾驶" : "");
+    help.innerHTML = "在线竞速 · J 油门　K 轻刹　L 重刹 · 1-7 / Tab 换视角 · B 自动驾驶 · Esc 退出 (认输)" + focusAuto;
   } else if (mode === "spectate") {
     help.innerHTML = "AI 锦标赛 · 点击顶部或按 T 选赛道 · 1-7 换视角 · + / - 倍速快进 · R 重开 · Esc 菜单";
   } else if (mode === "vs") {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · T 选赛道 · R 重开 · Esc 菜单" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 菜单" + auto;
   } else {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · T 选赛道 · R 重开 · Esc 菜单" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 菜单" + auto;
   }
 }
 
@@ -832,6 +898,10 @@ function initStartFlow() {
   // 比赛中随时重选玩法模式与赛车
   const reopenBtn = document.getElementById("reopenStartBtn");
   if (reopenBtn) reopenBtn.addEventListener("click", reopenStartFlow);
+
+  // 自动驾驶开关（顶栏常驻）：点击或按 B 都走这一条路径
+  const autoPill = document.getElementById("autopilotPill");
+  if (autoPill) autoPill.addEventListener("click", toggleAutopilotQuick);
 
   // 在线模式退出/认输按钮
   const quitBtn = document.getElementById("quitOnlineBtn");
@@ -900,6 +970,7 @@ function startOnlineRace(msg) {
   setNetAutopilot(isAutopilotOn(), getAutopilotDriver());
   cars = startNetRace(msg, conn.session?.sid);
   focusIndex = Math.max(0, cars.findIndex(c => c.isPlayer));
+  releaseFocusAutopilot(true);   // 上一局残留的"换视角接管"不能带进新一局
   switchFocusCar(focusIndex);
   fx.clearEffects();
   hideMsg(true);

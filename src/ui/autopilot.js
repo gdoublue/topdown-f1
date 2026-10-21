@@ -150,6 +150,12 @@ export function refreshLabels() {
     roomBtn.textContent = enabled ? "🤖 自动驾驶：开" : "🤖 自动驾驶：关";
     roomBtn.classList.toggle("on", enabled);
   }
+  // 比赛页面上的常驻开关（顶栏胶囊）
+  const pill = document.getElementById("autopilotPill");
+  if (pill) {
+    pill.textContent = enabled ? "🤖 自动驾驶：开" : "🤖 自动驾驶：关";
+    pill.classList.toggle("on", enabled);
+  }
 }
 
 function emitModalChange() {
@@ -176,10 +182,12 @@ export function closeAutopilot() {
   emitModalChange();
 }
 
-export function toggleAutopilot(on) {
+// persist=false：只改本局状态，不写 localStorage。
+// 用在"换视角自动接管"这种临时场景 —— 不能把玩家的长期偏好改成开启。
+export function toggleAutopilot(on, { persist = true } = {}) {
   enabled = typeof on === "boolean" ? on : !enabled;
   if (enabled) recompile(true);   // 马上开跑前用最新代码编译一次
-  save();
+  if (persist) save();
   notify();
   const toggle = document.getElementById("autopilotToggle");
   if (toggle) toggle.checked = enabled;
