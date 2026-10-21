@@ -33,14 +33,22 @@ console.log("======================================================");
   }
 
   // 设定人类幽灵在前方 (x: 200, y: 470, speed: 50)
-  sim.setPlayerState("human-1", { x: 200, y: 470, angle: 0, speed: 50, lap: 1, rd: 200 }, performance.now());
+  // 直接写幽灵坐标：本用例验的是"AI 追尾人类时的单向处罚"，
+  // 不走 setPlayerState —— 那里有反作弊位移钳制，会把这个瞬移样本丢掉。
+  const humanGhost = sim.ghosts.get("human-1").car;
+  humanGhost.x = 200;
+  humanGhost.y = 470;
+  humanGhost.angle = 0;
+  humanGhost.speed = 50;
+  humanGhost.lap = 1;
+  humanGhost.raceDist = 200;
 
   // 设定 AI 在人类正后方，初速更快 (x: 198, y: 470, speed: 120)，产生重叠追尾
   const ai = sim.aiEntries[0].car;
   ai.x = 198;
   ai.y = 470;
   ai.speed = 120;
-  const initialHumanX = sim.ghosts.get("human-1").car.x;
+  const initialHumanX = humanGhost.x;
 
   // 执行一次 tick
   sim.tick(0.033, performance.now());

@@ -2,7 +2,7 @@
 //
 // 职责划分：
 //   - 每个玩家：自己的车在【自己的客户端】以完整帧率本地模拟（零网络延迟），
-//     以 ~12Hz 上报位置/圈数状态；服务器只做中继展示与合理性校验
+//     以 60Hz 上报位置/圈数状态（30fps 客户端退化为逐帧）；服务器只做中继展示与合理性校验
 //   - AI 补位车：服务器 30Hz 权威模拟（复用单机物理）
 //   - 服务器：比赛时钟（倒计时/开赛/结束）、状态广播、成绩收集与排名
 //   - 车辆间不发生实体碰撞（幽灵竞速）——在线竞速没有必须实时对撞的交互
@@ -81,22 +81,67 @@ export class RaceSim {
     this.ghosts.set(sid, {
       sid, nickname, shortName: cfg.shortName, color, number,
       car, lastAt: 0,
+      // 反作弊基线：上一次被接受的位置 / 里程 / 圈数（见 setPlayerState）
+      lastRd: Number(car.raceDist) || 0,
+      lastLap: 1,
+      rejected: 0,
     });
   }
 
-  // 客户端状态上报（~30Hz）：速度做粗粒度合理性钳制
+  // 客户端状态上报（~60Hz）：位置 / 里程 / 圈数 / 完赛标记全部做合理性钳制。
+  //
+  // 幽灵模型下"自车"由客户端模拟，服务器不重算物理，但**不是全盘接收**：
+  //   · 单帧位移 > vMax·dt·1.5 + 2m 的样本丢弃位置（保留上一帧）。连续异常
+  //     （切后台 / 重连 / 设备时钟跳变）后放行位置，保证别人眼里的车不会永远卡住；
+  //     但里程仍只能按物理上限推进，靠瞬移抢名次没有意义。
+  //   · raceDist 每帧最多增长同一个阈值、圈数最多 +1、完赛标记必须里程到位。
+  //     真正的成绩仍以 race_finish 上报 + 理论最短圈校验为准（reportFinish）。
   setPlayerState(sid, s, now) {
     const g = this.ghosts.get(sid);
     if (!g) return;
     const c = g.car;
     const vMax = (c.perf?.maxSpeed?.[0] ?? PHYS.maxSpeed[0]) * 1.05 + 5;
-    c.x = Number(s.x) || 0;
-    c.y = Number(s.y) || 0;
+    const lapLen = Math.max(1, this.trackCtx.LAP_LENGTH || 5000);
+    const endDist = Math.max(1, this.maxLaps) * lapLen;
+    // 正常 60Hz ≈ 2.6m 的余量，远大于实际单帧位移；掉线重连也不会被误杀
+    const dt = g.lastAt > 0 ? Math.min(1, Math.max(0, (now - g.lastAt) / 1000)) : 0.5;
+    const stepLimit = vMax * dt * 1.5 + 2;
+
+    const nx = Number(s.x);
+    const ny = Number(s.y);
+    if (Number.isFinite(nx) && Number.isFinite(ny)) {
+      const jump = Math.hypot(nx - c.x, ny - c.y);
+      if (jump <= stepLimit) {
+        c.x = nx;
+        c.y = ny;
+        g.rejected = 0;
+      } else {
+        g.rejected = (g.rejected || 0) + 1;
+        // 兜底：连续 30 个样本都不合理 → 放行位置（观感自愈），里程仍然受限
+        if (g.rejected >= 30) { c.x = nx; c.y = ny; g.rejected = 0; }
+      }
+    }
+
     c.angle = Number(s.angle) || 0;
     c.speed = Math.max(-vMax, Math.min(vMax, Number(s.speed) || 0));
-    c.lap = Math.max(1, Math.round(Number(s.lap)) || 1);
-    c.raceDist = Math.max(0, Number(s.rd) || 0);
-    c.finished = !!s.fin;
+
+    // 里程：按物理上限推进 + 不回退（发车格为负里程，允许停留在负值）
+    const rdPrev = Number.isFinite(g.lastRd) ? g.lastRd : (Number(c.raceDist) || 0);
+    let rd = Number(s.rd);
+    if (!Number.isFinite(rd)) rd = rdPrev;
+    if (rd > rdPrev + stepLimit) rd = rdPrev + stepLimit;
+    if (rd < Math.min(rdPrev, 0)) rd = Math.min(rdPrev, 0);
+    if (rd > endDist) rd = endDist;
+    g.lastRd = rd;
+    c.raceDist = rd;
+
+    // 圈数：最多 +1，且不超过本场总圈数
+    const lap = Math.max(1, Math.round(Number(s.lap)) || 1);
+    g.lastLap = Math.min(lap, (g.lastLap || 1) + 1, Math.max(1, this.maxLaps));
+    c.lap = g.lastLap;
+
+    // 完赛标记：必须里程到位（成绩另由 race_finish 校验）
+    c.finished = !!s.fin && rd >= endDist - 5;
     c.total = Number(s.tot) || 0;
     c.best = Number(s.best) || 0;
     // 踏板 / 方向输入：中继给其他玩家（对手算法可据此判断前车是否在刹车）
@@ -107,7 +152,7 @@ export class RaceSim {
     c.nearIdx = near.i; c.trackS = near.s;   // AI 避让感知需要
     g.lastAt = now;
     // 采样时刻由发送端给出（毫秒，客户端自己的单调时钟）：
-    // 服务端只是原样中继，不再用"收到时刻"或"快照 tick"给样本打时间戳，
+    // 服务端原样中继，不用"收到时刻"或"快照 tick"给样本打时间戳，
     // 否则一帧样本会被对齐到 33ms 网格，接收端插值必然出现快慢交替的顿挫。
     g.st = Number(s.st) || 0;
   }

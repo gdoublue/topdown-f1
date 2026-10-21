@@ -18,12 +18,12 @@
 //    - 后车追尾前车时，后车承担动量损失，前车速度保持（公平无穿车漏洞、不被后方顶飞）
 //    - 远端车受击时叠加微量平滑弹性排斥（Visual Pushback），带接触火花扬尘、车身震动与碰撞音效
 // 4. 比赛时钟（倒计时/开赛/结束）由服务器权威驱动
-import { switchTrack } from "../track/geometry.js";
+import { switchTrack, N, LAP_LENGTH, isLinear } from "../track/geometry.js";
 import { setRaceLaps } from "../config.js";
 import { createCar, stepCar, finishedCarInput, getCarDistance } from "../car/physics.js";
 import { getRandomLivery } from "../car/render.js";
 import { updateCarLap } from "../game/race.js";
-import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput } from "../game/ai.js";
+import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput, DS } from "../game/ai.js";
 import { race as globalRace, simClock } from "../game/race.js";
 import { conn } from "./connection.js";
 import { sampleRemote, createClockOffset, createPlayoutClock } from "./remoteSync.js";
@@ -229,10 +229,27 @@ function onSnapshot(msg) {
     e.car.finished = !!sc.fin;
     e.car.total = sc.tot || null;
     if (sc.best) e.car.best = sc.best;
-    // 对手踏板状态（AI 由服务器模拟、玩家由 30Hz 上报中继）
+    // 对手踏板状态（AI 由服务器模拟、玩家由 60Hz 上报 + 30Hz 快照中继）
     e.car.inBrake = sc.b | 0;
     e.car.inUp = !!sc.u;
     e.car.inSteer = sc.s || 0;
+
+    // 远端车没有本地物理，nearIdx / trackS 会永远停在发车格初值：
+    // 用服务器上报的里程反推，玩家算法里的 o.nearIdx / o.trackS 才有意义
+    // （evaluateTrafficAndOvertake 也是靠 o.nearIdx 判断前车的）
+    const rd = Number(sc.rd);
+    if (Number.isFinite(rd)) {
+      const lapLen = Math.max(1, LAP_LENGTH || 5000);
+      const lapNo = Math.max(1, Number(sc.lap) || 1);
+      const s = isLinear
+        ? Math.max(0, Math.min(lapLen, rd))
+        : (((rd - (lapNo - 1) * lapLen) % lapLen) + lapLen) % lapLen;
+      const n = Math.max(1, N);
+      const i = Math.round(s / Math.max(0.1, DS));
+      e.car.trackS = s;
+      e.car.nearIdx = isLinear ? Math.max(0, Math.min(n - 1, i)) : ((i % n) + n) % n;
+      e.car.idx = e.car.nearIdx;
+    }
   }
 
   if (legacyRef > 0) clock.noteRef(legacyRef);

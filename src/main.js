@@ -100,18 +100,23 @@ function isAIDriven(i) {
   return mode === "vs" && i !== playerIndex;
 }
 
-// 把当前自动驾驶设置同步到玩家车上（支持比赛途中开关）
+// 把当前自动驾驶设置同步到玩家车上（支持比赛途中开关 / 改完代码立即生效）
+// 注意：这里必须每帧刷新引用，否则玩家在弹窗里改完算法、编译也通过了，
+// 车却还在跑上一次的旧函数（调试体验直接崩掉）。
 function syncPlayerAutopilot() {
   const me = cars[playerIndex];
   if (!me || !me.isPlayer) return;
-  const on = isAutopilotOn();
-  if (on && !me.autopilot) {
-    me.autopilot = true;
-    me.driver = getAutopilotDriver() || me.driver;
-  } else if (!on && me.autopilot) {
-    me.autopilot = false;
-    me.driver = null;
+  if (!isAutopilotOn()) {
+    if (me.autopilot) {
+      me.autopilot = false;
+      me.driver = null;
+    }
+    return;
   }
+  me.autopilot = true;
+  // 编译失败时 getAutopilotDriver() 为 null：保留上一次编译成功的算法（或该车内置 AI）
+  const drv = getAutopilotDriver();
+  if (drv && me.driver !== drv) me.driver = drv;
 }
 
 function setupCars() {

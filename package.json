@@ -8,6 +8,8 @@
     "dev": "vite",
     "ai": "vite --open /?ai=1",
     "ai:sim": "node scripts/ai-sim.mjs",
+    "algo:bench": "node scripts/autopilot-bench.mjs",
+    "algo:bench:sample": "node scripts/autopilot-bench.mjs --algo=userscripts/自动驾驶脚本.js --car=all",
     "build": "vite build",
     "preview": "vite preview"
   },

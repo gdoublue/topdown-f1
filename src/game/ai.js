@@ -11,6 +11,8 @@ import { clamp } from "../utils.js";
 import { CAR_LENGTH, CAR_WIDTH, getCarDistance } from "../car/physics.js";
 // Super Driver Pro（原 geminiDriver）已拆分到独立模块
 import { geminiDriver, resetApexCapCache } from "./geminiDriver.js";
+// 算法沙箱：driveAI 统一给 driver 传只读视图（玩家改不到游戏数值）
+import { driverCarView, driverCarsView, perfAliasOf, DRIVER_THIS } from "./driverSandbox.js";
 
 export let DS = LAP_LENGTH / Math.max(1, N);              // 采样点间距（米）
 
@@ -514,9 +516,12 @@ export function driveClassicBaseline(car, out, dt, otherCars) {
 /* ================= 算法 4：Smooth Cruiser Pro（时间最优闭环纵向规划 + 双前瞻融合转向 + 主动防撞脱困） ================= */
 
 // 双键缓存读取：perf 对象 + 当前赛道 id（服务端多赛道上下文切换互不污染）
+// perfAliasOf：算法手里拿到的是 car.perf 的只读视图，这里归一化回真 perf，
+// 保证"算法查表"和"引擎查表"共用同一张表（否则每辆车会建两张，调校后也不刷新）
 function trackCacheGet(cache, perf, build) {
-  let byTrack = cache.get(perf);
-  if (!byTrack) { byTrack = new Map(); cache.set(perf, byTrack); }
+  const key = perfAliasOf(perf);
+  let byTrack = cache.get(key);
+  if (!byTrack) { byTrack = new Map(); cache.set(key, byTrack); }
   let cap = byTrack.get(currentTrackId);
   if (!cap) { cap = build(); byTrack.set(currentTrackId, cap); }
   return cap;
@@ -1207,7 +1212,10 @@ export function applyCarConfig(car, cfg) {
   return car;
 }
 
+// 所有算法调用的唯一入口：这里把 car / otherCars 换成只读视图再交给 driver。
+// 内置算法同样走这条路（它们只写 car._xxx），所以玩家代码与内置代码看到的世界完全一致。
+// this 用空对象：裸调用会让非严格模式函数的 this 变成全局对象（= 把 window 递过去）。
 export function driveAI(car, out, dt, otherCars) {
   const driver = car.driver || (AI_CONFIGS.find(c => c.id === car.algorithm)?.driver) || driveApexHunter;
-  driver(car, out, dt, otherCars);
+  driver.call(DRIVER_THIS, driverCarView(car), out, dt, driverCarsView(otherCars));
 }

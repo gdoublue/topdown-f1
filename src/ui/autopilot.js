@@ -54,26 +54,115 @@ const TRACK_API = {
   get DS() { return DS; },
   get HW() { return HW; },                                              // 基础半宽（米）
   get kerbFlag() { return kerbFlag; },                                  // 1 = 该采样点有路缘石
-  // 沿赛道距离（米）→ 采样下标
+  // 沿赛道距离（米）→ 采样下标：统一按真实采样间距 DS 换算
+  // （直线冲刺赛道的采样点覆盖整条 11km 沥青，不能拿 6km 计赛长度当比例尺）
   idxAt(meters) {
     const n = Math.max(1, N);
-    if (isLinear) return Math.max(0, Math.min(n - 1, Math.round((meters / Math.max(1, LAP_LENGTH)) * (n - 1))));
-    const base = Math.floor((meters / Math.max(0.1, LAP_LENGTH)) * n);
-    return ((base % n) + n) % n;
+    const i = Math.round((Number(meters) || 0) / Math.max(0.1, DS));
+    if (isLinear) return Math.max(0, Math.min(n - 1, i));
+    return ((i % n) + n) % n;
   },
 };
 
 // 注入到玩家代码里的可用标识符（切换赛道后已重建的数组 / 表会被重新注入）
-const API_PARAMS = [
+// 导出给无头台架 scripts/autopilot-bench.mjs：保证"游戏内能用的东西"和"台架里能用的东西"只有一份定义
+export const API_PARAMS = [
   "N", "pts", "nor", "hw", "curvS", "lineX", "lineY", "DS", "PHYS",
   "clamp", "wrapAngle", "getSuperCornerCap", "evaluateTrafficAndOvertake",
   "CAR_LENGTH", "CAR_WIDTH", "getCarDistance", "superDriver", "track",
   "getApexReleaseCap"
 ];
 
+// 赛道元信息 API 也导出，台架直接复用同一份 getter / idxAt。
+// 冻结：算法只能读，不能往上挂东西（getter 属性没有 setter，赋值会静默失败）
+Object.freeze(TRACK_API);
+export { TRACK_API };
+
+/* ===================== 注入给算法的世界（全部是副本） =====================
+   算法拿到的 pts / hw / lineX / PHYS 都是副本：
+   即使它乱写，也污染不到引擎、同场 AI、以及后续编译。
+   换赛道本来就会重新编译，所以"副本"不影响任何合法用法。
+*/
+const freezePoint = (p) => Object.freeze({ x: p.x, y: p.y });
+
+function buildPhysCopy() {
+  return Object.freeze({
+    ...PHYS,
+    maxSpeed: Object.freeze([...PHYS.maxSpeed]),
+    accelCurve: Object.freeze(PHYS.accelCurve.map((row) => Object.freeze([...row]))),
+  });
+}
+
+// 与 DRIVER_PARAMS 一一对应（注入数据在前，被遮蔽的宿主全局在后 = undefined）。
+// 导出给无头台架，保证两边注入的是同一份东西。
+// copy=false 只给台架的 --raw（复现加固前"直接注入引擎真实数组"的行为，用于审计）
+export function createAutopilotApiValues(copy = true) {
+  const values = [
+    N,
+    copy ? pts.map(freezePoint) : pts,
+    copy ? nor.map(freezePoint) : nor,
+    copy ? hw.slice() : hw,
+    copy ? curvS.slice() : curvS,
+    copy ? lineX.slice() : lineX,
+    copy ? lineY.slice() : lineY,
+    DS,
+    copy ? buildPhysCopy() : PHYS,
+    clamp,
+    wrapAngle,
+    getSuperCornerCap,
+    evaluateTrafficAndOvertake,
+    CAR_LENGTH,
+    CAR_WIDTH,
+    getCarDistance,
+    superDriver,
+    TRACK_API,
+    getApexReleaseCap,
+  ];
+  for (let i = 0; i < BLOCKED_GLOBALS.length; i++) values.push(undefined);
+  return values;
+}
+
+/* ===================== 宿主全局屏蔽 =====================
+   把这些名字做成驱动的【形参】（值一律 undefined）：函数作用域里的形参优先于全局，
+   于是算法里写 window / localStorage / fetch / __gp 都只会拿到 undefined。
+   为什么不用 with + Proxy：with 会让算法里每一次标识符查找都过一遍代理，
+   重型算法（比如建赛车线的几千万次内层循环）会因此慢 10 倍；形参遮蔽是零开销的。
+
+   注意：这不是安全沙箱（`({}).constructor.constructor` 之类的刻意逃逸仍可能拿到全局，
+   而且 `this` 也不是绝对可靠），它挡的是"顺手就用宿主 API"的常规写法。
+   真正影响公平性的两层是：driveAI 传只读视图 + 注入数据全是副本。
+*/
+export const BLOCKED_GLOBALS = [
+  "window", "document", "localStorage", "sessionStorage", "indexedDB", "caches",
+  "cookieStore", "fetch", "XMLHttpRequest", "WebSocket", "EventSource",
+  "Worker", "SharedWorker", "serviceWorker", "navigator", "location", "history",
+  "screen", "top", "parent", "self", "globalThis", "frames", "opener",
+  "postMessage", "importScripts", "Function", "setTimeout", "setInterval",
+  "clearTimeout", "clearInterval", "requestAnimationFrame", "cancelAnimationFrame",
+  "__gp", "WebAssembly",
+];
+
+// 驱动的完整形参表：注入数据 + 被遮蔽的宿主全局
+export const DRIVER_PARAMS = [...API_PARAMS, ...BLOCKED_GLOBALS];
+
+// 工厂源码：游戏（new Function）和台架（vm）共用同一份，语义不会漂移
+export function autopilotFactoryCode(src) {
+  return `return function(${DRIVER_PARAMS.join(",")}){\n`
+    + `${src}\n`
+    + `;return (typeof driver === "function" ? driver : null);\n}`;
+}
+
+const NO_DRIVER_MSG = "没有找到 driver(car, out, dt, otherCars) 函数（函数名必须是 driver）";
+
+// 与游戏内完全一致的编译入口（new Function + 同一份注入），供台架 / 工具复用
+export function compileAutopilotSource(src) {
+  return compile(src);
+}
+
 let enabled = false;
 let source = DEFAULT_SOURCE;
-let compiled = null;
+let compiled = null;      // 当前源码的编译结果（失败时为 null）
+let lastGood = null;      // 最近一次编译成功的算法：改错代码时车继续用它
 let compileError = "";
 let saveTimer = 0;
 const listeners = [];
@@ -88,31 +177,30 @@ function notify() {
 export function onAutopilotChange(fn) { listeners.push(fn); }
 
 export function isAutopilotOn() { return enabled; }
-export function getAutopilotDriver() { return enabled ? compiled : null; }
+// 编译失败时返回上一次成功的算法（从未成功过才返回 null → 退回该车内置 AI）
+export function getAutopilotDriver() { return enabled ? (compiled || lastGood) : null; }
 export function getAutopilotSource() { return source; }
 export function getAutopilotError() { return compileError; }
 
-// 编译玩家算法：把游戏内部数据与工具函数作为形参注入，代码里可直接使用
+// 编译玩家算法：注入副本数据 + 形参，代码里可直接使用
+// 只认 driver：名字写错时直接报错，避免"代码没跑起来却悄悄用了内置算法"
 function compile(src) {
-  const factory = new Function(
-    ...API_PARAMS,
-    // 只认 driver：名字写错时直接报错，避免"代码没跑起来却悄悄用了内置算法"
-    `${src}\n;return (typeof driver === "function" ? driver : null);`
-  );
-  const fn = factory(
-    N, pts, nor, hw, curvS, lineX, lineY, DS, PHYS,
-    clamp, wrapAngle, getSuperCornerCap, evaluateTrafficAndOvertake,
-    CAR_LENGTH, CAR_WIDTH, getCarDistance, superDriver, TRACK_API, getApexReleaseCap
-  );
-  if (typeof fn !== "function") throw new Error("没有找到 driver(car, out, dt, otherCars) 函数（函数名必须是 driver）");
+  // 两次调用：第一次拿到"绑定形参的包装函数"，第二次执行玩家源码、取出 driver
+  const factory = new Function(autopilotFactoryCode(src));
+  const fn = factory()(...createAutopilotApiValues());
+  if (typeof fn !== "function") throw new Error(NO_DRIVER_MSG);
   return fn;
 }
 
 function recompile(silent = false) {
   try {
     compiled = compile(source);
+    lastGood = compiled;
     compileError = "";
     if (!silent) setStatus("✓ 算法编译通过", "ok");
+    // 调试入口的关键：编译通过就广播一次，让在线对战（netrace 持有算法引用）
+    // 也能立刻换成新版本，而不是要玩家手动关一次再开一次
+    if (enabled) notify();
   } catch (e) {
     compiled = null;
     compileError = e.message || String(e);
@@ -209,7 +297,13 @@ export function initAutopilot() {
   code.value = source;
   if (toggle) toggle.checked = enabled;
   recompile(true);
-  setStatus(compileError ? "✗ " + compileError : "✓ 默认算法：superDriver", compileError ? "err" : "ok");
+  const isDefault = source === DEFAULT_SOURCE;
+  setStatus(
+    compileError
+      ? "✗ " + compileError
+      : (isDefault ? "✓ 默认算法 superDriver 已就绪" : "✓ 已加载本地保存的自定义算法"),
+    compileError ? "err" : "ok"
+  );
 
   // 编辑即编译（防抖），有错只在状态栏提示，不影响已编译的可用算法
   let timer = 0;

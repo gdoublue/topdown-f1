@@ -10,6 +10,8 @@ import { clamp } from "../utils.js";
 import { CAR_LENGTH, CAR_WIDTH, getCarDistance } from "../car/physics.js";
 // 实时赛道数据（DS / lineX / lineY / rcurvS 在换赛道时会整体重建，import 绑定可拿到最新值）
 import { DS, lineX, lineY, rcurvS, wrapAngle, getSuperCornerCap } from "./ai.js";
+// perf 视图 → 真 perf（玩家算法传入的是只读视图）
+import { perfAliasOf } from "./driverSandbox.js";
 
 // 本模块专属弯速表缓存（按 perf 对象 + 赛道 id 双键区分）。
 // 注意：不能复用 ai.js 里的 _superCornerCapCache —— 那张表存的是均匀 30m 窗口的弯速，
@@ -32,8 +34,10 @@ export function resetApexCapCache() {
 // 构建专属“过弯心即释放”的非对称极限速度表（取代原版前后 30m 对称锁死的 buildCarVTarget）
 // 同时导出给自动驾驶（玩家自定义算法）调用
 export function getApexReleaseCap(perf) {
-  let byTrack = _apexCapCache.get(perf);
-  if (!byTrack) { byTrack = new Map(); _apexCapCache.set(perf, byTrack); }
+  // 算法手里是 car.perf 的只读视图，归一化回真 perf，才能和引擎共用同一张表
+  const key = perfAliasOf(perf);
+  let byTrack = _apexCapCache.get(key);
+  if (!byTrack) { byTrack = new Map(); _apexCapCache.set(key, byTrack); }
   let cap = byTrack.get(currentTrackId);
   if (cap) return cap;
 
@@ -81,7 +85,7 @@ export function getApexReleaseCap(perf) {
     cap[i] = Math.min(topSpeed, vGrip, vOmega);
   }
 
-  _apexCapCache.get(perf).set(currentTrackId, cap);
+  byTrack.set(currentTrackId, cap);
   return cap;
 }
 

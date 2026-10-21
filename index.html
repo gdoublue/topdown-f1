@@ -323,9 +323,19 @@
         通过 <code>out.up</code> / <code>out.brake</code> / <code>out.steer</code> 输出控制量。
         完整的可读字段、可写字段与工具函数见「📖 参数说明」。
       </p>
+      <p class="track-modal-desc">
+        停止输入约 <b>0.4 秒</b>后自动编译，<b>编译通过后下一个物理步就生效</b>，不用重开赛；
+        失败时状态栏显示 <code>✗</code>，车会继续用上一次编译成功的算法。
+        单人 / 对战 AI 打开本面板时比赛真的暂停，可以边跑边改；<b>在线房间里服务器对局不会暂停</b>，自车会停在赛道上。
+      </p>
+      <p class="track-modal-desc">
+        只能通过 <code>out</code> 控制车辆：<code>car</code> 与 <code>otherCars</code> 是只读视图，
+        改 <code>car.x</code> / <code>car.speed</code> / <code>car.perf</code> 之类的写入会被引擎直接丢弃（控制台提示一次），
+        想存自己的状态请挂在 <code>car._xxx</code> 上。
+      </p>
       <label class="autopilot-switch">
         <input type="checkbox" id="autopilotToggle">
-        <span>开启自动驾驶（本局由算法驾驶你的车）</span>
+        <span>开启自动驾驶（开关状态自动保存到本机）</span>
       </label>
       <textarea id="autopilotCode" class="autopilot-code" spellcheck="false" autocomplete="off"></textarea>
       <div class="autopilot-bar">
