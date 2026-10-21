@@ -8,3 +8,8 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# 本地一次性脚本 / 诊断输出（不进仓库）
+/_cap.mjs
+server/test/tmp-*
+*.err
