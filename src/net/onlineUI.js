@@ -83,8 +83,10 @@ function defaultServerAddr() {
   if (!location.port || location.port === "80" || location.port === "443") {
     return `${proto}//${location.host}`;
   }
-  // 本地 vite dev(8080) 直连后端 8081
-  if (location.port === "8080") return `${proto}//${location.hostname}:8081`;
+  // 本地 vite dev(8080) 直连后端 8081（仅限本机；生产 :8080 走同源 nginx 反代）
+  if (location.port === "8080" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) {
+    return `${proto}//${location.hostname}:8081`;
+  }
   return `${proto}//${location.host}`;
 }
 
