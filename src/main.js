@@ -23,6 +23,7 @@ import { initMinimap, drawMinimap } from "./game/minimap.js";
 import * as audio from "./game/audio.js";
 import { AI_CONFIGS, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
 import { conn } from "./net/connection.js";
+import { rtc } from "./net/rtc.js";
 import { initOnlineUI, showOnline as showOnlineUI, hideOnline as hideOnlineUI, leaveOnlineRoom } from "./net/onlineUI.js";
 import { getFingerprint } from "./net/fingerprint.js";
 import { startNetRace, stopNetRace, updateNetRace, bindNetRaceHandlers, netrace, forfeitNetRace, setNetAutopilot } from "./net/netrace.js";
@@ -657,6 +658,17 @@ function update(dt) {
   }
 }
 
+// 远端车失联分档的绘制包装：正常车直接画；弱网车套一层透明度；彻底失联的车跳过
+function drawCarWithGhostAlpha(car) {
+  if (!car || car.retired || car.ghostHidden) return;
+  const a = car.ghostAlpha;
+  if (a == null || a >= 1) { drawCar(ctx, car); return; }
+  const prev = ctx.globalAlpha;
+  ctx.globalAlpha = prev * Math.max(0, a);
+  drawCar(ctx, car);
+  ctx.globalAlpha = prev;
+}
+
 function draw() {
   const activeCar = cars[focusIndex] || cars[0];
   applyCamera(ctx, canvas, activeCar.shake);
@@ -686,12 +698,11 @@ function draw() {
 
   // 绘制所有赛车（从后向前绘制，主焦点赛车最后绘制避免被遮挡）
   // retired = 已退出房间的车友：直接消失，不在赛道上留下幽灵车
+  // ghostHidden / ghostAlpha = 在线对战的失联分档：半透明 → 彻底隐藏
   for (let i = 0; i < cars.length; i++) {
-    if (i !== focusIndex && !cars[i].retired) drawCar(ctx, cars[i]);
+    if (i !== focusIndex) drawCarWithGhostAlpha(cars[i]);
   }
-  if (cars[focusIndex]) {
-    drawCar(ctx, cars[focusIndex]);
-  }
+  if (cars[focusIndex]) drawCarWithGhostAlpha(cars[focusIndex]);
 
   // 小地图
   drawMinimap(cars, focusIndex);
@@ -1001,6 +1012,7 @@ function startOnlineRace(msg) {
   onlinePractice = false;
   mode = "onlinerace";
   started = true;
+  lastNetSimAt = 0;   // 新一局：重置在线节拍的时间基准
 
   resetSimClock(0);
   firstFinishAt = 0;
@@ -1338,10 +1350,44 @@ function cycleSpeed(dir) {
   setSpeedMult(SPEED_STEPS[next]);
 }
 
+// ================= 在线对战的模拟节拍 =================
+// 物理推进和 car_state 上报都不能只挂在 rAF 上：浏览器会把"被遮挡/后台"窗口的 rAF
+// 降到 ~2Hz（实测 2.3Hz，而同一时刻 setInterval 仍有 61Hz）。一旦 rAF 停摆，
+// 自车几乎不动、上报也一起停发，别人屏幕上的你就会变成
+// "250ms 直线外推 → 定格 → 瞬移"。这里用 16ms 定时器兜底：
+//   · rAF 健康（60ms 内有帧）→ 定时器只做一次时间比较就返回，零影响
+//   · rAF 被节流 → 由定时器按真实流逝时间接管，物理与上报始终保持 60Hz
+const NET_FALLBACK_GAP_MS = 60;
+let lastRafAt = 0;
+let lastNetSimAt = 0;
+let netFallbackTimer = 0;
+
+function advanceNetSim(nowMs) {
+  if (!lastNetSimAt) { lastNetSimAt = nowMs; return; }
+  let gap = (nowMs - lastNetSimAt) / 1000;
+  lastNetSimAt = nowMs;
+  if (gap <= 0) return;
+  if (gap > 0.25) gap = 0.25;   // 长卡顿/切后台：最多补 250ms，避免物理积分爆掉
+  const steps = Math.min(8, Math.max(1, Math.ceil(gap / MAX_SUBSTEP_DT)));
+  const stepDt = gap / steps;
+  for (let i = 0; i < steps; i++) update(stepDt);
+}
+
+function startNetFallback() {
+  if (netFallbackTimer) return;
+  netFallbackTimer = setInterval(() => {
+    if (mode !== "onlinerace" || !started) return;
+    const now = performance.now();
+    if (now - lastRafAt < NET_FALLBACK_GAP_MS) return;   // rAF 正常 → 完全让位
+    advanceNetSim(now);
+  }, 16);
+}
+
 let prevTs = 0;
 function frame(ts) {
   requestAnimationFrame(frame);
   if (!prevTs) prevTs = ts;
+  lastRafAt = ts;
   let dt = (ts - prevTs) / 1000;
   prevTs = ts;
   if (dt > 0.05) dt = 0.05;
@@ -1363,8 +1409,10 @@ function frame(ts) {
   // 倍速快进：本地模式的比赛时间 ×N，切成固定物理子步推进
   // （在线对战是服务器实时权威模拟，倍速只作用于本地单机类模式）
   if (mode === "onlinerace") {
-    update(dt);
+    // 在线对战统一走"真实时间"节拍：rAF 正常时就是这里推进，被节流时由定时器接管
+    advanceNetSim(performance.now());
   } else {
+    lastNetSimAt = 0;   // 离开在线模式：清掉时间基准，避免下次带着旧时间戳补帧
     const scaled = dt * speedMult;
     const steps = Math.min(32, Math.max(1, Math.ceil(scaled / MAX_SUBSTEP_DT)));
     const stepDt = scaled / steps;
@@ -1429,10 +1477,14 @@ if (SPECTATE) {
   handleRoute();
 }
 
+startNetFallback();   // 在线模式：rAF 被浏览器节流时由它保持 60Hz 模拟与上报
 requestAnimationFrame(frame);
 
 window.__gp = {
   get cars() { return cars; },
+  net: netrace,   // 在线对战诊断（net.stats：播放延迟 / 抖动峰值 / 各远端车新鲜度）
+  conn,           // 连接诊断（conn.transport: udp / websocket；conn.rtcState）
+  rtc,            // UDP 通道诊断（rtc.debugInfo(): ICE/连接状态）
   race, input, aiInputs, pts,
   get mode() { return mode; },
   get ai() { return mode !== "solo"; },

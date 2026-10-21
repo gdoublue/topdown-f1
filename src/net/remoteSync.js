@@ -119,21 +119,47 @@ export function createClockOffset({ warmup = 40, relockMs = 80 } = {}) {
 // 绝不"死追"任何一辆车的样本 —— 真人采样间隔 15~79ms 天生不均匀，
 // 一旦让它去推时钟，AI 的均匀样本也会被这口晃动的钟带得一起抖。
 //
-// 稳态行为：目标 = 最新参考时刻 − delayMs，目标是 33.3ms 的阶梯；
-// 本机时钟恒速 1.0 自由推进时，err 在 [0, 33.3] 内锯齿摆动，
+// 稳态行为：目标 = 最新参考时刻 − baseDelayMs，目标是 33.3ms 的阶梯；
+// 本机时钟恒速 1.0 自由推进时，err 在 [−33.3, 0] 内锯齿摆动，
 // 死区（默认 60ms > 一个 tick）内一次修正都不做 —— 渲染速度绝对恒定。
 // 只有真实漂移（服务器掉速 / 长卡顿 / 时钟偏差）才用 ≤4% 的速率把水位拉回。
-export function createPlayoutClock({ delayMs = 120, deadBandMs = 60 } = {}) {
-  const s = { renderMs: -1, refMs: -1, delayMs, deadBandMs };
+//
+// 自适应延迟不碰这条闭环：额外的缓冲需求走独立的时间轴偏移 offsetMs，
+// 采样时用 playMs（= renderMs − offsetMs）。offsetMs 以 20ms/s 移动（≈播放速度 2%，
+// 肉眼不可见），好处是加减延迟完全可逆，也不会被死区吃掉或把延迟永久顶高。
+export function createPlayoutClock({ delayMs = 120, deadBandMs = 60, offsetRateMs = 20 } = {}) {
+  const s = {
+    renderMs: -1,
+    refMs: -1,
+    baseDelayMs: delayMs,   // 标称延迟：时钟目标只认它，永不改变
+    delayMs,                // 目标总延迟（标称 + 自适应增量），由 setDelay 设置
+    offsetMs: 0,            // playMs 相对 renderMs 的额外滞后（0 ~ 120）
+    deadBandMs,
+    offsetRateMs,
+  };
 
   return {
     get renderMs() { return s.renderMs; },
+    // 采样 / 裁剪实际使用的时间轴（已含自适应延迟）
+    get playMs() { return s.renderMs < 0 ? s.renderMs : s.renderMs - s.offsetMs; },
     get delayMs() { return s.delayMs; },
+    get offsetMs() { return s.offsetMs; },
     get latestSampleMs() { return s.refMs; },   // 兼容旧命名：最新参考时刻
 
     reset() {
       s.renderMs = -1;
       s.refMs = -1;
+      s.offsetMs = 0;
+      s.delayMs = s.baseDelayMs;
+    },
+
+    // 自适应播放延迟：设置"目标总延迟"。多出来的部分靠缓慢移动 offsetMs 实现，
+    // 因此调高调低都完全可逆，且永不改变 renderMs 的推进速率（保持绝对匀速）。
+    setDelay(ms) {
+      const v = Number(ms);
+      if (!Number.isFinite(v)) return s.delayMs;
+      s.delayMs = Math.max(s.baseDelayMs, Math.min(400, v));
+      return s.delayMs;
     },
 
     // 均匀参考轴（本机时钟毫秒）。单调不回退：网络只会让包迟到，不会让时间倒流。
@@ -148,8 +174,14 @@ export function createPlayoutClock({ delayMs = 120, deadBandMs = 60 } = {}) {
 
     update(dt) {
       if (s.refMs < 0) return s.renderMs;
-      const target = s.refMs - s.delayMs;
-      if (s.renderMs < 0) { s.renderMs = target; return s.renderMs; }
+      const target = s.refMs - s.baseDelayMs;
+      if (s.renderMs < 0) s.renderMs = target;
+
+      // 自适应偏移：缓慢靠近目标（≈播放速度 ±2%，察觉不到）
+      const wantOffset = Math.max(0, Math.min(120, s.delayMs - s.baseDelayMs));
+      const step = s.offsetRateMs * dt;
+      if (wantOffset > s.offsetMs) s.offsetMs = Math.min(wantOffset, s.offsetMs + step);
+      else if (wantOffset < s.offsetMs) s.offsetMs = Math.max(wantOffset, s.offsetMs - step);
 
       // err > 0：时钟落后（延时变多、画得更旧） · err < 0：时钟超前（有断流风险）
       const err = target - s.renderMs;
@@ -163,6 +195,55 @@ export function createPlayoutClock({ delayMs = 120, deadBandMs = 60 } = {}) {
       else if (err < -d) rate = 1 - Math.min(0.04, (-err - d) * 0.00025);
       s.renderMs += dt * 1000 * rate;
       return s.renderMs;
+    },
+  };
+}
+
+// 自适应播放延迟控制器：**直接看缓冲有没有被掏空**，而不是去估计链路抖动。
+//
+// 为什么不用"到达时刻 − 采样时刻"估抖动：这个差值里混着客户端主线程的调度延迟
+// （浏览器派发 WebSocket 消息本来就比网络到达晚几毫秒到几十毫秒），在干净的本机链路上
+// 实测也能测出 25~56ms 的"抖动"，会把延迟白白顶到 100ms 以上。而缓冲是否见底是**结果**，
+// 只有真的快断流才说明延迟不够，用它做反馈不会误判。
+//
+// 策略：
+//   · 一帧里只要有"正常帧率的对端"缓冲见底（正在直线外推）就累计饿死时长
+//   · 累计满 starveTriggerMs（默认 60ms）→ 延迟 +15ms（上限 150）
+//   · 连续 calmMs（默认 3s）没有饿死 → 每秒回退 2ms，直到标称值
+export function createDelayController({
+  baseMs = 80,
+  maxMs = 150,
+  riseMs = 15,
+  fallMsPerSec = 2,
+  starveTriggerMs = 60,
+  calmMs = 3000,
+} = {}) {
+  let cur = baseMs;
+  let starveMs = 0;
+  let calmAcc = 0;
+
+  return {
+    get value() { return cur; },
+    reset() { cur = baseMs; starveMs = 0; calmAcc = 0; },
+
+    // 每帧调用一次：starved = 本帧是否有"健康对端"的缓冲被掏空（需要更深的缓冲）
+    update(dt, starved) {
+      const ms = dt * 1000;
+      if (starved) {
+        starveMs += ms;
+        calmAcc = 0;
+      } else {
+        starveMs = Math.max(0, starveMs - ms * 0.5);   // 偶发单帧不算数，慢慢衰减
+        calmAcc += ms;
+      }
+      if (starveMs >= starveTriggerMs) {
+        cur = Math.min(maxMs, cur + riseMs);
+        starveMs = 0;
+        calmAcc = 0;
+      } else if (calmAcc >= calmMs) {
+        cur = Math.max(baseMs, cur - fallMsPerSec * dt);
+      }
+      return cur;
     },
   };
 }

@@ -26,7 +26,7 @@ import { updateCarLap } from "../game/race.js";
 import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput } from "../game/ai.js";
 import { race as globalRace, simClock } from "../game/race.js";
 import { conn } from "./connection.js";
-import { sampleRemote, createClockOffset, createPlayoutClock } from "./remoteSync.js";
+import { sampleRemote, createClockOffset, createPlayoutClock, createDelayController } from "./remoteSync.js";
 import * as audio from "../game/audio.js";
 
 // 自车状态上报：60Hz 固定节拍（用累积器驱动，与渲染帧率完全解耦）。
@@ -41,11 +41,29 @@ const SAMPLE_MS = 1000 / SAMPLE_HZ;
 //   实测（48 组抖动×发送频率扫描）60Hz 上报 + 抖动≤60ms 时断流外推 0%，
 //   30Hz 上报（低端机）+ 抖动 40ms 时约 0.8%，靠航位推算 + 12ms 平滑吸收。
 // 网络质量好的局可以试 70（再省 10ms，抖动>40ms 的玩家会开始依赖外推）。
+// 80ms 是**标称值**：链路干净时恒定不变；一旦有对端的缓冲真的被掏空（单包尖峰 / 持续变差），
+// 自适应控制器会把播放延迟最多垫到 150ms，链路恢复后再慢慢退回 80ms。
 const REMOTE_DELAY_MS = 80;
+// 自适应延迟上限：链路真的差时最多退到 150ms（实测再往上收益递减、滞后反而明显）
+const REMOTE_DELAY_MAX_MS = 150;
 // 位姿平滑常数（秒）：只用于吸收残余抖动/修正跳变，稳态滞后 < 1m（不再是 3~4m 的追赶量）
 const SMOOTH_TAU_HUMAN = 0.012;
 const SMOOTH_TAU_AI = 0.010;
 const SMOOTH_TAU_ANGLE = 0.014;
+// 失联分档（毫秒）：< ghost 正常；ghost ~ remove 半透明且不再参与碰撞；> remove 直接隐藏。
+// 依据：播放缓冲 80ms + 外推 250ms 之后已经彻底定格，800ms 起就没有"还在跑"的观感了。
+const STALE_GHOST_MS = 800;
+const STALE_REMOVE_MS = 3000;
+// 自适应延迟的判据：只有"采样间隔正常"的对端断流才说明缓冲不够深；
+// 2fps 的对端天生每帧都断流，那是他自己慢，不该把全场延迟顶到上限。
+const STARVE_MAX_GAP_MS = 120;
+// 每车独立延迟的收敛速度（毫秒/秒）：加得比减得快 —— 先保住平滑，再慢慢收回滞后
+const EXTRA_RISE_MS_PER_SEC = 150;
+const EXTRA_FALL_MS_PER_SEC = 60;
+// 外推回弹的误差吸收时间常数（秒）：≈ cl_smooth
+const RECOVER_TAU = 0.07;
+// 采样缓冲保留的历史时长（毫秒）：要覆盖每车额外延迟的动态调整
+const HISTORY_MS = 240;
 
 let active = false;
 let myId = null;
@@ -62,7 +80,12 @@ let entries = [];                       // { netId, isMe, car, buf: [], off, pus
 const clock = createPlayoutClock({ delayMs: REMOTE_DELAY_MS });
 // 服务器时钟 → 本机时钟：热机取最小值后【一次锁定】，再也不随包跳变
 const srvClock = createClockOffset();
+// 自适应播放延迟：用"缓冲是否见底"做反馈（见 remoteSync.createDelayController）。
+// 不用"到达时刻 − 采样时刻"估抖动：那个差值里混着浏览器派发消息的主线程调度延迟，
+// 在干净的本机链路上也能测出 25~56ms 的假抖动，会把延迟白白顶到 100ms 以上。
+const delayCtl = createDelayController({ baseMs: REMOTE_DELAY_MS, maxMs: REMOTE_DELAY_MAX_MS });
 let sampleAcc = 0;                      // 上报节拍累积器（与帧率无关）
+let netStarved = false;                 // 上一帧是否有"健康对端"的缓冲被掏空（自适应延迟输入）
 let serverState = "countdown";
 let finishReported = false;
 let finishResults = null;
@@ -73,6 +96,25 @@ export const netrace = {
   get cars() { return cars; },
   get results() { return finishResults; },
   get state() { return serverState; },
+  // 网络诊断快照（控制台 / 现场排查用）：
+  //   delayMs   当前目标播放延迟（80 = 标称，抖动大时最多 150）
+  //   offsetMs  已经实际生效的额外延迟
+  //   starved   上一帧是否有健康对端的缓冲被掏空
+  //   cars      每个远端车的新鲜度与失联档位（0 正常 / 1 半透明 / 2 已隐藏）
+  get stats() {
+    return {
+      delayMs: Math.round(clock.delayMs),
+      offsetMs: Math.round(clock.offsetMs),
+      starved: netStarved,
+      cars: entries.filter(e => !e.isMe).map(e => ({
+        id: e.netId,
+        age: Math.round(e.car.netAge || 0),
+        ghost: e.car.ghostHidden ? 2 : (e.car.ghostAlpha < 1 ? 1 : 0),
+        gap: Math.round(e.gapEwma || 0),      // 该对端的采样间隔
+        extra: Math.round(e.extraMs || 0),    // 给它单独加的延迟
+      })),
+    };
+  },
 };
 
 function wrapAngle(a) {
@@ -87,6 +129,8 @@ export function startNetRace(msg, mySessionId) {
   finishReported = false;
   clock.reset();
   srvClock.reset();
+  delayCtl.reset();
+  clock.setDelay(REMOTE_DELAY_MS);
   sampleAcc = 0;
   lastBumpSoundTime = 0;
   serverState = "countdown";
@@ -125,6 +169,10 @@ export function startNetRace(msg, mySessionId) {
       car.color = c.color || cfg.color;
       car.number = c.number || cfg.number;
     }
+    // 远端车失联分档的视觉状态（1 / false = 正常；由 interpolateRemoteCars 每帧刷新）
+    car.ghostAlpha = 1;
+    car.ghostHidden = false;
+    car.netAge = 0;
     cars.push(car);
     entries.push({
       netId: c.id, isMe: car.isPlayer, car,
@@ -132,6 +180,12 @@ export function startNetRace(msg, mySessionId) {
       off: createClockOffset(),   // 该车"发送端时钟 → 本机时钟"偏移（热机后锁定）
       pushX: 0, pushY: 0,
       synced: false,
+      lastFreshAt: 0,     // 最近一次"样本时间戳真的前进了"的到达时刻（本机 ms）
+      lastGapMs: 0,       // 该对端的采样间隔（判断是"慢"还是"抖"）
+      gapEwma: 0,         // 采样间隔的平滑值：决定这辆车要不要额外往后放
+      extraMs: 0,         // 该车独有的额外播放延迟（只影响它自己，不影响别人）
+      recX: 0, recY: 0,   // 外推回弹的衰减偏移（cl_smooth 式误差吸收）
+      wasExtrap: false,
     });
   });
 
@@ -150,15 +204,26 @@ export function stopNetRace() {
 // 写入一条已定位到"本机时钟毫秒"的远端样本。
 // 同一时刻的重复样本（服务端多 tick 转发同一状态 / 即时中继与快照重叠）只更新末样本，
 // 不制造零宽区间，避免插值段长为 0 时速度算出无穷大。
-function pushSample(e, t, x, y, a, v) {
+function pushSample(e, t, x, y, a, v, recvAt) {
   const buf = e.buf;
   const last = buf[buf.length - 1];
-  if (last && t <= last.t + 0.5) {
-    last.x = x; last.y = y; last.a = a; last.v = v;
-    return last.t;
+  if (last) {
+    // 更旧的样本必须丢弃，不能"合并"：旧写法 `t <= last.t + 0.5` 会把迟到一点的旧坐标
+    // 覆盖到末样本上，时间戳却不动 —— 一帧反向微跳（约 1m）就是这么来的。
+    if (t <= last.t - 0.5) return last.t;
+    if (t <= last.t + 0.5) {                       // 同一时刻的重复样本：只刷新坐标
+      last.x = x; last.y = y; last.a = a; last.v = v;
+      return last.t;
+    }
   }
+  const gap = last ? t - last.t : 0;
+  e.lastGapMs = gap;                     // 该对端的采样间隔（用于区分"慢"和"抖"）
+  if (gap > 0) e.gapEwma = e.gapEwma ? e.gapEwma * 0.75 + gap * 0.25 : gap;
   buf.push({ t, x, y, a, v });
   if (buf.length > 60) buf.shift();
+  // 新鲜度只认"时间戳真的前进了"。服务端会把停更的旧状态按 30Hz 重复下发，
+  // 若用到达时刻判断，掉线玩家的车永远不会被判定为失联。
+  e.lastFreshAt = recvAt != null ? recvAt : performance.now();
   return t;
 }
 
@@ -166,7 +231,7 @@ function pushSample(e, t, x, y, a, v) {
 // 只用于给这辆车定位，永远不参与渲染时钟推进（时钟只认服务器快照 ts）。
 function pushHumanSample(e, st, x, y, a, v, recvAt) {
   const stx = st != null ? st : recvAt;   // 老客户端没有 st 时退化为接收时刻
-  return pushSample(e, stx + e.off.observe(recvAt, stx), x, y, a, v);
+  return pushSample(e, stx + e.off.observe(recvAt, stx), x, y, a, v, recvAt);
 }
 
 // 玩家采样即时中继（服务端收到即转发，不等 30Hz 快照节拍）。
@@ -216,7 +281,7 @@ function onSnapshot(msg) {
     const st = (typeof sc.st === "number" && sc.st > 0) ? sc.st : null;
 
     if (isAI && hasTs && st != null) {
-      pushSample(e, st + srvOff, sc.x, sc.y, sc.a, sc.v);
+      pushSample(e, st + srvOff, sc.x, sc.y, sc.a, sc.v, recvAt);
     } else {
       const t = pushHumanSample(e, st, sc.x, sc.y, sc.a, sc.v, recvAt);
       // 没有服务端时间戳时，AI 的均匀样本仍可当参考轴（真人样本绝不参与）
@@ -263,30 +328,90 @@ function onSnapshot(msg) {
 // 在每个关键帧处跳变 —— 看起来就是"一快一慢"的抽搐。样条用相邻样本差分求切线，
 // 整条曲线速度连续；再叠加极小的指数平滑兜住残余抖动。
 function interpolateRemoteCars(dt) {
+  const nowMs = performance.now();
+  // 采样时间轴：含自适应延迟（好链路 = 80ms，抖动大时自动加深）
+  const playMs = clock.playMs;
+  netStarved = false;
+
+  // ---- 失联分档：正常 → 半透明（且退出碰撞）→ 隐藏 ----
+  // 判据是"样本时间戳停止前进"的时长（e.lastFreshAt），不是收到包的时刻：
+  // 服务端会把停更的旧状态按 30Hz 重复下发，用到达时刻判断永远掉不了档。
+  for (const e of entries) {
+    if (e.isMe || e.car.retired) continue;
+    const age = e.lastFreshAt ? nowMs - e.lastFreshAt : 0;
+    e.car.netAge = age;
+    if (age > STALE_REMOVE_MS) {
+      e.car.ghostHidden = true;
+      e.car.ghostAlpha = 0;
+    } else {
+      e.car.ghostHidden = false;
+      e.car.ghostAlpha = age <= STALE_GHOST_MS
+        ? 1
+        : Math.max(0.35, 1 - ((age - STALE_GHOST_MS) / (STALE_REMOVE_MS - STALE_GHOST_MS)) * 0.65);
+    }
+  }
+
   for (const e of entries) {
     if (e.isMe || e.buf.length === 0 || e.car.retired) continue;
     const buf = e.buf;
     const c = e.car;
 
-    // 清理已经播放过去的旧样本（保留 1 个历史点用于求切线）
-    while (buf.length > 3 && buf[1].t < clock.renderMs - 80) buf.shift();
+    // ---- 0. 每车独立延迟：把"上报频率低"的对端单独往后放 ----
+    // 对端只有 10~20fps 时，样本间隔 50~100ms 已经超过全局缓冲深度，
+    // 渲染点会常年越过它最后一个样本 —— 观感是"直线外推一会儿 → 定格 → 瞬移"。
+    // 给这辆车单独加一段延迟（目标 ≈ 一个样本间隔），渲染点就永远落在它两个样本之间，
+    // 观感变成"平滑但更旧"。只影响这一辆车，不会把全场延迟一起抬高。
+    const gap = e.gapEwma || 16.7;
+    const needExtra = Math.max(0, Math.min(450, gap * 1.25 - Math.max(30, clock.delayMs - 20)));
+    if (needExtra !== e.extraMs) {
+      const d = needExtra - e.extraMs;
+      const step = (d > 0 ? EXTRA_RISE_MS_PER_SEC : EXTRA_FALL_MS_PER_SEC) * dt;
+      e.extraMs += Math.abs(d) <= step ? d : Math.sign(d) * step;
+    }
+    const entryPlayMs = playMs - e.extraMs;
+
+    // 清理已经播放过去的旧样本。
+    // 多留 240ms 历史：额外延迟在动态调整（尤其回落时），采样点会小幅前移，
+    // 只留 80ms 会让采样点瞬间落到 buf[0] 之前 —— 那会被当成"还没到第一个样本"而卡住。
+    while (buf.length > 3 && buf[1].t < entryPlayMs - HISTORY_MS) buf.shift();
 
     // ---- 1. 按渲染时间轴解算"目标位姿"（样条插值 / 断流外推）----
-    const res = sampleRemote(buf, clock.renderMs, 250);
+    const res = sampleRemote(buf, entryPlayMs, 250);
     if (!res) continue;
+
+    // 自适应延迟的反馈信号：这一帧缓冲区是否真的被掏空（正在直线外推）。
+    // 只统计"采样间隔正常、且没有失联"的对端 —— 慢对端天生每帧见底，不该带偏全场延迟。
+    if (res.extrapolated && (entryPlayMs - buf[buf.length - 1].t) > 8
+      && e.lastGapMs < STARVE_MAX_GAP_MS
+      && (c.netAge || 0) < STALE_GHOST_MS) netStarved = true;
     const tx = res.x, ty = res.y, ta = res.a, tv = res.v;
 
-    // ---- 2. 微平滑：只兜残余抖动/外推回收时的跳变（12ms 时间常数，稳态滞后 < 1m）----
+    // ---- 2. 外推结束：把"视觉位置 − 真实目标"的偏差记成衰减偏移 ----
+    // 不再让样条一帧内把漂移补齐（那就是"弹一下"），而是在 ~70ms 内吸收掉。
+    if (e.wasExtrap && !res.extrapolated) {
+      e.recX = Math.max(-25, Math.min(25, e.recX + (c.x - tx)));
+      e.recY = Math.max(-25, Math.min(25, e.recY + (c.y - ty)));
+    }
+    e.wasExtrap = res.extrapolated;
+
+    // ---- 3. 微平滑：只兜残余抖动（12ms 时间常数，稳态滞后 < 1m）----
     if (!e.synced) {
       e.synced = true;
       c.x = tx; c.y = ty; c.angle = ta; c.speed = tv;
     } else {
+      if (e.recX || e.recY) {
+        const decay = Math.exp(-dt / RECOVER_TAU);
+        e.recX *= decay; e.recY *= decay;
+        if (Math.abs(e.recX) < 0.01) e.recX = 0;
+        if (Math.abs(e.recY) < 0.01) e.recY = 0;
+      }
+      const sx = tx + e.recX, sy = ty + e.recY;
       const tauPos = e.netId.startsWith("ai:") ? SMOOTH_TAU_AI : SMOOTH_TAU_HUMAN;
       const kPos = 1 - Math.exp(-dt / tauPos);
       const kAng = 1 - Math.exp(-dt / SMOOTH_TAU_ANGLE);
       const kSpd = 1 - Math.exp(-dt / 0.08);
-      c.x += (tx - c.x) * kPos;
-      c.y += (ty - c.y) * kPos;
+      c.x += (sx - c.x) * kPos;
+      c.y += (sy - c.y) * kPos;
       c.angle += wrapAngle(ta - c.angle) * kAng;
       c.speed += (tv - c.speed) * kSpd;
     }
@@ -327,6 +452,8 @@ function resolveClientCarCollisions(meCar, fx, dt) {
     const other = e.car;
     // 完赛车辆幽灵化：不与仍在比赛的车发生碰撞（本地与服务器判定一致）
     if (meCar.finished || other.finished) continue;
+    // 失联车辆不再参与碰撞：他早就不在比赛里了，撞上一辆"定格"的幽灵车会让自车凭空减速
+    if (other.ghostHidden || (other.netAge || 0) > STALE_GHOST_MS) continue;
 
     const geo = getCarDistance(meCar, other);
     // 只有包围盒重叠才判定接触
@@ -437,6 +564,9 @@ export function updateNetRace(dt, localInput, now, fx) {
   }
 
   // ---- 2. 远端车：连续浮点时间高精度插值 + 航位推算 ----
+  // 自适应延迟：缓冲见底时把播放延迟垫深（最多 150ms），链路恢复后回落到 80ms。
+  // 用的是上一帧的 netStarved（一帧延迟对 15ms 级别的调整没有影响）。
+  clock.setDelay(delayCtl.update(dt, netStarved));
   clock.update(dt);
   interpolateRemoteCars(dt);
 

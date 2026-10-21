@@ -1,8 +1,22 @@
 // WebSocket 连接封装：握手 / 事件分发 / 状态管理
 // 协议与服务端 server/net/gateway.js 对应（v1, JSON 文本帧）
+//
+// 传输层是双通道：
+//   · 大厅 / 房间 / 开赛 / 成绩 / 信令 —— WebSocket（可靠有序，低频）
+//   · 位姿 snapshot / peer_state / car_state —— WebRTC DataChannel（UDP，无序不重传，高频）
+// 上层只管调 conn.send()、conn.on()，具体走哪条通道由这里决定；
+// DataChannel 建不起来（缺 STUN、被墙、UDP 不通）时自动全程回落 WebSocket，游戏无感。
+import { rtc } from "./rtc.js";
+
 const handlers = new Map();
 
+// 允许走 UDP 的消息类型：只认最新的高频位姿包，丢一包无所谓
+const UDP_TYPES = new Set(["car_state"]);
+
 let ws = null;
+let status = "idle";
+let session = null;
+let settle = null;      // { resolve, reject, done }
 
 function emit(type, msg) {
   for (const fn of handlers.get(type) || []) {
@@ -10,11 +24,53 @@ function emit(type, msg) {
   }
 }
 
+// WebSocket 与 DataChannel 共用一套消息分发
+function dispatch(msg) {
+  if (!msg || !msg.t) return;
+
+  if (msg.t === "welcome") {
+    status = "open";
+    session = msg;
+    if (settle && !settle.done) { settle.done = true; settle.resolve(msg); }
+    // 服务端支持 WebRTC 就顺手建一条 UDP 状态通道（失败自动回落 WS）
+    if (msg.rtc && msg.rtc.iceServers) {
+      rtc.start({
+        iceServers: msg.rtc.iceServers,
+        sendSignal: (o) => sendWs(o),
+        onMessage: dispatch,
+      });
+    }
+  }
+
+  if (msg.t === "error" && settle && !settle.done) {
+    settle.done = true;
+    status = "error";
+    settle.reject(new Error(msg.code || "error"));
+    return;
+  }
+
+  emit(msg.t, msg);
+}
+
+// 只走 WebSocket（信令与控制消息）
+function sendWs(obj) {
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
+  return false;
+}
+
+// 内建信令处理：offer/answer/candidate（用 Set，和 conn.on 的存储结构保持一致）
+handlers.set("rtc_offer", new Set([(m) => rtc.handleOffer(m && m.sdp)]));
+handlers.set("rtc_ice", new Set([(m) => rtc.handleIce(m)]));
+
 export const conn = {
-  status: "idle",        // idle | connecting | open | closed | error
-  url: null,             // ws://host:port
-  httpBase: null,        // 对应的 REST 基地址
-  session: null,         // welcome 消息载荷（playerId/nickname/leaderboards/...）
+  get status() { return status; },
+  url: null,
+  httpBase: null,
+  get session() { return session; },
+
+  // 诊断：状态数据当前实际走的是哪条通道
+  get transport() { return rtc.transport; },
+  get rtcState() { return rtc.state; },
 
   // 连接并完成 hello 握手；resolve(welcomePayload) / reject(error)
   connect(url, { fingerprint, nickname }) {
@@ -28,39 +84,33 @@ export const conn = {
       this.url = url;
       // REST 基地址取同源 origin（不能把 /ws 网关路径拼进去）
       try {
-        this.httpBase = new URL(url.replace(/^ws/, "http")).origin;
+        this.httpBase = new URL(url.replace(/^ws/i, "http")).origin;
       } catch {
         this.httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "");
       }
-      this.status = "connecting";
+      status = "connecting";
+      settle = { resolve, reject, done: false };
       ws = new WebSocket(url);
 
-      let settled = false;
       ws.onopen = () => {
         ws.send(JSON.stringify({ t: "hello", fingerprint, nickname }));
       };
       ws.onmessage = (e) => {
         let msg;
         try { msg = JSON.parse(e.data); } catch { return; }
-        if (msg.t === "welcome") {
-          this.status = "open";
-          this.session = msg;
-          if (!settled) { settled = true; resolve(msg); }
-        }
-        if (msg.t === "error" && !settled) {
-          settled = true;
-          this.status = "error";
-          reject(msg);
-          return;
-        }
-        emit(msg.t, msg);
+        dispatch(msg);
       };
       ws.onerror = () => {
-        if (!settled) { settled = true; this.status = "error"; reject({ code: "connect_failed" }); }
+        if (settle && !settle.done) {
+          settle.done = true;
+          status = "error";
+          reject(new Error("connect_failed"));
+        }
       };
       ws.onclose = () => {
-        this.status = "closed";
-        this.session = null;
+        status = "closed";
+        session = null;
+        rtc.stop();          // 连接没了，UDP 通道一并释放
         emit("_closed", {});
       };
     });
@@ -73,14 +123,17 @@ export const conn = {
   off(type, fn) { handlers.get(type)?.delete(fn); },
 
   send(obj) {
-    if (this.isOpen()) ws.send(JSON.stringify(obj));
+    // 位姿高频包优先走 UDP：链路无队头阻塞，丢包不阻塞后续
+    if (obj && UDP_TYPES.has(obj.t) && rtc.trySend(obj)) return true;
+    return sendWs(obj);
   },
 
   isOpen() { return !!ws && ws.readyState === 1; },
 
   close() {
+    rtc.stop();
     if (ws) { try { ws.close(); } catch { /* ignore */ } ws = null; }
-    this.status = "idle";
-    this.session = null;
+    status = "idle";
+    session = null;
   },
 };

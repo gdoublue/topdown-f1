@@ -10,6 +10,7 @@
     "dev": "node --watch index.js"
   },
   "dependencies": {
+    "node-datachannel": "^0.33.4",
     "ws": "^8.18.0"
   }
 }

@@ -11,6 +11,7 @@ import { registerPlayer } from "./core/session.js";
 import { submitLapRecord, getLeaderboardView } from "./services/leaderboard.js";
 import { listRooms } from "./core/roomManager.js";
 import { attachGateway, broadcastBoards } from "./net/gateway.js";
+import { rtcAvailable, rtcCleanup } from "./net/rtc.js";
 
 loadDb();
 
@@ -70,13 +71,17 @@ attachGateway(server);
 server.listen(SERVER_CONFIG.port, () => {
   console.log(`🏁 Top-down F1 server listening on http://localhost:${SERVER_CONFIG.port}`);
   console.log(`   WS: ws://localhost:${SERVER_CONFIG.port}${SERVER_CONFIG.wsPath}`);
+  console.log(rtcAvailable
+    ? `   UDP 状态通道: WebRTC DataChannel 已启用（unordered，不重传）`
+    : `   UDP 状态通道: 未启用（自动全部走 WebSocket）`);
 });
 
-// 优雅关闭：确保防抖中的数据落盘
+// 优雅关闭：确保防抖中的数据落盘 + 释放 WebRTC 原生资源
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     console.log(`\n[${sig}] 保存数据并关闭…`);
     flushDb();
+    rtcCleanup();
     process.exit(0);
   });
 }

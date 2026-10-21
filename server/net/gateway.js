@@ -11,6 +11,7 @@ import { SERVER_CONFIG } from "../config.js";
 import { registerPlayer, countRaceFinish } from "../core/session.js";
 import { createRoom, joinRoom, leaveRoom, listRooms, handleDisconnect, findRoomOf, rooms as _rooms } from "../core/roomManager.js";
 import { RaceSim } from "../core/sim.js";
+import { createRtcLink, rtcAvailable, rtcClientConfig, rtcCleanup } from "./rtc.js";
 import { submitLapRecord, getLeaderboardView } from "../services/leaderboard.js";
 import { TRACKS } from "../../src/track/tracks.js";
 import { AI_CONFIGS } from "../../src/game/ai.js";
@@ -19,6 +20,15 @@ const sessions = new Map();   // ws -> session
 
 function send(ws, obj) {
   if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+// 状态下行：优先走 WebRTC DataChannel（UDP，无序不重传），不可用时自动回落 WebSocket。
+// 接受对象或已序列化的字符串：整房间同一份快照只序列化一次，两条链路都能用。
+function sendSession(session, objOrStr) {
+  const str = typeof objOrStr === "string" ? objOrStr : JSON.stringify(objOrStr);
+  if (session.rtc && session.rtc.send(str)) return true;
+  if (session.ws.readyState === 1) session.ws.send(str);
+  return false;
 }
 
 function broadcastRoom(room, type, payload) {
@@ -68,7 +78,7 @@ function relayPeerState(room, sid) {
   const g = room.sim?.ghosts?.get(sid);
   if (!g || g.gone || g.forfeited) return;
   const c = g.car;
-  const msg = JSON.stringify({
+  const msg = {
     t: "peer_state",
     i: sid,
     st: g.st || 0,
@@ -76,10 +86,10 @@ function relayPeerState(room, sid) {
     y: Math.round(c.y * 100) / 100,
     a: Math.round(c.angle * 10000) / 10000,
     v: Math.round(c.speed * 10) / 10,
-  });
+  };
   for (const m of room.members.values()) {
     if (m.session.id === sid) continue;
-    if (m.session.ws.readyState === 1) m.session.ws.send(msg);
+    sendSession(m.session, msg);
   }
 }
 
@@ -132,10 +142,13 @@ function simLoop() {
         checkRaceEnd(room);
         if (sim.ended) continue;   // 终局后停止广播快照（避免空转占用带宽）
         // 每 tick 广播快照（幽灵模型：无需输入 ack）
-        const snap = sim.snapshot();
+        // 所有人收到的是同一份内容，只序列化一次：
+        // 原来每个成员都 JSON.stringify 一遍（8 人房 = 每秒 240 次大对象序列化），
+        // 而客户端从未读取过 `you` 字段（自车 id 来自 welcome 的 sid），直接省掉。
+        const payload = JSON.stringify(sim.snapshot());
         for (const m of room.members.values()) {
           if (m.session.ws.readyState !== 1) continue;
-          m.session.ws.send(JSON.stringify({ ...snap, you: m.session.id }));
+          sendSession(m.session, payload);
         }
       } catch (e) {
         // 单房间异常只毁该房间，不拖垮整个服务进程
@@ -192,6 +205,8 @@ function ensureSimLoop() {
 }
 
 function onClosed(session) {
+  session.rtc?.close();
+  session.rtc = null;
   const res = handleDisconnect(session, broadcastRoom);
   sessions.delete(session.ws);
   // 比赛中掉线/退出：只把这台车移出比赛（判负），其余车手照常完赛
@@ -247,13 +262,23 @@ function route(session, msg) {
         isNew: created,
         protocol: 1,
         tracks: TRACKS.map(t => ({ id: t.id, name: t.name, flag: t.flag, length: t.length, laps: t.laps || null })),
+        rtc: rtcClientConfig(),
         leaderboards: Object.fromEntries(
           TRACKS.map(t => [t.id, getLeaderboardView(t.id, { limit: 10 })])
         ),
         rooms: listRooms(),
       });
       broadcastLobby();   // 在线人数变化 → 其他人的大厅同步刷新
-      break;
+            // 建 WebRTC DataChannel（UDP）：信令走 WS，数据通道建好后快照/位姿自动改走 UDP。
+            // 建不起来也只是回落 WebSocket，不影响任何功能。
+            if (rtcAvailable) {
+              session.rtc = createRtcLink(
+                session,
+                (o) => send(ws, o),
+                (m) => { session.lastSeen = Date.now(); route(session, m); },
+              );
+            }
+            break;
     }
 
     case "room_create": {
@@ -321,6 +346,17 @@ function route(session, msg) {
       }
       broadcastRoom(room, "room_update", { room: room.view() });
       if (msg.trackId !== undefined || msg.fillAI !== undefined) broadcastLobby();
+      break;
+    }
+
+    case "rtc_answer": {
+      // DataChannel 信令：客户端回传的 answer / 后续 trickle candidate
+      session.rtc?.handleAnswer(msg.sdp);
+      break;
+    }
+
+    case "rtc_ice": {
+      session.rtc?.handleCandidate(msg.candidate, msg.mid);
       break;
     }
 
