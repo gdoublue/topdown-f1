@@ -2,6 +2,9 @@
 .vscode/
 node_modules/
 dist/
+
+# 本机部署配置（证书路径/域名等，不进仓库）
+.deploy/
 *.log
 .DS_Store
 Thumbs.db
