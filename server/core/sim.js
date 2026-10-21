@@ -104,7 +104,19 @@ export class RaceSim {
     const lapLen = Math.max(1, this.trackCtx.LAP_LENGTH || 5000);
     const endDist = Math.max(1, this.maxLaps) * lapLen;
     // 正常 60Hz ≈ 2.6m 的余量，远大于实际单帧位移；掉线重连也不会被误杀
-    const dt = g.lastAt > 0 ? Math.min(1, Math.max(0, (now - g.lastAt) / 1000)) : 0.5;
+    // 【窗口基准】必须用"发送端自报的采样间隔"（st 差），不能只看服务端到达间隔：
+    //   · 客户端掉帧后会把物理补推一段（一帧最多补 250ms），这批位移在真实时间上完全合法；
+    //   · 但连续补推 / 网络成串到达时，两包到达间隔可能只有几毫秒 → 用到达间隔算窗口，
+    //     合法样本会被判成瞬移，位置原地不动而 st 继续前进；
+    //   · 接收端于是收到"时间在走、坐标不动"的重复样本 → 别人看到的就是这辆车一格一格地卡。
+    // 用 st 差 + 到达间隔封顶（+0.35s）既能覆盖补推，也不给伪造 st 刷位移留太大口子。
+    const arrivalDt = g.lastAt > 0 ? Math.min(1, Math.max(0, (now - g.lastAt) / 1000)) : 0.5;
+    const stPrev = Number(g.st) || 0;
+    const stNow = Number(s.st) || 0;
+    const stDt = stNow > stPrev ? Math.min(2, (stNow - stPrev) / 1000) : 0;
+    const dt = g.lastAt > 0
+      ? Math.max(arrivalDt, Math.min(stDt, arrivalDt + 0.35))
+      : 0.5;
     const stepLimit = vMax * dt * 1.5 + 2;
 
     const nx = Number(s.x);

@@ -80,6 +80,8 @@ let showAILine = false; // 是否绘制焦点赛车的 AI 前瞻目标点与引�
 let speedMult = 1;      // 比赛倍速（观战/单人/对战 AI 快进；在线对战为服务器实时，不生效）
 const SPEED_STEPS = [1, 2, 4, 8, 16];
 const MAX_SUBSTEP_DT = 1 / 30;   // 倍速后切成 ≤1/30s 的固定物理子步，保证模拟稳定
+const AI_HUD_INTERVAL_MS = 80;   // 计时塔刷新间隔（12.5Hz）：低频信息，不必跟满帧率
+let lastAiHudAt = 0;
 
 // 洗牌算法：用于每局发车位随机排位
 function shuffle(array) {
@@ -218,9 +220,13 @@ function reset() {
   winner = null;
 }
 
+// 画布像素上限：4K/Retina 屏上 DPR=2 会让像素面积翻 4 倍（例如 3000×1700 → 6M 像素），
+// Canvas 2D 的填充成本与像素面积成正比。1.5 在视觉上几乎不可辨，但能省掉大半填充带宽。
+const RENDER_DPR_MAX = 1.5;
+
 function resize() {
   const r = canvas.getBoundingClientRect();
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = Math.min(window.devicePixelRatio || 1, RENDER_DPR_MAX);
   const w = Math.max(1, Math.round(r.width * dpr));
   const h = Math.max(1, Math.round(r.height * dpr));
   // 尺寸没变就不重置画布：移动端地址栏收起/展开会触发 resize，
@@ -532,7 +538,7 @@ function simulateRemainingToEnd(maxSimMs = 300000) {
   // 兜底：极少数卡死/出界的车保持未完赛，结算里按里程排在后段
 }
 
-function update(dt) {
+function update(dt, finalStep = true, simNowMs = 0) {
   if (!started) return;
   // 在线退出确认期间比赛照常推进，避免自己的车停在赛道上被撞/被超
   if (isModalOpen && !onlineQuitConfirmOpen) return;
@@ -549,7 +555,7 @@ function update(dt) {
       showMsg("GO!", "", 900);   // 倒计时结束：清屏显示 GO
       audio.beep(1200, 0.35, 0.2);
     }
-    const ev = updateNetRace(dt, input, performance.now(), fx);
+    const ev = updateNetRace(dt, input, simNowMs || performance.now(), fx, finalStep);
     if (ev === "lap") {
       const me = cars.find(c => c.isPlayer);
       showMsg("LAP " + Math.min(me.lap, effectiveLaps(currentTrack?.laps)) + "/" + effectiveLaps(currentTrack?.laps), me.shortName, 1100);
@@ -1361,16 +1367,48 @@ const NET_FALLBACK_GAP_MS = 60;
 let lastRafAt = 0;
 let lastNetSimAt = 0;
 let netFallbackTimer = 0;
+// 两次绘制之间累计推进的模拟时间（秒）。
+// 镜头/特效用它而不是 rAF 的 dt：物理可能被 16ms 定时器、或被掉帧补偿推进了 66~250ms，
+// 画面若只按 rAF dt（还被钳在 50ms）走，自车就会在屏幕上"先窜一段、再被镜头追回来"。
+let netSimAccum = 0;
+let lastNetGapMs = 0;
+let lastNetSteps = 0;
+let lastVisualDt = 0;
+
+// 帧节奏诊断（__gp.perf）：最近 120 帧的真实间隔 + 上一帧模拟/画面推进时间。
+// 判断"自车抖"到底是帧率问题还是时钟不同步：sim.gapMs ≈ sim.visualMs 才说明两者同源。
+const FRAME_WIN = 120;
+const frameGaps = new Float32Array(FRAME_WIN);
+let frameGapIdx = 0;
+let frameGapCount = 0;
+function recordFrameGap(ms) {
+  frameGaps[frameGapIdx] = ms;
+  frameGapIdx = (frameGapIdx + 1) % FRAME_WIN;
+  if (frameGapCount < FRAME_WIN) frameGapCount++;
+}
 
 function advanceNetSim(nowMs) {
   if (!lastNetSimAt) { lastNetSimAt = nowMs; return; }
-  let gap = (nowMs - lastNetSimAt) / 1000;
+  const prevMs = lastNetSimAt;
+  let gap = (nowMs - prevMs) / 1000;
   lastNetSimAt = nowMs;
   if (gap <= 0) return;
   if (gap > 0.25) gap = 0.25;   // 长卡顿/切后台：最多补 250ms，避免物理积分爆掉
   const steps = Math.min(8, Math.max(1, Math.ceil(gap / MAX_SUBSTEP_DT)));
   const stepDt = gap / steps;
-  for (let i = 0; i < steps; i++) update(stepDt);
+  netSimAccum += gap;
+  lastNetGapMs = gap * 1000;
+  lastNetSteps = steps;
+  // 碰撞只在最后一步解算：拆步是"补时间"，不是"多撞几次"。
+  // 旧写法每步都跑一次非对称碰撞，掉帧补 3 步时自车会被 -45% 速度差和硬分离惩罚 3 次。
+  for (let i = 0; i < steps; i++) {
+    // 上报时间戳一律用【真实时间】nowMs，不能用"补推后的模拟时刻"。
+    // 因为 gap 被钳到 250ms 时，模拟时刻会比真实时间永久落后一大截（卡死 14.5 秒就是落后 14 秒），
+    // 于是样本时间戳出现 14 秒的年代断层；接收端的最小值锁相会被这条断层污染，
+    // 之后这辆车的样本永远"偏老"，别人只能一直替它直线外推（现象：位置提前 + 车头不转 + 抽搐）。
+    // 位置与时间戳的微小不一致（补推那一段走得少）由接收端的时间轴断层检测兜掉。
+    update(stepDt, i === steps - 1, nowMs);
+  }
 }
 
 function startNetFallback() {
@@ -1387,9 +1425,14 @@ let prevTs = 0;
 function frame(ts) {
   requestAnimationFrame(frame);
   if (!prevTs) prevTs = ts;
-  lastRafAt = ts;
-  let dt = (ts - prevTs) / 1000;
+  const now = performance.now();
+  // 用回调真实开始时刻而不是 ts：ts 是"帧起点"，回调真正执行时已经晚了几毫秒到几十毫秒，
+  // 混用会让 30fps（每帧 JS 约 30ms）的机器被误判成"rAF 已停摆"，定时器跟着多推一遍模拟。
+  lastRafAt = now;
+  const rawDt = (ts - prevTs) / 1000;
   prevTs = ts;
+  if (started) recordFrameGap(rawDt * 1000);
+  let dt = rawDt;
   if (dt > 0.05) dt = 0.05;
 
   // 右下方帧率角标：每 500ms 统计一次，避免逐帧数字抖动
@@ -1408,11 +1451,18 @@ function frame(ts) {
 
   // 倍速快进：本地模式的比赛时间 ×N，切成固定物理子步推进
   // （在线对战是服务器实时权威模拟，倍速只作用于本地单机类模式）
+  // visualDt = 本帧画面（镜头/粒子）应该推进的时间，必须与自车物理推进的时间严格一致：
+  //   · 在线：两次绘制之间物理实际推进了多少（可能来自定时器 + 掉帧补偿），画面就用多少
+  //   · 单机：模拟时间 = 真实时间 × 倍速
+  let visualDt;
   if (mode === "onlinerace") {
     // 在线对战统一走"真实时间"节拍：rAF 正常时就是这里推进，被节流时由定时器接管
-    advanceNetSim(performance.now());
+    advanceNetSim(now);
+    visualDt = netSimAccum > 0 ? Math.min(0.25, netSimAccum) : dt;
+    netSimAccum = 0;
   } else {
     lastNetSimAt = 0;   // 离开在线模式：清掉时间基准，避免下次带着旧时间戳补帧
+    netSimAccum = 0;
     const scaled = dt * speedMult;
     const steps = Math.min(32, Math.max(1, Math.ceil(scaled / MAX_SUBSTEP_DT)));
     const stepDt = scaled / steps;
@@ -1420,7 +1470,9 @@ function frame(ts) {
       update(stepDt);
       if (isModalOpen) break;   // 弹窗打开（结算/选赛道）后停止剩余子步
     }
+    visualDt = scaled;
   }
+  lastVisualDt = visualDt;
   syncTuner(cars[focusIndex]);   // 切车时把调校面板同步到当前焦点赛车
 
   // 冲出正常路线（车轮压在草地上）提示：不依赖背景明暗，直接闪红警告
@@ -1438,7 +1490,7 @@ function frame(ts) {
   // 倍速下镜头/粒子必须按"模拟时间"推进：
   // 车辆以 N 倍速前进，若镜头仍按真实时间慢慢追（时间常数 ~0.24s），
   // 4× 时稳态滞后就会被放大 4 倍，车会被甩到画面边缘甚至屏幕外。
-  const visualDt = mode === "onlinerace" ? dt : dt * speedMult;
+  // 在线模式同理（见上方 visualDt）：镜头与自车必须走同一个时钟，否则掉帧时车会"窜一下再被追回"。
   updateCamera(activeCar, visualDt);
   fx.updateEffects(visualDt);
   // 弹窗（赛道选择 / 开局重选 / 结算大屏）打开时引擎声回落怠速；
@@ -1449,8 +1501,13 @@ function frame(ts) {
   draw();
 
   // 刷新 HUD（对战/观战模式刷新多车排位与实时 G 值遥测；单人模式刷新单人 HUD）
+  // 计时塔属于低频信息：10~12Hz 肉眼完全够用。144Hz 屏上每帧刷 8 行 DOM（约 160 次写操作）
+  // 会把 6.9ms 的单帧预算吃掉一大块，这是双人联机掉到 30fps 的主要来源之一。
   if (mode !== "solo") {
-    updateAIHUD(cars, focusIndex, switchFocusCar);
+    if (now - lastAiHudAt >= AI_HUD_INTERVAL_MS) {
+      lastAiHudAt = now;
+      updateAIHUD(cars, focusIndex, switchFocusCar);
+    }
   } else {
     updateHUD(activeCar);
   }
@@ -1485,6 +1542,33 @@ window.__gp = {
   net: netrace,   // 在线对战诊断（net.stats：播放延迟 / 抖动峰值 / 各远端车新鲜度）
   conn,           // 连接诊断（conn.transport: udp / websocket；conn.rtcState）
   rtc,            // UDP 通道诊断（rtc.debugInfo(): ICE/连接状态）
+  // 帧节奏诊断：frame.avgMs/maxMs/hitches 是 rAF 真实间隔；sim.gapMs 是上一帧物理推进的时间，
+  // sim.visualMs 是同一帧画面推进的时间 —— 两者相等才说明自车与镜头同源（不再"窜一下再追回"）。
+  perf: {
+    get frame() {
+      if (!frameGapCount) return null;
+      let sum = 0, max = 0, hitches = 0;
+      for (let i = 0; i < frameGapCount; i++) {
+        const g = frameGaps[i];
+        sum += g;
+        if (g > max) max = g;
+        if (g > 50) hitches++;
+      }
+      return { avgMs: +(sum / frameGapCount).toFixed(1), maxMs: +max.toFixed(1), hitches, n: frameGapCount };
+    },
+    get sim() {
+      return { gapMs: +lastNetGapMs.toFixed(1), steps: lastNetSteps, visualMs: +(lastVisualDt * 1000).toFixed(1) };
+    },
+    // 画布实际像素：填充成本与像素面积成正比，4K/Retina 上这是最容易失控的一项
+    get canvas() {
+      return {
+        w: canvas.width, h: canvas.height,
+        cssW: Math.round(canvas.getBoundingClientRect().width),
+        dpr: +(canvas.width / Math.max(1, canvas.getBoundingClientRect().width)).toFixed(2),
+        px: Math.round(canvas.width * canvas.height / 1e6 * 10) / 10,
+      };
+    },
+  },
   race, input, aiInputs, pts,
   get mode() { return mode; },
   get ai() { return mode !== "solo"; },

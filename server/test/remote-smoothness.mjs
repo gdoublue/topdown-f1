@@ -19,6 +19,7 @@ function client(tag) {
     c.msgs.push(m);
     if (m.t === "snapshot" && c.onSnapshot) c.onSnapshot(m);
     if (m.t === "peer_state" && c.onPeerState) c.onPeerState(m);
+    if (m.t === "peers_bundle" && c.onPeersBundle) c.onPeersBundle(m);
     for (const w of [...c.waiters]) if (w.t === m.t && (!w.pred || w.pred(m))) {
       c.waiters.splice(c.waiters.indexOf(w), 1); w.resolve(m);
     }
@@ -105,7 +106,15 @@ B.onSnapshot = (msg) => {
   for (const sc of msg.cars) feed(sc, recv);
 };
 
-// 服务端收到即转发的那条路（生产路径）
+// 生产路径：服务端 16ms 合包广播（peers_bundle）；旧服务端仍会发 peer_state
+B.onPeersBundle = (msg) => {
+  if (!Array.isArray(msg.c)) return;
+  const recv = performance.now();
+  for (const row of msg.c) {
+    if (!row || row[0] !== aSid) continue;
+    feed({ i: row[0], st: row[1], x: row[2], y: row[3], a: row[4], v: row[5] }, recv);
+  }
+};
 B.onPeerState = (msg) => feed(msg, performance.now());
 B.renderTimer = setInterval(() => {
   const now = performance.now();

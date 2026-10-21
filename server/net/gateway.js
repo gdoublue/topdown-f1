@@ -70,26 +70,40 @@ export function broadcastBoards(trackId) {
   }
 }
 
-// 玩家采样即时中继：只带位姿（圈数/成绩仍以 30Hz 权威快照为准，避免两套数据打架）。
-// 只发给同房间其他人，不回发本人（自车本来就是本地权威，不需要自己的回声）。
-// 用服务端已钳制过的位姿（sim.setPlayerState 清洗过），不直接透传客户端原始字段。
-function relayPeerState(room, sid) {
-  if (!room || room.members.size < 2) return;
-  const g = room.sim?.ghosts?.get(sid);
-  if (!g || g.gone || g.forfeited) return;
-  const c = g.car;
-  const msg = {
-    t: "peer_state",
-    i: sid,
-    st: g.st || 0,
-    x: Math.round(c.x * 100) / 100,
-    y: Math.round(c.y * 100) / 100,
-    a: Math.round(c.angle * 10000) / 10000,
-    v: Math.round(c.speed * 10) / 10,
-  };
+// 位姿下行合流（peer bundle）：
+// 旧做法是"每收到一个 car_state 就立刻转发给房间里其他每个人"——8 人满员时
+//   收 8×60 = 480 包/秒 → 发 8×7×60 = 3360 次/秒 的 DataChannel/WS 发送。
+// 客户端本来就有 80~150ms 播放缓冲，"省掉这几毫秒中继等待"对画面毫无意义，
+// 却让单线程 Node 承担 7 倍的 syscall / C++ addon 跨界开销。
+// 现在改成：每 16ms 把房间内所有幽灵的最新位姿打成一个包广播一次（≈60 次/秒），
+// 客户端收到后用与 peer_state 完全相同的路径入缓冲（样本时刻仍是发送端自报的 st）。
+const PEER_FLUSH_MS = 16;
+
+function flushPeerBundle(room, now) {
+  if (!room._peersDirty) return;
+  if (now - (room._peerFlushAt || 0) < PEER_FLUSH_MS) return;
+  room._peerFlushAt = now;
+  room._peersDirty = false;
+  const sim = room.sim;
+  if (!sim || sim.destroyed) return;
+  const rows = [];
+  for (const [sid, g] of sim.ghosts) {
+    if (!g || g.gone || g.forfeited) continue;
+    const c = g.car;
+    rows.push([
+      sid,
+      Math.round((g.st || 0) * 100) / 100,
+      Math.round(c.x * 100) / 100,
+      Math.round(c.y * 100) / 100,
+      Math.round(c.angle * 10000) / 10000,
+      Math.round(c.speed * 10) / 10,
+    ]);
+  }
+  if (!rows.length) return;
+  const payload = JSON.stringify({ t: "peers_bundle", c: rows });
   for (const m of room.members.values()) {
-    if (m.session.id === sid) continue;
-    sendSession(m.session, msg);
+    if (m.session.ws.readyState !== 1) continue;
+    sendSession(m.session, payload);
   }
 }
 
@@ -132,6 +146,8 @@ function simLoop() {
       if (!sim || sim.destroyed) continue;
       try {
         sim.tick(SIM_DT, now);
+        // 位姿下行合流（≤60Hz）：见 flushPeerBundle 的注释
+        flushPeerBundle(room, now);
         // 房间状态跟随模拟器（倒计时结束 → racing），离开房间判定/大厅展示都依赖它
         if (sim.race.state === "racing" && room.state !== "racing") room.state = "racing";
         // 不足 2 名真人的比赛：真人全部冲线后，剩下的 AI 直接无渲染快进到终局，
@@ -365,10 +381,8 @@ function route(session, msg) {
       const room = findRoomOf(session.id);
       if (room?.sim && !room.sim.destroyed) {
         room.sim.setPlayerState(session.id, msg, performance.now());
-        // 收到即转发，不等下一个 30Hz 快照节拍 —— 省掉 0~33ms 的中继等待。
-        // 这 33ms 会直接加进"远端必须先缓冲多少毫秒才不断流"的预算里，
-        // 砍掉它，其他玩家的固定播放延迟才能从 120ms 压到 70ms。
-        relayPeerState(room, session.id);
+        // 只打脏标记：由 simLoop 里 16ms 一次的合包广播统一发（见 flushPeerBundle）。
+        room._peersDirty = true;
       }
       break;
     }

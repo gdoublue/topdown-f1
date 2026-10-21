@@ -32,10 +32,21 @@ export function sampleRemote(buf, tMs, maxExtrapMs = 250) {
   }
   if (tMs >= last.t) {
     const dtSec = Math.min(maxExtrapMs / 1000, (tMs - last.t) / 1000);
+    // 角度也要外推：只冻结 last.a 会让"过弯中的车"保持进弯前的车头直冲，
+    // 观感是"朝向不合理"，比位置偏差更刺眼。用最后两个样本估横摆角速度（限幅）。
+    let omega = 0;
+    if (n >= 2) {
+      const p = buf[n - 2];
+      const dtp = Math.max(1, last.t - p.t) / 1000;
+      let dA = last.a - p.a;
+      while (dA > Math.PI) dA -= Math.PI * 2;
+      while (dA < -Math.PI) dA += Math.PI * 2;
+      omega = Math.max(-3, Math.min(3, dA / dtp));
+    }
     return {
       x: last.x + Math.cos(last.a) * last.v * dtSec,
       y: last.y + Math.sin(last.a) * last.v * dtSec,
-      a: last.a,
+      a: last.a + omega * dtSec,
       v: last.v,
       extrapolated: true,
     };
@@ -47,15 +58,39 @@ export function sampleRemote(buf, tMs, maxExtrapMs = 250) {
   const u = Math.min(1, Math.max(0, (tMs - s0.t) / span));
   const u2 = u * u, u3 = u2 * u;
 
-  // 非均匀 Catmull-Rom：m = 相邻两点速度 × 本段时长（端点缺邻居时退化为该段弦）
-  const sPrev = buf[i - 1] || s0;
-  const sNext = buf[i + 2] || s1;
-  const invPrev = span / Math.max(1, s1.t - sPrev.t);
-  const invNext = span / Math.max(1, sNext.t - s0.t);
-  const m0x = (s1.x - sPrev.x) * invPrev;
-  const m0y = (s1.y - sPrev.y) * invPrev;
-  const m1x = (sNext.x - s0.x) * invNext;
-  const m1y = (sNext.y - s0.y) * invNext;
+  // 切线：优先用样本自带的物理速度 (v, a) —— 时间参数化 Hermite。
+  // 本作的位移积分就是 x += cos(a)·v·dt，所以 (cos a, sin a)·v 就是真实速度向量，
+  // 直接拿它做切线（乘上本段时长 span）比"邻点差分"稳得多：
+  // 邻点差分在非均匀间隔下（掉帧 150ms 紧跟 16ms）会把短间隔那段的斜率放大，
+  // 表现为高速入弯时轨迹先往弯外甩一下再折回（几何过冲）。
+  const spanSec = span / 1000;
+  let m0x, m0y, m1x, m1y;
+  if (Math.abs(s0.v) > 0.5 && Math.abs(s1.v) > 0.5) {
+    m0x = Math.cos(s0.a) * s0.v * spanSec;
+    m0y = Math.sin(s0.a) * s0.v * spanSec;
+    m1x = Math.cos(s1.a) * s1.v * spanSec;
+    m1y = Math.sin(s1.a) * s1.v * spanSec;
+    // 与弦长对齐限幅：个别样本速率异常时不许把曲线拉飞（正常加速远到不了 2.2 倍弦长）
+    const chordX = s1.x - s0.x, chordY = s1.y - s0.y;
+    const cl = Math.hypot(chordX, chordY);
+    if (cl > 0.5) {
+      const lim = cl * 2.2;
+      const m0l = Math.hypot(m0x, m0y);
+      const m1l = Math.hypot(m1x, m1y);
+      if (m0l > lim) { m0x *= lim / m0l; m0y *= lim / m0l; }
+      if (m1l > lim) { m1x *= lim / m1l; m1y *= lim / m1l; }
+    }
+  } else {
+    // 静止 / 倒车 / 老服务端没带 v：退回邻点差分（非均匀缩放，端点退化为该段弦）
+    const sPrev = buf[i - 1] || s0;
+    const sNext = buf[i + 2] || s1;
+    const invPrev = span / Math.max(1, s1.t - sPrev.t);
+    const invNext = span / Math.max(1, sNext.t - s0.t);
+    m0x = (s1.x - sPrev.x) * invPrev;
+    m0y = (s1.y - sPrev.y) * invPrev;
+    m1x = (sNext.x - s0.x) * invNext;
+    m1y = (sNext.y - s0.y) * invNext;
+  }
 
   const h00 = 2 * u3 - 3 * u2 + 1;
   const h10 = u3 - 2 * u2 + u;
@@ -92,8 +127,11 @@ export function nextOffset(prev, recvAt, st) {
 // 插值出来的速度就会一快一慢（这正是"看别人像 PPT"的元凶之一）。
 // 所以：热机阶段（前 warmup 个包）取最小值快速收敛，之后【冻结】偏移，
 // 让样本时刻间隔严格等于发送端真实采样间隔 —— 匀速的前提。
-// 唯一例外：观测值比锁定值小 80ms 以上（说明热机时链路异常、锁偏了），重新锁定。
-export function createClockOffset({ warmup = 40, relockMs = 80 } = {}) {
+// 唯一例外：观测值比锁定值小 relockMs 以上（说明热机时链路异常、锁偏了），重新锁定。
+// relockMs 从 80 提到 300：主线程抖动（尤其中间还要画 canvas 的那个浏览器）会让
+// 个别包"看起来"早到几十毫秒，80ms 的门槛会频繁触发重锁 → 整条时间轴被平移 →
+// 画面上就是每隔一会儿抽一下。300ms 只认真实异常（换链路/重连），日常抖动不再重锁。
+export function createClockOffset({ warmup = 40, relockMs = 300 } = {}) {
   const s = { off: null, n: 0 };
   return {
     get value() { return s.off; },
@@ -165,6 +203,17 @@ export function createPlayoutClock({ delayMs = 120, deadBandMs = 60, offsetRateM
     // 均匀参考轴（本机时钟毫秒）。单调不回退：网络只会让包迟到，不会让时间倒流。
     noteRef(localMs) {
       if (localMs > s.refMs) s.refMs = localMs;
+    },
+
+    // 时钟偏移变化时同步平移参考轴（允许变小）。
+    // 为什么必须平移：ref 只吃"历史最大"的 ts+off，而样本时刻用的是"当前"off。
+    // 一旦 off 变小（热机收敛、WS→DataChannel 接管、链路变好），ref 就会永久高出那一段：
+    // 播放点跑到最新样本前面 → 远端车不停外推（冲出赛道），新样本到了又被拽回来。
+    // 平移之后偏差只体现为 err → 由死区外的 ±4% 速率平滑吸收，不会跳。
+    shiftRef(deltaMs) {
+      const d = Number(deltaMs);
+      if (!Number.isFinite(d) || d === 0 || s.refMs < 0) return;
+      s.refMs += d;
     },
 
     // 兼容入口：把样本时刻直接当参考轴（单测 / 无服务端时间戳的退化路径）

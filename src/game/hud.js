@@ -55,6 +55,44 @@ function setText(node, v) {
   if (node && node._v !== v) { node._v = v; node.textContent = v; }
 }
 
+// 属性 / 行内样式 / display 的脏检查版本：
+// 逐帧无条件 setAttribute / style.setProperty 会让浏览器每帧做一次样式重算，
+// 在 144Hz（单帧预算 6.9ms）下这部分开销非常可观。
+function setAttr(node, name, v) {
+  if (!node) return;
+  node._a || (node._a = Object.create(null));
+  if (node._a[name] !== v) { node._a[name] = v; node.setAttribute(name, v); }
+}
+
+function setStyle(node, prop, v) {
+  if (!node) return;
+  node._s || (node._s = Object.create(null));
+  if (node._s[prop] !== v) { node._s[prop] = v; node.style.setProperty(prop, v); }
+}
+
+function setDisplay(node, v) {
+  if (!node || node._disp === v) return;
+  node._disp = v;
+  node.style.display = v;
+}
+
+// 计时塔每行的子节点一次性缓存：原来每帧每行 9 次 querySelector（8 行 = 72 次/帧），
+// 144Hz 下就是 10000+ 次 DOM 查询/秒，纯浪费。
+function rowRefs(row) {
+  if (row._r) return row._r;
+  return (row._r = {
+    rank: row.querySelector(".standing-rank"),
+    bar: row.querySelector(".standing-color-bar"),
+    name: row.querySelector(".standing-name"),
+    code: row.querySelector(".standing-code"),
+    you: row.querySelector(".standing-you-tag"),
+    cam: row.querySelector(".standing-cam-tag"),
+    gap: row.querySelector(".standing-gap"),
+    car: row.querySelector(".standing-car"),
+    best: row.querySelector(".standing-best"),
+  });
+}
+
 export function fmt(ms) {
   if (ms == null || !isFinite(ms)) return "--:--.--";
   const t = Math.max(0, ms);
@@ -229,58 +267,38 @@ export function updateAIHUD(cars, focusIndex, onSelectCar) {
     const c = item.car;
     const isFocus = item.originalIdx === focusIndex;
     const row = rows[rank];
+    const r = rowRefs(row);
 
-    row.setAttribute("data-idx", String(item.originalIdx));
+    setAttr(row, "data-idx", String(item.originalIdx));
     row.classList.toggle("active", isFocus);
     row.classList.toggle("is-player", !!c.isPlayer);
     row.classList.toggle("out", !!c.retired);
     row.classList.toggle("pos-1", rank === 0);
     row.classList.toggle("pos-2", rank === 1);
     row.classList.toggle("pos-3", rank === 2);
-    row.style.setProperty("--team-color", c.color || "#e10600");
+    setStyle(row, "--team-color", c.color || "#e10600");
 
-    const rankEl = row.querySelector(".standing-rank");
-    if (rankEl) rankEl.textContent = `P${rank + 1}`;
-
-    const barEl = row.querySelector(".standing-color-bar");
-    if (barEl) barEl.style.backgroundColor = c.color || "#ff4a5e";
+    setText(r.rank, `P${rank + 1}`);
+    setStyle(r.bar, "background-color", c.color || "#ff4a5e");
 
     const name = driverLabel(c);
-    const nameEl = row.querySelector(".standing-name");
-    if (nameEl) {
-      nameEl.textContent = name;
-      nameEl.title = `${name} · ${carModelLabel(c)}`;
-    }
+    const model = carModelLabel(c);
+    setText(r.name, name);
+    setAttr(r.name, "title", `${name} · ${model}`);
+    setText(r.code, c.retired ? "OUT" : (driverCode(c) || carNumberLabel(c)));
+    setDisplay(r.you, c.isPlayer ? "inline-block" : "none");
+    setDisplay(r.cam, isFocus ? "inline-block" : "none");
+    setText(r.car, model);
 
-    const codeEl = row.querySelector(".standing-code");
-    if (codeEl) {
-      codeEl.textContent = c.retired ? "OUT" : (driverCode(c) || carNumberLabel(c));
-    }
+    setText(r.gap, gapText(sorted[rank - 1]?.car, c, rank));
+    r.gap?.classList.toggle("leader", rank === 0);
 
-    const youEl = row.querySelector(".standing-you-tag");
-    if (youEl) youEl.style.display = c.isPlayer ? "inline-block" : "none";
-
-    const camEl = row.querySelector(".standing-cam-tag");
-    if (camEl) camEl.style.display = isFocus ? "inline-block" : "none";
-
-    const carEl = row.querySelector(".standing-car");
-    if (carEl) carEl.textContent = carModelLabel(c);
-
-    const gapEl = row.querySelector(".standing-gap");
-    if (gapEl) {
-      gapEl.textContent = gapText(sorted[rank - 1]?.car, c, rank);
-      gapEl.classList.toggle("leader", rank === 0);
-    }
-
-    const bestEl = row.querySelector(".standing-best");
-    if (bestEl) {
-      if (c.best) {
-        bestEl.textContent = fmt(c.best);
-        bestEl.classList.toggle("purple", c.best === overallBest);
-      } else {
-        bestEl.textContent = "--:--.--";
-        bestEl.classList.remove("purple");
-      }
+    if (c.best) {
+      setText(r.best, fmt(c.best));
+      r.best?.classList.toggle("purple", c.best === overallBest);
+    } else {
+      setText(r.best, "--:--.--");
+      r.best?.classList.remove("purple");
     }
   }
 }

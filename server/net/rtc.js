@@ -76,6 +76,7 @@ export function createRtcLink(session, wsSend, onMessage) {
   let dc = null;
   let open = false;
   let closed = false;
+  let answered = false;   // 只接受第一条 answer：重复/迟到的 answer 会让 libdatachannel 报错
   const stats = { offered: false, opened: false, sentBytes: 0, sentPackets: 0, recvPackets: 0, dropped: 0, lastState: "new" };
 
   const fail = (why) => {
@@ -203,6 +204,13 @@ export function createRtcLink(session, wsSend, onMessage) {
 
     /** 客户端回信令 */
     handleAnswer(sdp) {
+      // 只接受第一条 answer。
+      // node-datachannel 不暴露 signalingState，没法直接判断协商阶段；重复/迟到的 answer
+      // （刷新页面、服务端重启后客户端重连）会让 libdatachannel 抛
+      // "Unexpected remote answer description in signaling state stable"，还可能把已建好的
+      // 通道状态搞乱。链接是一次性的（失败就 close 重建），所以"第一条之后一律忽略"是安全的。
+      if (answered) return;
+      answered = true;
       try { pc.setRemoteDescription(String(sdp), "answer"); } catch (e) {
         console.warn("[rtc] setRemoteDescription(answer) 失败：", e.message);
       }
