@@ -40,16 +40,18 @@
       </div>
       <div class="vt-row vt-val">
         <span id="zoomVal">1.00×</span>
-        <button id="zoomReset" class="vt-mini">复位</button>
+        <button id="zoomReset" class="vt-mini" title="恢复默认视野：缩放回到 1.00×，镜头立即回到当前车手">复位视图</button>
       </div>
     </div>
 
-    <!-- 顶部中央赛道快速切换胶囊 -->
+    <!-- 顶部中央赛道快速切换胶囊（F1 转播会话条） -->
     <div id="trackSwitcherPill" class="panel track-pill" title="点击切换赛道">
+      <span class="track-f1">F1</span>
       <span class="track-flag" id="pillFlag">🇨🇳</span>
       <b class="track-name" id="pillName">上海国际赛车场</b>
       <span class="track-len" id="pillLen">5.45km</span>
-      <span class="track-switch-btn">▾ 切换赛道</span>
+      <span class="track-session" id="pillSession">RACE</span>
+      <span class="track-switch-btn">▾</span>
     </div>
 
     <!-- 比赛中随时重选模式 / 赛车 -->
@@ -58,19 +60,32 @@
     <!-- 自动驾驶开关：随时随地由玩家自己决定（在线换视角时会自动接管，可点这里关掉） -->
     <button id="autopilotPill" class="panel home-pill autopilot-pill" title="自动驾驶：由算法驾驶你的赛车，随时可开关（快捷键 B）">🤖 自动驾驶：关</button>
 
-    <!-- AI 模式实时排位榜 (点击切换视图) -->
+    <!-- AI 模式实时计时塔（F1 转播风格：车手 + 车型 + 差距 + 最快圈） -->
     <div class="panel" id="standingsPanel">
-      <div class="panel-header">
-        <span>LIVE STANDINGS</span>
-        <small id="standingsHint">点击切换视角</small>
+      <div class="panel-header live-header">
+        <span><i class="live-dot"></i>LIVE TIMING</span>
+        <small id="standingsHint">LAP 1/3</small>
       </div>
       <div id="standingsList"></div>
+      <div class="timing-legend">
+        <span><i class="legend-purple"></i>最快圈</span>
+        <span><i class="legend-cam"></i>当前镜头</span>
+        <span class="legend-hint">点击行切换车手</span>
+      </div>
     </div>
 
     <!-- AI 模式当前选中赛车遥测条 (底部居中横向布局) -->
     <div class="panel" id="carStatusPanel">
+      <div class="cs-pos">
+        <small>POS</small>
+        <b id="statusPos">P1</b>
+      </div>
       <div class="car-badge">
-        <span id="carColorDot"></span><b id="carBadgeName">CAR</b>
+        <span id="carColorDot"></span>
+        <div class="car-badge-text">
+          <b id="carBadgeName">CAR</b>
+          <span id="carBadgeModel">TEAM · MODEL</span>
+        </div>
         <span id="camIndicator">● CAM</span>
       </div>
       <div class="cs-divider"></div>
@@ -88,6 +103,7 @@
         <div class="row"><span>LAP</span><b id="statusLap">1/3</b></div>
         <div class="row"><span>TIME</span><b id="statusTime">0:00.00</b></div>
         <div class="row"><span>BEST</span><b id="statusBest" class="hi">--:--.--</b></div>
+        <div class="row"><span>LAST</span><b id="statusLast">--:--.--</b></div>
       </div>
       <div class="cs-divider"></div>
       <button id="tuneToggle" class="tune-btn" title="展开 / 收起当前赛车的实时性能微调">TUNE</button>
@@ -104,12 +120,17 @@
 
     <!-- 原单人驾驶 HUD 面板 (非 AI 模式时显示) -->
     <div class="panel" id="stats">
+      <div class="panel-header"><span>TIMING</span><small>TIME ATTACK</small></div>
+      <div class="solo-driver">
+        <b id="soloDriver">你</b>
+        <small id="soloCar">CAR</small>
+      </div>
       <div class="row"><span>LAP</span><b id="lap">1/3</b></div>
       <div class="row"><span>TIME</span><b id="time">0:00.00</b></div>
       <div class="row"><span>BEST</span><b id="best" class="hi">--:--.--</b></div>
       <div class="row"><span>LAST</span><b id="last">--:--.--</b></div>
     </div>
-    <div class="panel" id="speedo"><b id="speed">0</b><span>KM/H</span></div>
+    <div class="panel" id="speedo"><span class="speedo-label">SPEED</span><b id="speed">0</b><span>KM/H</span></div>
     <div class="panel collapsed" id="help">
       <div class="panel-header" title="点击展开 / 收起操作说明">
         <span>CONTROLS</span>
@@ -120,6 +141,7 @@
     <div id="msg"><span id="msgMain"></span><span id="msgSub"></span></div>
     <div id="offTrackWarn" class="off-track-warn hidden">⚠ OFF TRACK</div>
     <div id="credits">Audio: engine loops by domasx2 (CC0) · F1 recordings by Edvvc (CC BY-SA 3.0) · tire squeal by audible-edge (CC BY 3.0)</div>
+    <div id="fpsCounter" title="实时帧率"><span>FPS</span><b id="fpsValue">60</b></div>
   </div>
 
   <!-- 开局流程弹窗：玩法模式 → 赛车选择 -->
@@ -135,27 +157,46 @@
       <p class="track-modal-desc" id="startDesc">单人计时刷圈，还是与全场 AI 车手同场竞速？</p>
 
       <div id="modeCards" class="mode-cards">
-        <div class="track-card mode-card" data-mode="solo">
+        <div class="track-card mode-card" data-mode="solo" role="button" tabindex="0">
+          <span class="mode-index">01</span>
           <div class="mode-icon">⏱</div>
-          <div class="track-card-title">单人玩 · TIME ATTACK</div>
-          <div class="track-card-en">独自上赛道，专心刷最快圈速</div>
-          <div class="track-card-tag">无对手 · 自由练习</div>
+          <div class="mode-title">单人计时</div>
+          <div class="mode-en">TIME ATTACK</div>
+          <p class="mode-desc">独自上赛道，专心刷最快圈速。没有对手，只有你和计时器。</p>
+          <div class="mode-foot">
+            <span class="track-card-tag">无对手 · 自由练习</span>
+            <span class="mode-cta">进入 →</span>
+          </div>
         </div>
-        <div class="track-card mode-card" data-mode="vs">
+        <div class="track-card mode-card" data-mode="vs" role="button" tabindex="0">
+          <span class="mode-index">02</span>
           <div class="mode-icon">🏁</div>
-          <div class="track-card-title">和 AI 比 · GRAND PRIX</div>
-          <div class="track-card-en">你选一台车，其余车手全部由 AI 驾驶</div>
-          <div class="track-card-tag">同场竞速 · 争夺冠军</div>
+          <div class="mode-title">和 AI 比</div>
+          <div class="mode-en">GRAND PRIX</div>
+          <p class="mode-desc">你选一台车，其余车手全部由 AI 驾驶。发车、缠斗、冲线，争夺冠军。</p>
+          <div class="mode-foot">
+            <span class="track-card-tag">同场竞速 · 争夺冠军</span>
+            <span class="mode-cta">进入 →</span>
+          </div>
         </div>
-        <div class="track-card mode-card" data-mode="online">
+        <div class="track-card mode-card" data-mode="online" role="button" tabindex="0">
+          <span class="mode-index">03</span>
           <div class="mode-icon">🌐</div>
-          <div class="track-card-title">在线对战 · ONLINE</div>
-          <div class="track-card-en">连接服务器 · 每赛道排行榜 · 创建房间 PK</div>
-          <div class="track-card-tag">算法竞技 · 同车公平赛</div>
+          <div class="mode-title">在线对战</div>
+          <div class="mode-en">ONLINE</div>
+          <p class="mode-desc">连接服务器，查看各赛道排行榜，创建房间与好友同场 PK。</p>
+          <div class="mode-foot">
+            <span class="track-card-tag">算法竞技 · 同车公平赛</span>
+            <span class="mode-cta">进入 →</span>
+          </div>
         </div>
       </div>
 
       <div id="carSelectWrap" class="hidden">
+        <div class="car-grid-head">
+          <span>SELECT YOUR MACHINE</span>
+          <small id="carGridHint">点击赛车立即进入赛道选择</small>
+        </div>
         <div id="carCardsGrid" class="track-cards-grid"></div>
         <div class="autopilot-entry">
           <button id="autopilotOpenBtn" class="vt-mini autopilot-open">🤖 自动驾驶：关闭</button>
@@ -163,11 +204,15 @@
         </div>
       </div>
 
+      <div class="start-footer" aria-hidden="true">
+        <span><b>J</b> 油门 <b>K</b> 轻刹 <b>L</b> 重刹/倒车</span>
+        <span><b>← →</b> 转向 <b>B</b> 自动驾驶 <b>T</b> 切换赛道</span>
+        <span class="start-footer-brand">TOP DOWN GP · 2026</span>
+        <span class="start-footer-credits">Audio: engine loops by domasx2 (CC0) · F1 recordings by Edvvc (CC BY-SA 3.0) · tire squeal by audible-edge (CC BY 3.0)</span>
+      </div>
+
       <!-- 在线模式：服务器地址 → 大厅 → 房间 -->
       <div id="onlineWrap" class="hidden">
-        <div class="online-topbar">
-          <button id="onlineExitBtn" class="vt-mini online-exit-btn" title="退出在线模式：会自动离开房间并终止进行中的比赛">🏠 返回主菜单</button>
-        </div>
         <div id="onlineAddrStep">
           <p class="track-modal-desc">输入服务器地址连接（服务端位于 server/ 目录，npm start 启动）</p>
           <div class="online-addr-row">
@@ -186,8 +231,8 @@
             </span>
           </div>
           <div class="online-tabs">
-            <button class="online-tab active" data-tab="boards">🏆 排行榜</button>
-            <button class="online-tab" data-tab="rooms">🚪 房间</button>
+            <button class="online-tab active" data-tab="boards">排行榜 <small>LEADERBOARD</small></button>
+            <button class="online-tab" data-tab="rooms">房间 <small>ROOMS</small></button>
           </div>
           <div id="lobbyBody"></div>
         </div>

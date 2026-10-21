@@ -29,11 +29,40 @@ const NICK_KEY = "gp_nickname";
 
 function $(id) { return document.getElementById(id); }
 
-// 车型显示名（"红牛 #1"）：排行榜/房间列表都别直接怼内部 id（vector-pursuit 之类）
+// 历史榜单存的是涂装 id（redbull 等），统一映射到现在的车辆配置 id
+const CAR_ALIASES = {
+  ferrari: "apex-hunter",
+  redbull: "vector-pursuit",
+  aston: "classic-baseline",
+  mercedes: "mercedes-w15",
+  cyber: "AiMotor",
+  su7ultra: "smooth-cruiser",
+  yangwang: "yangwang-u9x",
+};
+
+function resolveCarId(carId) {
+  return CAR_ALIASES[carId] || carId;
+}
+
+function carConfig(carId) {
+  const id = resolveCarId(carId);
+  return AI_CONFIGS.find(c => c.id === id) || null;
+}
+
+// 车型显示名（"红牛 · RB20"）：排行榜/房间列表都别直接怼内部 id（vector-pursuit 之类）
 function carLabel(carId) {
   if (!carId) return "";
-  const cfg = AI_CONFIGS.find(c => c.id === carId);
-  return cfg ? cfg.shortName : String(carId);
+  const cfg = carConfig(carId);
+  return cfg ? `${cfg.team} · ${cfg.model}` : String(carId);
+}
+
+function carColor(carId) {
+  return carConfig(carId)?.color || "#7f8ea3";
+}
+
+function carNumber(carId) {
+  const n = carConfig(carId)?.number;
+  return n ? `#${n}` : "";
 }
 
 function trackLabel(trackId) {
@@ -74,15 +103,12 @@ export function initOnlineUI(callbacks = {}) {
     disconnectBtn: $("onlineDisconnectBtn"),
     lobbyBody: $("lobbyBody"),
     roomView: $("onlineRoom"),
-    exitBtn: $("onlineExitBtn"),
   });
   if (!el.wrap) return;
 
   el.addrInput.value = defaultServerAddr();
   el.nickInput.value = localStorage.getItem(NICK_KEY) || defaultNickname();
   el.connectBtn.addEventListener("click", connect);
-  // 返回主菜单：房间/比赛的退出由主流程统一处理（会先 room_leave / 认输）
-  el.exitBtn?.addEventListener("click", () => cb.onExit?.());
   el.addrInput.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
   el.nickInput.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
   el.disconnectBtn.addEventListener("click", () => {
@@ -344,20 +370,26 @@ function boardsHtml() {
   const head = `
       <div class="online-row online-head">
         <b class="ol-rank">#</b>
+        <span class="ol-color-spacer"></span>
         <span class="ol-name">车手</span>
-        <span class="ol-car">车型</span>
+        <span class="ol-car">车队 · 车型</span>
         <span class="ol-time">最快单圈</span>
         <span class="ol-src">来源</span>
       </div>`;
   const rows = entries.length
-    ? entries.map(r => `
-        <div class="online-row">
+    ? entries.map(r => {
+      const rankClass = r.rank <= 3 ? ` rank-${r.rank}` : "";
+      const num = carNumber(r.carId);
+      return `
+        <div class="online-row${rankClass}">
           <b class="ol-rank">${r.rank}</b>
+          <span class="ol-color" style="background:${carColor(r.carId)}"></span>
           <span class="ol-name">${escapeHtml(r.nickname)}</span>
-          <span class="ol-car">🏎 ${escapeHtml(carLabel(r.carId) || "未知车型")}</span>
+          <span class="ol-car">${escapeHtml(carLabel(r.carId) || "未知车型")}${num ? `<small class="ol-num">${num}</small>` : ""}</span>
           <span class="ol-time">${fmtMs(r.bestLapMs)}</span>
           <span class="ol-src">${r.source === "online_race" ? "对战" : "练习"}</span>
-        </div>`).join("")
+        </div>`;
+    }).join("")
     : `<div class="online-empty">该赛道还没有有效成绩，来做第一个刷榜的人！</div>`;
   return `
     <p class="track-modal-desc">各赛道最快单圈榜 · 前往"单人在线练习"刷圈即可上传成绩</p>
@@ -375,12 +407,13 @@ function roomsHtml() {
       const names = (r.players || []).map(p => p.nickname).filter(Boolean);
       const others = names.filter(n => n !== hostName);
       return `
-        <div class="online-row">
+        <div class="online-row${r.state === "racing" ? " is-racing" : ""}">
           <b class="ol-rank">👑</b>
+          <span class="ol-color" style="background:${carColor(host?.carId)}"></span>
           <span class="ol-name">${escapeHtml(hostName)}<small class="ol-sub">${r.id}</small></span>
           <span class="ol-car">${escapeHtml(trackLabel(r.trackId))} · ${r.playerCount}/${r.maxPlayers} 人${r.fillAI === false ? " · 纯玩家" : " · 含 AI"}</span>
           <span class="ol-sub ol-players">${escapeHtml(others.length ? "车内：" + others.join("、") : "车内只有房主")}</span>
-          <span class="ol-src">${r.state === "racing" ? "比赛中" : "等待中"}</span>
+          <span class="ol-src ${r.state === "racing" ? "live" : ""}">${r.state === "racing" ? "● 比赛中" : "等待中"}</span>
           <button class="vt-mini" data-join-room="${r.id}">加入</button>
         </div>`;
     }).join("")
@@ -467,12 +500,15 @@ function renderRoom() {
   const me = room.players.find(p => p.id === mySid);
   const players = room.players.map(p => {
     const isHostRow = p.id === room.hostId;
+    const isMe = p.id === mySid;
+    const num = p.carId ? carNumber(p.carId) : "";
     return `
-    <div class="online-row">
+    <div class="online-row room-player${isMe ? " is-me" : ""}">
       <b class="ol-rank">${isHostRow ? "👑" : "·"}</b>
-      <span class="ol-name">${escapeHtml(p.nickname || "车手")}${p.id === mySid ? " (你)" : ""}</span>
-      <span class="ol-car">${p.carId ? "🏎 " + escapeHtml(carLabel(p.carId)) : "未选车"}</span>
-      <span class="ol-src">${isHostRow ? "房主 · 免准备" : (p.ready ? "✅ 已就绪" : "⌛ 准备中")}</span>
+      <span class="ol-color" style="background:${p.carId ? carColor(p.carId) : "rgba(255,255,255,.14)"}"></span>
+      <span class="ol-name">${escapeHtml(p.nickname || "车手")}${isMe ? '<small class="ol-you">YOU</small>' : ""}</span>
+      <span class="ol-car">${p.carId ? escapeHtml(carLabel(p.carId)) + `<small class="ol-num">${num}</small>` : '<span class="ol-none">未选车</span>'}</span>
+      <span class="ol-src ${!isHostRow && p.ready ? "ready" : ""}">${isHostRow ? "房主 · HOST" : (p.ready ? "✔ READY" : "等待就绪")}</span>
     </div>`;
   }).join("");
 
@@ -480,7 +516,7 @@ function renderRoom() {
   const trackOpts = TRACKS.map(t =>
     `<option value="${t.id}" ${t.id === room.trackId ? "selected" : ""}>${t.flag} ${t.name}</option>`).join("");
   const carOpts = AI_CONFIGS.map(c =>
-    `<option value="${c.id}" ${c.id === myCarId ? "selected" : ""}>${c.shortName} (#${c.number})</option>`).join("");
+    `<option value="${c.id}" ${c.id === myCarId ? "selected" : ""}>${c.team} · ${c.model} (#${c.number})</option>`).join("");
   // 房主不需要准备就绪：只要自己选好车、其他玩家全部"选车 + 就绪"即可开赛
   const othersReady = room.players.filter(p => p.id !== room.hostId).every(p => p.carId && p.ready);
   const canStart = isHost && room.players.length > 0 && !!myCarId && othersReady;
@@ -505,7 +541,7 @@ function renderRoom() {
     <p class="track-modal-desc">
       房间 <b>${room.id}</b> · ${track ? track.flag + " " + track.name : room.trackId}
       · ${fieldText}
-      · 💥 QQ飞车式网络即时碰撞（0延迟阻挡、动量防穿模）
+      · 即时网络碰撞 · 0 延迟阻挡 · 动量防穿模
       · ${room.playerCount}/${room.maxPlayers} 人
     </p>
     <div class="online-list">${players}</div>

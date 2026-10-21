@@ -26,6 +26,12 @@ import { conn } from "./net/connection.js";
 import { initOnlineUI, showOnline as showOnlineUI, hideOnline as hideOnlineUI, leaveOnlineRoom } from "./net/onlineUI.js";
 import { getFingerprint } from "./net/fingerprint.js";
 import { startNetRace, stopNetRace, updateNetRace, bindNetRaceHandlers, netrace, forfeitNetRace, setNetAutopilot } from "./net/netrace.js";
+import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "./ui/labels.js";
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 
 // 规范 URL 路由处理（消除 ?ai=1 等老式 query hack，优先 hash 路由）
 let initHash = location.hash;
@@ -37,6 +43,9 @@ const SPECTATE = initHash === "#/spectate";
 
 const canvas = document.getElementById("cv");
 const offTrackWarnEl = document.getElementById("offTrackWarn");
+const fpsValueEl = document.getElementById("fpsValue");
+let fpsFrames = 0;
+let fpsWindowStart = 0;
 // alpha:false → 不透明画布，避免移动端内核（夸克/UC 等）逐帧透明合成的闪烁
 const ctx = canvas.getContext("2d", { alpha: false });
 let trackCanvas = buildTrackCanvas();
@@ -115,6 +124,7 @@ function setupCars() {
     const cfg = AI_CONFIGS.find(c => c.id === playerCarId) || AI_CONFIGS[0];
     const car = applyCarConfig(createCar(0), cfg);
     car.isPlayer = true;
+    car.isAI = false;
     initCarRaceState(car);
     cars.push(car);
     aiInputs.push(createAIInput());
@@ -128,7 +138,9 @@ function setupCars() {
 
   for (let i = 0; i < AI_CONFIGS.length; i++) {
     const car = applyCarConfig(createCar(carGrid[i]), AI_CONFIGS[i]);
-    car.isPlayer = (i === playerIndex);
+    // 观战模式没有“玩家车”：不要给 P1 误标 YOU
+    car.isPlayer = mode === "vs" && i === playerIndex;
+    car.isAI = !car.isPlayer;
     initCarRaceState(car);
     cars.push(car);
     aiInputs.push(createAIInput());
@@ -217,6 +229,9 @@ function resize() {
 window.addEventListener("resize", resize);
 
 let isModalOpen = false;
+// 在线退出确认：比赛不冻结，自车临时交给自动驾驶（取消后归还键盘）
+let onlineQuitConfirmOpen = false;
+let quitConfirmAutoTakeover = false;
 
 // 用真实弹窗状态重算冻结标记：避免某个弹窗还开着、比赛却已经放行的漏洞
 export function syncModalOpen() {
@@ -232,9 +247,16 @@ function updateTrackUI() {
   const pillFlag = document.getElementById("pillFlag");
   const pillName = document.getElementById("pillName");
   const pillLen = document.getElementById("pillLen");
+  const pillSession = document.getElementById("pillSession");
   if (pillFlag) pillFlag.textContent = currentTrack.flag;
   if (pillName) pillName.textContent = currentTrack.name;
   if (pillLen) pillLen.textContent = (currentTrack.length / 1000).toFixed(2) + "km";
+  if (pillSession) {
+    pillSession.textContent = mode === "onlinerace" ? "ONLINE"
+      : mode === "spectate" ? "AI GP"
+        : mode === "vs" ? "GRAND PRIX"
+          : mode === "solo" ? "TIME ATTACK" : "PRACTICE";
+  }
 
   const label = mode === "onlinerace" ? "在线对战 · "
     : mode === "spectate" ? "AI 锦标赛 · " : mode === "vs" ? "对战 AI · " : "俯视 F1 · ";
@@ -451,11 +473,7 @@ window.addEventListener("keydown", (e) => {
     }
     if (mode === "onlinerace") {
       e.preventDefault();
-      openConfirmModal(
-        "确认退出比赛",
-        "当前比赛正在进行中。多人对战中途退出将被判定为认输 (Surrender)。确认退出并返回在线大厅吗？",
-        quitOnlineRaceWithSurrender
-      );
+      openOnlineQuitConfirm();
       return;
     }
     if (started) {
@@ -509,7 +527,9 @@ function simulateRemainingToEnd(maxSimMs = 300000) {
 }
 
 function update(dt) {
-  if (!started || isModalOpen) return;
+  if (!started) return;
+  // 在线退出确认期间比赛照常推进，避免自己的车停在赛道上被撞/被超
+  if (isModalOpen && !onlineQuitConfirmOpen) return;
 
   // 比赛时钟与物理同源推进：倍速快进时圈速/总时也按模拟时间计算
   advanceSimClock(dt * 1000);
@@ -707,6 +727,7 @@ function selectMode(m) {
 // 返回主菜单（根步骤）。从在线流程返回时，先主动退出房间并终止进行中的在线比赛，
 // 否则服务端仍把你留在房间里，房主一开赛客户端会被直接拽进对局。
 function backToModeStep() {
+  if (onlineQuitConfirmOpen) closeConfirmModal();   // 归还临时自动驾驶
   leaveOnlineSession();
   mode = null;
   releaseFocusAutopilot(true);   // 离开对局：把"换视角临时接管"的自动驾驶还回去
@@ -805,9 +826,31 @@ function openConfirmModal(title, desc, onConfirm) {
   isModalOpen = true;
 }
 
+// 在线对战退出确认：不冻结比赛，先把自车交给自动驾驶。
+// 玩家取消则收回自动驾驶，确认则带着算法继续跑完退出前的最后一小段（服务端判负）。
+function openOnlineQuitConfirm() {
+  if (!isAutopilotOn()) {
+    quitConfirmAutoTakeover = true;
+    toggleAutopilot(true, { persist: false });
+  }
+  onlineQuitConfirmOpen = true;
+  openConfirmModal(
+    "确认退出比赛",
+    "比赛仍在继续，你的赛车已暂时交给自动驾驶。多人对战中途退出将被判定为认输 (Surrender)。确认退出并返回在线大厅吗？",
+    quitOnlineRaceWithSurrender
+  );
+}
+
 function closeConfirmModal() {
   const modal = document.getElementById("confirmModal");
   if (modal) modal.classList.remove("open");
+  if (onlineQuitConfirmOpen) {
+    onlineQuitConfirmOpen = false;
+    if (quitConfirmAutoTakeover) {
+      quitConfirmAutoTakeover = false;
+      toggleAutopilot(false, { persist: false });
+    }
+  }
   syncModalOpen();
 }
 
@@ -906,13 +949,7 @@ function initStartFlow() {
   // 在线模式退出/认输按钮
   const quitBtn = document.getElementById("quitOnlineBtn");
   if (quitBtn) {
-    quitBtn.addEventListener("click", () => {
-      openConfirmModal(
-        "确认退出比赛",
-        "当前比赛正在进行中。多人对战中途退出将被判定为认输 (Surrender)。确认退出并返回在线大厅吗？",
-        quitOnlineRaceWithSurrender
-      );
-    });
+    quitBtn.addEventListener("click", openOnlineQuitConfirm);
   }
 
   // 确认弹窗关闭与取消
@@ -1048,6 +1085,8 @@ function hideResults() {
 function showResults() {
   const modal = document.getElementById("resultsModal");
   if (!modal) return;
+  // 比赛已结束，退出确认失去意义：关掉弹窗并归还临时自动驾驶
+  if (onlineQuitConfirmOpen) closeConfirmModal();
   resultsShown = true;
   isModalOpen = true;   // 冻结比赛
 
@@ -1072,10 +1111,11 @@ function showResults() {
   if (title) {
     title.textContent = mode === "solo"
       ? "🏁 计时结束"
-      : `🏁 ${champ ? champ.shortName : ""} 夺得冠军`;
+      : `🏁 ${champ ? driverLabel(champ) : ""} 夺得冠军`;
   }
   if (desc) {
-    desc.textContent = `${trackName} · ${maxLaps} 圈 · 全部 ${cars.length} 台赛车完赛`;
+    const finishedCount = cars.filter(c => c.finished && !c.retired).length;
+    desc.textContent = `${trackName} · ${maxLaps} 圈 · ${finishedCount}/${cars.length} 台完赛`;
   }
   if (trackEl) trackEl.textContent = trackName;
 
@@ -1089,16 +1129,22 @@ function showResults() {
   const rowsHtml = order.map((item, rank) => {
     const c = item.car;
     const isPlayer = !!c.isPlayer;
+    const code = driverCode(c) || carNumberLabel(c);
+    const totalText = c.retired
+      ? `<span class="rr-out">退赛</span>`
+      : c.finished ? fmt(c.total) : `<span class="rr-out">未完赛</span>`;
     const gapText = rank === 0
       ? (mode === "solo" ? "—" : "WINNER")
-      : (c.finished && prevTotal != null ? "+" + fmt(c.total - prevTotal) : "—");
-    if (c.finished) prevTotal = c.total;
+      : c.retired ? "OUT"
+        : (c.finished && prevTotal != null ? "+" + fmt(c.total - prevTotal) : "—");
+    if (c.finished && !c.retired) prevTotal = c.total;
     return `
-      <div class="result-row ${rank === 0 ? "gold" : ""} ${isPlayer ? "player" : ""}">
+      <div class="result-row p${rank + 1} ${isPlayer ? "player" : ""}">
         <span class="rr-rank">${rank + 1}</span>
         <span class="rr-color" style="background:${c.color || "#ff4a5e"}"></span>
-        <span class="rr-name">${c.shortName}${isPlayer ? '<i class="rr-you">YOU</i>' : ""}<small>${c.driverName || ""}</small></span>
-        <span class="rr-total">${c.finished ? fmt(c.total) : "未完赛"}</span>
+        <span class="rr-name">${escapeHtml(driverLabel(c))}${code ? `<small class="rr-code">${escapeHtml(code)}</small>` : ""}${isPlayer ? '<i class="rr-you">YOU</i>' : ""}${c.isAI ? '<span class="rr-ai">AI</span>' : ""}</span>
+        <span class="rr-car">${escapeHtml(carModelLabel(c))}</span>
+        <span class="rr-total">${totalText}</span>
         <span class="rr-best ${c.best === overallBest ? "purple" : ""}">${fmt(c.best)}</span>
         <span class="rr-gap">${gapText}</span>
       </div>
@@ -1111,9 +1157,10 @@ function showResults() {
         <span class="rr-rank">#</span>
         <span class="rr-color"></span>
         <span class="rr-name">车手</span>
+        <span class="rr-car">车型</span>
         <span class="rr-total">总用时</span>
         <span class="rr-best">最快圈速</span>
-        <span class="rr-gap">距前车</span>
+        <span class="rr-gap">差距</span>
       </div>
       ${rowsHtml}
     `;
@@ -1244,9 +1291,22 @@ function initViewTools() {
   const resetBtn = document.getElementById("zoomReset");
   if (resetBtn) {
     resetBtn.addEventListener("click", () => {
-      if (!range) return;
-      range.value = "1";
-      applyZoom();
+      if (range) {
+        range.value = "1";
+        applyZoom();
+      }
+      // 滑杆归位之外，镜头也要立刻吸附回当前焦点车：
+      // 只改缩放系数时，若本来就接近 1× 会"看起来毫无反应"
+      const car = cars[focusIndex];
+      if (car) resetCamera(car);
+
+      resetBtn.textContent = "已复位";
+      resetBtn.classList.add("is-done");
+      clearTimeout(resetBtn._doneTimer);
+      resetBtn._doneTimer = setTimeout(() => {
+        resetBtn.textContent = "复位视图";
+        resetBtn.classList.remove("is-done");
+      }, 900);
     });
   }
 
@@ -1280,6 +1340,18 @@ function frame(ts) {
   let dt = (ts - prevTs) / 1000;
   prevTs = ts;
   if (dt > 0.05) dt = 0.05;
+
+  // 右下方帧率角标：每 500ms 统计一次，避免逐帧数字抖动
+  if (fpsValueEl) {
+    if (!fpsWindowStart) fpsWindowStart = ts;
+    fpsFrames++;
+    const fpsSpan = ts - fpsWindowStart;
+    if (fpsSpan >= 500) {
+      fpsValueEl.textContent = String(Math.round((fpsFrames * 1000) / fpsSpan));
+      fpsFrames = 0;
+      fpsWindowStart = ts;
+    }
+  }
 
   if (!started) return;   // 开局选择阶段（模式 / 赛车弹窗）不渲染比赛
 
@@ -1316,8 +1388,10 @@ function frame(ts) {
   const visualDt = mode === "onlinerace" ? dt : dt * speedMult;
   updateCamera(activeCar, visualDt);
   fx.updateEffects(visualDt);
-  // 弹窗（赛道选择 / 开局重选 / 结算大屏）打开时引擎声回落怠速
-  audio.updateAudio(activeCar, activeCtrl, dt, race.state === "racing" && !isModalOpen && !resultsShown);
+  // 弹窗（赛道选择 / 开局重选 / 结算大屏）打开时引擎声回落怠速；
+  // 在线退出确认是例外：自动驾驶仍在跑，引擎声继续
+  const raceAudible = race.state === "racing" && !resultsShown && (!isModalOpen || onlineQuitConfirmOpen);
+  audio.updateAudio(activeCar, activeCtrl, dt, raceAudible);
   tickMsg(performance.now());
   draw();
 

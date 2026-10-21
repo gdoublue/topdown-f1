@@ -1,134 +1,186 @@
-/* 结算大屏：名次表 / 操作按钮 */
-/* ================= 比赛结算大屏 ================= */
-.results-card {
-  width: min(720px, 94%);
-}
+/* 结算大屏：F1 最终成绩表 / 操作按钮 */
+.results-card { width: min(960px, 96%); }
 .results-track {
-  color: #94a3b8;
-  font-size: 12px;
+  color: #cbd5e1;
+  font-size: 11px;
   font-weight: 700;
   align-self: center;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
 }
 .results-table {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 18px;
+  gap: 3px;
+  margin: 6px 0 18px;
 }
 .result-row {
   display: grid;
-  grid-template-columns: 34px 16px minmax(140px, 1.4fr) 1fr 1fr 0.9fr;
+  grid-template-columns: 38px 4px minmax(120px, 1.3fr) minmax(120px, 1fr) 1fr 1fr .9fr;
   align-items: center;
   gap: 10px;
-  background: rgba(18, 28, 42, 0.65);
-  border: 1px solid rgba(160, 200, 255, 0.14);
-  border-radius: 8px;
-  padding: 9px 14px;
-  font-size: 13px;
-  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-left: 2px solid transparent;
+  border-radius: 2px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #dbe3ec;
 }
 .result-row.result-head {
   background: transparent;
   border: none;
-  padding: 2px 14px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  color: #64748b;
+  border-left: 2px solid transparent;
+  padding: 2px 12px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: var(--dim);
   text-transform: uppercase;
 }
-.result-row.gold {
-  border-color: rgba(255, 209, 102, 0.55);
-  background: rgba(255, 209, 102, 0.08);
-  box-shadow: 0 0 14px rgba(255, 209, 102, 0.15);
+.result-row.p1 {
+  border-left-color: var(--gold);
+  background: linear-gradient(90deg, rgba(255, 207, 74, 0.13), rgba(255, 255, 255, 0.02) 55%);
+}
+.result-row.p2 {
+  border-left-color: #cfd8e3;
+  background: linear-gradient(90deg, rgba(207, 216, 227, 0.09), rgba(255, 255, 255, 0.02) 55%);
+}
+.result-row.p3 {
+  border-left-color: #d9985a;
+  background: linear-gradient(90deg, rgba(217, 152, 90, 0.10), rgba(255, 255, 255, 0.02) 55%);
 }
 .result-row.player {
-  border-color: rgba(0, 255, 180, 0.45);
-  background: rgba(0, 255, 180, 0.06);
+  border-color: rgba(225, 6, 0, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(225, 6, 0, 0.12);
 }
 .rr-rank {
+  font-family: var(--font-num);
   font-weight: 900;
-  font-size: 15px;
-  color: #94a3b8;
+  font-size: 17px;
+  color: #8b98a8;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
-.result-row.gold .rr-rank { color: #ffd166; }
+.result-row.p1 .rr-rank { color: var(--gold); }
+.result-row.p2 .rr-rank { color: #d6dee8; }
+.result-row.p3 .rr-rank { color: #d9985a; }
 .rr-color {
-  width: 14px;
-  height: 22px;
-  border-radius: 4px;
+  width: 4px;
+  height: 24px;
+  border-radius: 1px;
 }
 .rr-name {
   font-weight: 800;
   color: #fff;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  white-space: nowrap;
-  overflow: hidden;
-}
-.rr-name small {
-  color: #64748b;
-  font-weight: 400;
-  font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.rr-code {
+  font-family: var(--font-num);
+  color: var(--dim);
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
 .rr-you {
   font-style: normal;
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 900;
-  color: #022c22;
-  background: #00ffb4;
-  border-radius: 3px;
+  color: #fff;
+  background: var(--f1-red);
+  border-radius: 2px;
   padding: 1px 4px;
   letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+.rr-ai {
+  font-size: 8px;
+  font-weight: 800;
+  color: #a9b6c6;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
+  padding: 1px 4px;
+  flex-shrink: 0;
+}
+.rr-car {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .rr-total, .rr-best, .rr-gap {
+  font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
   text-align: right;
   color: #cbd5e1;
 }
-.rr-best.purple { color: #c084fc; }
-.rr-gap { color: #94a3b8; font-size: 12px; }
+.rr-best.purple {
+  color: var(--purple);
+  font-weight: 800;
+  text-shadow: 0 0 8px rgba(192, 132, 252, 0.35);
+}
+.rr-gap { color: var(--muted); font-size: 11px; }
+.rr-out { color: #ff6b6b; font-weight: 800; }
 .results-actions {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   justify-content: center;
 }
 .results-btn {
   flex: 1;
   max-width: 240px;
-  padding: 12px 18px;
-  font-size: 14px;
+  padding: 11px 18px;
+  font-family: var(--font-ui);
+  font-size: 13px;
   font-weight: 800;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
   color: #e2e8f0;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 10px;
+  border-radius: 3px;
   cursor: pointer;
   transition: all 0.18s ease;
 }
 .results-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.11);
   transform: translateY(-1px);
 }
 .results-btn.primary {
-  color: #022c22;
-  background: #00ffb4;
-  border-color: #00ffb4;
+  color: #fff;
+  background: var(--f1-red);
+  border-color: var(--f1-red);
 }
 .results-btn.primary:hover {
-  background: #33ffbe;
-  box-shadow: 0 6px 20px rgba(0, 255, 180, 0.35);
+  background: var(--f1-red-hi);
+  box-shadow: 0 6px 20px rgba(225, 6, 0, 0.35);
 }
 .results-upload {
   text-align: center;
-  font-size: 12px;
+  font-size: 11px;
   min-height: 18px;
   margin: 0 0 10px;
-  color: #94a3b8;
+  color: var(--muted);
 }
 
+@media (max-width: 760px) {
+  .result-row {
+    grid-template-columns: 30px 3px minmax(90px, 1.3fr) minmax(90px, 1fr) 1fr 1fr;
+    gap: 7px;
+    padding: 7px 8px;
+    font-size: 11px;
+  }
+  .rr-gap { display: none; }
+  .result-row.result-head span:last-child { display: none; }
+  .results-actions { flex-direction: column; align-items: stretch; }
+  .results-btn { max-width: none; width: 100%; }
+}

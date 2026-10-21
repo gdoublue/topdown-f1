@@ -1,9 +1,8 @@
-/* HUD：小地图 / 视图工具 / 排位榜 / 遥测 / 调校面板 */
-/* ================= AI 模式专属面板（右上角排行榜 + 赛车遥测 G 值面板） ================= */
+/* HUD：F1 转播风计时塔 / 底部遥测 / 小地图工具 / 调校面板 */
 #standingsPanel, #carStatusPanel { display: none; }
 
 body.ai-mode #standingsPanel {
-  display: block;
+  display: flex;
   pointer-events: auto;
 }
 
@@ -17,167 +16,369 @@ body.ai-mode #speedo {
   display: none !important;
 }
 
-/* 1. 右上角排位榜 (宽度与小地图呼应，高度自适应车辆数，超出滚动) */
+/* ================= 右上角 F1 计时塔 ================= */
 #standingsPanel {
   right: 16px; top: 16px;
-  width: 290px;
+  width: 330px;
   max-height: calc(100% - 32px);
-  padding: 8px 10px;
+  padding: 0;
   z-index: 10;
+  flex-direction: column;
   overflow: hidden;
+  border-top-width: 3px;
+}
+#standingsPanel .panel-header {
+  margin: 0;
+  padding: 9px 12px 8px;
+  background:
+    linear-gradient(90deg, rgba(225, 6, 0, 0.24), rgba(225, 6, 0, 0) 65%),
+    rgba(255, 255, 255, 0.015);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: #f1f5f9;
+}
+#standingsPanel .panel-header small {
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: #c3cedb;
+  letter-spacing: 0.1em;
 }
 
 #standingsList {
-  display: flex; flex-direction: column; gap: 3px;
-  max-height: calc(100vh - 110px);
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px;
+  max-height: calc(100vh - 190px);
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(56, 189, 248, 0.4) transparent;
+  scrollbar-color: rgba(225, 6, 0, 0.45) transparent;
 }
 #standingsList::-webkit-scrollbar { width: 4px; }
 #standingsList::-webkit-scrollbar-thumb {
-  background: rgba(56, 189, 248, 0.35);
+  background: rgba(225, 6, 0, 0.42);
   border-radius: 2px;
 }
 #standingsList::-webkit-scrollbar-track { background: transparent; }
 
 .standing-row {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  grid-template-columns: 34px 3px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
+  padding: 6px 8px 6px 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.025);
   border: 1px solid transparent;
   cursor: pointer;
-  transition: all .14s ease;
+  transition: background .14s ease, border-color .14s ease, transform .14s ease;
   user-select: none;
   flex-shrink: 0;
 }
 .standing-row:hover {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.075);
+  border-color: rgba(255, 255, 255, 0.16);
   transform: translateX(-2px);
 }
 .standing-row.active {
-  background: rgba(56, 189, 248, 0.18);
-  border-color: rgba(56, 189, 248, 0.65);
-  box-shadow: 0 0 10px rgba(56, 189, 248, 0.3);
+  background: linear-gradient(90deg, rgba(53, 214, 255, 0.18), rgba(255, 255, 255, 0.02));
+  border-color: rgba(53, 214, 255, 0.5);
+  box-shadow: inset 2px 0 0 var(--cyan);
+}
+.standing-row.is-player {
+  background: linear-gradient(90deg, rgba(225, 6, 0, 0.20), rgba(255, 255, 255, 0.02));
+  border-color: rgba(225, 6, 0, 0.40);
+}
+.standing-row.is-player.active {
+  border-color: rgba(53, 214, 255, 0.65);
+  background: linear-gradient(90deg, rgba(225, 6, 0, 0.18), rgba(53, 214, 255, 0.13));
+}
+.standing-row.out { opacity: .48; }
+.standing-row.out .standing-name { text-decoration: line-through; }
+
+.standing-rank {
+  align-self: center;
+  font-family: var(--font-num);
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1;
+  text-align: center;
+  color: #dbe3ec;
+  letter-spacing: -0.03em;
+}
+.standing-row.pos-1 .standing-rank { color: var(--gold); }
+.standing-row.pos-2 .standing-rank { color: #d6dee8; }
+.standing-row.pos-3 .standing-rank { color: #d9985a; }
+.standing-row.active .standing-rank { color: var(--cyan); }
+
+.standing-color-bar {
+  width: 3px;
+  align-self: stretch;
+  min-height: 28px;
+  border-radius: 1px;
+  background: var(--team-color, #e10600);
 }
 
-.standing-left { display: flex; align-items: center; gap: 8px; }
-.standing-rank { font-size: 12px; font-weight: 800; min-width: 22px; color: #cbd5e1; }
-.standing-rank.gold { color: #ffd166; }
-.standing-color-bar { width: 4px; height: 16px; border-radius: 2px; }
-.standing-name { font-size: 11px; font-weight: 700; color: #f1f5f9; }
-.standing-cam-tag {
-  font-size: 8px; padding: 1px 4px; border-radius: 3px;
-  background: #38bdf8; color: #02131e; font-weight: 800; margin-left: 4px;
+.standing-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
 }
-.standing-right {
+.standing-top,
+.standing-bottom {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  font-family: monospace;
+  gap: 6px;
+  min-width: 0;
+}
+.standing-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.02em;
+}
+.standing-code {
+  font-family: var(--font-num);
+  font-size: 9px;
+  font-weight: 700;
+  color: #8d9bad;
+  letter-spacing: 0.12em;
+  flex-shrink: 0;
+}
+.standing-you-tag {
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: var(--f1-red);
+  color: #fff;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+.standing-cam-tag {
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: var(--cyan);
+  color: #04121a;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.standing-gap {
+  margin-left: auto;
+  font-family: var(--font-num);
+  font-size: 10px;
+  font-weight: 700;
+  color: #c6d0dc;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.standing-gap.leader { color: var(--gold); }
+.standing-car {
+  font-size: 9.5px;
+  font-weight: 600;
+  color: #8d9bad;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .standing-best {
+  margin-left: auto;
+  font-family: var(--font-num);
   font-size: 10px;
-  color: #94a3b8;
-  min-width: 48px;
-  text-align: right;
-  letter-spacing: -0.2px;
+  color: #c6d0dc;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 .standing-best.purple {
-  color: #c084fc;
+  color: var(--purple);
   font-weight: 800;
-  text-shadow: 0 0 6px rgba(192, 132, 252, 0.4);
+  text-shadow: 0 0 8px rgba(192, 132, 252, 0.45);
 }
-.standing-speed {
-  font-size: 11px;
-  font-weight: 700;
-  color: #38bdf8;
-  min-width: 58px;
-  text-align: right;
+
+.timing-legend {
+  display: flex;
+  gap: 14px;
+  padding: 5px 10px 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--dim);
+  font-size: 8px;
+  letter-spacing: 0.06em;
 }
-/* 当前车遥测条：底部居中横向布局，不再依赖排行榜高度 */
+.timing-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.timing-legend i { width: 6px; height: 6px; border-radius: 1px; display: inline-block; }
+.legend-purple { background: var(--purple); }
+.legend-cam { background: var(--cyan); }
+.legend-hint { margin-left: auto; color: #7f8c9b; }
+
+/* ================= 底部转播遥测条 ================= */
 #carStatusPanel {
   left: 50%;
   right: auto;
   top: auto;
-  bottom: 14px;
+  bottom: 16px;
   transform: translateX(-50%);
   width: auto;
-  max-width: 94%;
+  max-width: 95%;
   flex-direction: row;
-  align-items: center;
-  gap: 16px;
-  padding: 9px 18px;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
   white-space: nowrap;
-  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  overflow: visible;
+  border-top-width: 3px;
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.cs-pos {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 66px;
+  padding: 8px 12px;
+  background: linear-gradient(135deg, #e10600 0%, #8d0400 100%);
+  border-radius: 2px 0 0 2px;
+}
+.cs-pos small {
+  font-size: 8px;
+  letter-spacing: 0.18em;
+  color: rgba(255, 255, 255, 0.72);
+  font-weight: 800;
+}
+.cs-pos b {
+  font-family: var(--font-num);
+  font-size: 29px;
+  line-height: 1;
+  font-weight: 900;
+  color: #fff;
+  letter-spacing: -0.04em;
+}
+
+.car-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  min-width: 196px;
+}
+#carColorDot {
+  width: 4px;
+  height: 32px;
+  border-radius: 1px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.car-badge-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+#carBadgeName {
+  font-size: 14px;
+  font-weight: 900;
+  color: #fff;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+#carBadgeModel {
+  font-size: 9px;
+  color: #8d9bad;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+#camIndicator {
+  margin-left: auto;
+  font-size: 8px;
+  color: var(--cyan);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  border: 1px solid rgba(53, 214, 255, 0.4);
+  border-radius: 2px;
+  padding: 2px 5px;
+  flex-shrink: 0;
 }
 
 .cs-divider {
   width: 1px;
   align-self: stretch;
-  background: linear-gradient(180deg, transparent, rgba(160, 200, 240, 0.3), transparent);
+  margin: 8px 0;
+  background: rgba(255, 255, 255, 0.11);
 }
 
-.car-badge { display: flex; align-items: center; gap: 7px; }
-#carColorDot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; box-shadow: 0 0 8px currentColor; }
-#carBadgeName { font-size: 12px; font-weight: 800; color: #f8fafc; letter-spacing: .05em; }
-#camIndicator {
-  font-size: 9px; color: #38bdf8; font-weight: 700;
-  background: rgba(56, 189, 248, 0.15); padding: 2px 6px; border-radius: 4px;
-}
-
-.speed-box { display: flex; align-items: baseline; gap: 5px; min-width: 96px; }
+.speed-box { display: flex; align-items: baseline; gap: 5px; min-width: 106px; padding: 8px 16px; }
 .speed-box b {
-  font-size: 32px; font-weight: 800; color: #ffd166;
-  line-height: 1; font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 14px rgba(255, 200, 80, .3);
+  font-family: var(--font-num);
+  font-size: 34px;
+  font-weight: 900;
+  color: #fff;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 18px rgba(255, 255, 255, 0.18);
   min-width: 2.2ch; text-align: right;
+  letter-spacing: -0.04em;
 }
-.speed-box .unit { font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: .12em; }
+.speed-box .unit { font-size: 9px; color: #8d9bad; font-weight: 800; letter-spacing: .12em; }
 
 .g-box {
-  display: flex; flex-direction: column; align-items: center;
-  background: rgba(0, 0, 0, 0.35); padding: 5px 12px; border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.025);
+  padding: 7px 13px;
+  min-width: 92px;
 }
 .g-total { display: flex; align-items: baseline; gap: 3px; }
 .g-total b {
-  font-size: 21px; font-weight: 800; color: #38bdf8;
+  font-family: var(--font-num);
+  font-size: 21px; font-weight: 900; color: var(--cyan);
   line-height: 1; font-variant-numeric: tabular-nums;
 }
-.g-total b.g-mid { color: #facc15; }
-.g-total b.g-high { color: #ef4444; text-shadow: 0 0 10px rgba(239, 68, 68, 0.6); }
-.g-total .unit { font-size: 10px; color: #94a3b8; font-weight: 700; }
-.g-sub { display: flex; gap: 8px; font-size: 9px; color: #94a3b8; margin-top: 3px; }
-.g-sub b { color: #e2e8f0; font-variant-numeric: tabular-nums; }
+.g-total b.g-mid { color: var(--gold); }
+.g-total b.g-high { color: #ff5a50; text-shadow: 0 0 10px rgba(255, 90, 80, 0.55); }
+.g-total .unit { font-size: 9px; color: #8d9bad; font-weight: 800; }
+.g-sub { display: flex; gap: 8px; font-size: 8px; color: #8d9bad; margin-top: 3px; letter-spacing: .04em; }
+.g-sub b { color: #dbe3ec; font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 
-.status-stats { display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; min-width: 118px; }
+.status-stats {
+  display: flex; flex-direction: column; justify-content: center; gap: 1px;
+  font-size: 10px; min-width: 124px;
+  padding: 6px 14px;
+}
 .status-stats .row { display: flex; justify-content: space-between; gap: 12px; }
-.status-stats .row span { color: #7f97b0; }
-.status-stats .row b { color: #f2f7ff; font-weight: 700; font-variant-numeric: tabular-nums; }
-.status-stats .row b.hi { color: #ffd166; }
+.status-stats .row span { color: #7f8c9b; font-size: 9px; letter-spacing: .08em; }
+.status-stats .row b {
+  color: #f2f7ff; font-weight: 700;
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+}
+.status-stats .row b.hi { color: var(--purple); }
 
 /* 实时性能调校：TUNE 按钮 + 向上展开的调校面板 */
 .tune-btn {
-  background: rgba(0, 229, 255, 0.12);
-  border: 1px solid rgba(0, 229, 255, 0.45);
-  color: #7fe7ff;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-  border-radius: 6px;
-  padding: 4px 10px;
+  align-self: center;
+  margin: 0 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #cbd5e1;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  border-radius: 3px;
+  padding: 6px 9px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 .tune-btn:hover,
 .tune-btn.active {
-  background: rgba(0, 229, 255, 0.25);
+  background: var(--f1-red);
+  border-color: var(--f1-red);
   color: #fff;
-  box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
+  box-shadow: 0 0 12px rgba(225, 6, 0, 0.35);
 }
 
 .tune-panel {
@@ -188,9 +389,10 @@ body.ai-mode #speedo {
   transform: translateX(-50%);
   width: min(720px, 92vw);
   padding: 10px 14px 12px;
-  background: linear-gradient(180deg, rgba(14, 23, 36, 0.97), rgba(8, 13, 20, 0.95));
-  border: 1px solid rgba(56, 189, 248, 0.28);
-  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(13, 17, 24, 0.6), rgba(6, 8, 12, 0.6));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-top: 2px solid var(--f1-red);
+  border-radius: 5px;
   box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
@@ -203,11 +405,11 @@ body.ai-mode #speedo {
   justify-content: space-between;
   align-items: center;
   font-size: 11px;
-  color: #9fb4c9;
-  border-bottom: 1px solid rgba(160, 200, 240, 0.14);
-  padding-bottom: 6px;
+  color: #9fb0c2;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 7px;
 }
-.tune-head b { color: #e2e8f0; }
+.tune-head b { color: #fff; }
 
 .tune-grid {
   display: grid;
@@ -220,7 +422,7 @@ body.ai-mode #speedo {
   align-items: center;
   gap: 8px;
   font-size: 11px;
-  color: #9fb4c9;
+  color: #9fb0c2;
 }
 .tune-label {
   width: 72px;
@@ -229,28 +431,28 @@ body.ai-mode #speedo {
 .tune-row input[type="range"] {
   flex: 1;
   min-width: 60px;
-  accent-color: #00e5ff;
+  accent-color: var(--f1-red);
   cursor: pointer;
 }
 .tune-val {
   width: 78px;
   text-align: right;
-  color: #ffd166;
+  color: var(--gold);
   font-weight: 700;
+  font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
 }
 
 #help {
   left: 16px; bottom: 16px;
-  color: #9fb4c9;
-  font-size: clamp(9px, .92vw, 12px);
-  letter-spacing: .08em;
-  line-height: 1.75;
-  background: rgba(6,10,16,.62);
-  border: 1px solid rgba(140,180,220,.15);
-  border-radius: 8px;
-  padding: 6px 12px;
-  pointer-events: auto;   /* 父级 #hud 是 none，这里要能点开折叠 */
+  color: #9fb0c2;
+  font-size: clamp(9px, .86vw, 11px);
+  letter-spacing: .03em;
+  line-height: 1.7;
+  padding: 7px 12px;
+  pointer-events: auto;
+  z-index: 10;
+  max-width: 420px;
 }
 
 /* ================= 可折叠面板（视图工具 / 操作说明） ================= */
@@ -264,38 +466,70 @@ body.ai-mode #speedo {
 #help:not(.collapsed) .panel-header { margin-bottom: 6px; }
 #viewTools .panel-header small::after,
 #help .panel-header small::after {
-  content: " ▸";
-  color: #64748b;
+  content: " +";
+  color: #6a7787;
 }
 #viewTools:not(.collapsed) .panel-header small::after,
 #help:not(.collapsed) .panel-header small::after {
-  content: " ▾";
+  content: " −";
 }
 #viewTools.collapsed .vt-row,
 #help.collapsed #helpBody { display: none; }
 #helpBody { padding-top: 2px; }
-/* AI 模式下底部有居中遥测条，把操作说明抬到它上方，避免两个面板叠在一起 */
-body.ai-mode #help { bottom: 96px; }
+body.ai-mode #help { bottom: 104px; }
 
 #credits {
-  position: absolute; right: 14px; bottom: 10px;
-  color: rgba(160, 180, 200, .4);
-  font-size: clamp(7px, .68vw, 10px);
-  letter-spacing: .04em;
+  position: absolute; right: 14px; bottom: 34px;
+  color: rgba(160, 180, 200, .32);
+  font-size: clamp(7px, .64vw, 9px);
+  letter-spacing: .02em;
   text-shadow: 0 1px 2px rgba(0,0,0,.8);
+  max-width: 40vw;
+  text-align: right;
+}
+
+/* 右下角帧率：转播角标风格，数字固定宽度避免跳动 */
+#fpsCounter {
+  position: absolute;
+  right: 14px;
+  bottom: 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 7px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 3px;
+  background: rgba(5, 7, 11, 0.66);
+  font-family: var(--font-num);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: #7f8c9b;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  z-index: 11;
+}
+#fpsCounter b {
+  min-width: 2ch;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  color: #eef3f8;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 #msg {
-  position: absolute; left: 50%; top: 44%;
-  transform: translate(-50%, -50%) scale(.92);
+  position: absolute; left: 50%; top: 42%;
+  transform: translate(-50%, -50%) scale(.94);
   text-align: center;
   opacity: 0;
   transition: opacity .16s ease, transform .16s ease;
   font-size: clamp(38px, 8.4vw, 116px);
   font-weight: 900;
-  letter-spacing: .04em;
-  color: #ffe27a;
-  text-shadow: 0 4px 0 #8a3b00, 0 10px 28px rgba(0,0,0,.7);
+  font-style: italic;
+  letter-spacing: .02em;
+  color: #fff;
+  text-shadow: 0 3px 0 var(--f1-red), 0 12px 32px rgba(0,0,0,.8);
   white-space: nowrap;
 }
 #msg.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
@@ -303,22 +537,23 @@ body.ai-mode #help { bottom: 96px; }
   display: block;
   margin-top: 12px;
   font-size: clamp(11px, 1.3vw, 18px);
+  font-style: normal;
   letter-spacing: .22em;
   color: #d5e6fa;
   font-weight: 700;
   text-shadow: 0 2px 8px rgba(0,0,0,.8);
 }
 
-/* 冲出正常路线提示：压上草地时明确闪红，不依赖背景明暗 */
+/* 冲出正常路线提示 */
 .off-track-warn {
   position: absolute;
   left: 50%;
-  bottom: 96px;
+  bottom: 104px;
   transform: translateX(-50%);
   padding: 5px 18px 6px;
-  border-radius: 999px;
-  background: rgba(225, 6, 0, .9);
-  border: 1px solid rgba(255, 255, 255, .35);
+  border-radius: 2px;
+  background: rgba(225, 6, 0, .92);
+  border: 1px solid rgba(255, 255, 255, .3);
   color: #fff;
   font-size: clamp(10px, 1.05vw, 13px);
   font-weight: 900;
@@ -330,47 +565,74 @@ body.ai-mode #help { bottom: 96px; }
   pointer-events: none;
 }
 @keyframes offTrackPulse {
-  0%, 100% { opacity: .6; transform: translateX(-50%) scale(.98); }
+  0%, 100% { opacity: .62; transform: translateX(-50%) scale(.98); }
   50% { opacity: 1; transform: translateX(-50%) scale(1); }
 }
 
-/* ================= 排行榜玩家标识 ================= */
-.standing-row.is-player {
-  background: rgba(255, 209, 102, 0.12) !important;
-  border-color: rgba(255, 209, 102, 0.4) !important;
-}
-.standing-you-tag {
-  font-size: 8px;
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: #ffd166;
-  color: #0f172a;
-  font-weight: 800;
-  margin-left: 4px;
-  letter-spacing: 0.5px;
-}
-
-/* 自动驾驶开关：顶栏第三行（"重选模式 / 退出比赛"下方）。
-   父级 #hud 是 pointer-events:none，pointer-events:auto 由 .home-pill 提供。
-   选择器用 .panel.autopilot-pill（2 个类）压过 .home-pill（1 个类），
-   避免 menus.css 后加载把 top / 配色覆盖回去。 */
+/* 自动驾驶开关：顶栏第三行 */
 .panel.autopilot-pill {
   top: 100px;
-  color: #7dd3fc;
-  border-color: rgba(125, 211, 252, 0.35);
+  color: #cbd5e1;
+  border-color: rgba(255, 255, 255, 0.16);
+  border-top: 2px solid rgba(225, 6, 0, 0.82);
 }
 .panel.autopilot-pill:hover {
   color: #fff;
-  border-color: #7dd3fc;
-  background: rgba(125, 211, 252, 0.14);
+  border-color: rgba(255, 255, 255, 0.36);
+  background: rgba(255, 255, 255, 0.08);
 }
 .panel.autopilot-pill.on {
-  color: #4ade80;
-  border-color: rgba(74, 222, 128, 0.5);
-  background: rgba(74, 222, 128, 0.14);
+  color: #fff;
+  border-color: rgba(52, 211, 153, 0.55);
+  background: rgba(52, 211, 153, 0.16);
 }
 .panel.autopilot-pill.on:hover {
-  border-color: #4ade80;
-  background: rgba(74, 222, 128, 0.22);
+  border-color: var(--green);
+  background: rgba(52, 211, 153, 0.24);
 }
 
+@media (max-width: 1180px) {
+  #standingsPanel { width: 300px; }
+  #carStatusPanel .g-box { display: none; }
+  .g-box + .cs-divider { display: none; }
+}
+
+@media (max-width: 980px) {
+  #standingsPanel { width: 272px; }
+  .standing-row { grid-template-columns: 30px 3px minmax(0, 1fr); gap: 6px; }
+  .standing-name { font-size: 11px; }
+  .car-badge { min-width: 168px; padding: 8px 12px; }
+  #carBadgeName { font-size: 12px; }
+  .speed-box { min-width: 92px; padding: 8px 12px; }
+  .speed-box b { font-size: 28px; }
+  .status-stats { min-width: 110px; padding: 6px 10px; }
+}
+
+@media (max-width: 760px) {
+  #standingsPanel { right: 10px; top: 10px; width: 240px; }
+  #standingsList { max-height: calc(100vh - 220px); }
+  .standing-code, .timing-legend { display: none; }
+  /* 窄屏：顶部会话条让位给计时塔，控制胶囊移到小地图下方，避免遮住 P1/P2 */
+  .track-pill { display: none; }
+  #reopenStartBtn,
+  #quitOnlineBtn,
+  #autopilotPill { left: 10px; right: auto; transform: none; }
+  #reopenStartBtn,
+  #quitOnlineBtn { top: 180px; }
+  #autopilotPill { top: 216px; }
+  #carStatusPanel { bottom: 10px; max-width: calc(100% - 20px); }
+  .cs-pos { min-width: 54px; padding: 6px 8px; }
+  .cs-pos b { font-size: 23px; }
+  .car-badge { min-width: 0; padding: 6px 10px; }
+  #camIndicator, .status-stats, .status-stats + .cs-divider { display: none; }
+  .speed-box { min-width: 78px; padding: 6px 10px; }
+  .speed-box b { font-size: 24px; }
+  .tune-btn { margin: 0 8px; }
+  body.ai-mode #help { bottom: 86px; }
+}
+
+/* 转播遥测条占据底部时，音频署名让位到开局弹窗，避免文字叠在面板上 */
+body.ai-mode #credits { display: none; }
+
+/* AI 模式底部有遥测条：帧率角标上移，避免被面板压住 */
+body.ai-mode #fpsCounter { bottom: 88px; }

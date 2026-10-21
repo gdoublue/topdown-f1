@@ -4,6 +4,7 @@ function escapeHtml(s) {
 import { M, effectiveLaps } from "../config.js";
 import { N, currentTrack } from "../track/geometry.js";
 import { race, simClock } from "./race.js";
+import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "../ui/labels.js";
 
 const el = {};
 let msgTimer = 0;
@@ -15,8 +16,9 @@ export function initHud(aiMode = false, onSelectCar = null) {
   onSelectCarCallback = onSelectCar;
   const ids = [
     "lap", "time", "best", "last", "speed", "msg", "msgMain", "msgSub",
-    "standingsList", "carColorDot", "carBadgeName", "speedVal", "gVal",
-    "gLatVal", "gLonVal", "statusLap", "statusTime", "statusBest"
+    "standingsList", "standingsHint", "carColorDot", "carBadgeName", "carBadgeModel",
+    "speedVal", "gVal", "gLatVal", "gLonVal", "statusPos", "statusLap", "statusTime",
+    "statusBest", "statusLast", "soloDriver", "soloCar"
   ];
   for (const id of ids) {
     el[id] = document.getElementById(id);
@@ -99,13 +101,39 @@ export function updateHUD(car) {
   setText(el.time, fmt(t));
   setText(el.best, fmt(car.best || race.best));
   setText(el.last, fmt(car.last || race.last));
+  setText(el.soloDriver, driverLabel(car));
+  setText(el.soloCar, carModelLabel(car));
+}
+
+// F1 计时塔的差距列：同圈用实时距离估算，完赛车用总用时差，落后整圈直接标 LAP。
+function fmtGapSeconds(sec) {
+  if (!isFinite(sec) || sec < 0) return "—";
+  if (sec >= 60) {
+    return `+${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+  }
+  return `+${sec.toFixed(1)}s`;
+}
+
+function gapText(ahead, car, rank) {
+  if (car.retired) return "OUT";
+  if (rank === 0) return car.finished ? "WINNER" : "LEADER";
+  if (car.finished && ahead.finished) {
+    return `+${fmt(Math.max(0, (car.total || 0) - (ahead.total || 0)))}`;
+  }
+  if (car.finished || ahead.finished) return "—";
+  const dist = (ahead.raceDist ?? 0) - (car.raceDist ?? 0);
+  if (!isFinite(dist) || dist <= 0.5) return "—";
+  const lapLen = currentTrack?.length || 5000;
+  if (dist >= lapLen) return `+${Math.floor(dist / lapLen)} LAP`;
+  const speed = Math.max(12, (Math.abs(ahead.speed || 0) + Math.abs(car.speed || 0)) / 2);
+  return fmtGapSeconds(dist / speed);
 }
 
 // 稳定 DOM：只在数量不匹配或结构过期时初始化，避免每帧 innerHTML 导致点击事件断触
 function ensureStandingRows(count) {
   if (!el.standingsList) return [];
   let rows = Array.from(el.standingsList.children);
-  const needsRebuild = rows.length !== count || rows.some(r => !r.querySelector(".standing-speed"));
+  const needsRebuild = rows.length !== count || rows.some(r => !r.querySelector(".standing-main"));
   if (needsRebuild) {
     el.standingsList.innerHTML = "";
     rows = [];
@@ -113,15 +141,20 @@ function ensureStandingRows(count) {
       const row = document.createElement("div");
       row.className = "standing-row";
       row.innerHTML = `
-        <div class="standing-left">
-          <span class="standing-rank">P1</span>
-          <span class="standing-color-bar"></span>
-          <span class="standing-name">CAR</span>
-          <span class="standing-cam-tag" style="display:none">CAM</span>
-        </div>
-        <div class="standing-right">
-          <span class="standing-best">--:--.--</span>
-          <span class="standing-speed">0 KM/H</span>
+        <span class="standing-rank">P1</span>
+        <span class="standing-color-bar"></span>
+        <div class="standing-main">
+          <div class="standing-top">
+            <span class="standing-name">DRIVER</span>
+            <span class="standing-code"></span>
+            <span class="standing-you-tag">YOU</span>
+            <span class="standing-cam-tag">● CAM</span>
+            <span class="standing-gap">—</span>
+          </div>
+          <div class="standing-bottom">
+            <span class="standing-car">CAR</span>
+            <span class="standing-best">--:--.--</span>
+          </div>
         </div>
       `;
       el.standingsList.appendChild(row);
@@ -131,16 +164,30 @@ function ensureStandingRows(count) {
   return rows;
 }
 
-// AI 模式多车排行榜与选中赛车遥测更新
+// AI 模式多车计时塔与选中赛车遥测更新
 export function updateAIHUD(cars, focusIndex, onSelectCar) {
   if (!isAI || !cars || cars.length === 0) return;
   if (onSelectCar) onSelectCarCallback = onSelectCar;
 
   const activeCar = cars[focusIndex] || cars[0];
 
+  // 按赛道连续里程排序（完赛按总用时，未完赛按里程）
+  const getScore = (c) => {
+    if (c.finished) return 10000000 - (c.total || 0);
+    return c.raceDist != null ? c.raceDist : -9999;
+  };
+  const sorted = [...cars].map((car, originalIdx) => ({ car, originalIdx })).sort((a, b) => {
+    const diff = getScore(b.car) - getScore(a.car);
+    if (Math.abs(diff) > 0.001) return diff;
+    return a.originalIdx - b.originalIdx;
+  });
+  const focusRank = sorted.findIndex(x => x.originalIdx === focusIndex);
+
   // 1. 更新当前赛车遥测状态与 G 值
-  setText(el.carBadgeName, activeCar.name || "CAR");
+  setText(el.carBadgeName, driverLabel(activeCar));
+  setText(el.carBadgeModel, carModelLabel(activeCar));
   if (el.carColorDot) el.carColorDot.style.backgroundColor = activeCar.color || "#ff3b3b";
+  setText(el.statusPos, focusRank >= 0 ? `P${focusRank + 1}` : "P—");
   setText(el.speedVal, String(Math.round(Math.abs(activeCar.speed) * 3.6)));
 
   const gTotal = activeCar.gTotal || 0;
@@ -159,26 +206,22 @@ export function updateAIHUD(cars, focusIndex, onSelectCar) {
   else if (activeCar.finished) t = activeCar.total;
   setText(el.statusTime, fmt(t));
   setText(el.statusBest, fmt(activeCar.best));
+  setText(el.statusLast, fmt(activeCar.last));
 
-  // 2. 更新右上角排位排行榜
+  // 2. 更新右上角 F1 计时塔
   if (!el.standingsList) return;
+
+  const leader = sorted[0]?.car;
+  if (leader && el.standingsHint) {
+    const lapNo = Math.min(leader.lap || 1, maxLaps);
+    setText(el.standingsHint, `LAP ${lapNo}/${maxLaps}`);
+  }
 
   // 找出全场最快圈速（紫色高亮显示）
   let overallBest = Infinity;
   for (const c of cars) {
     if (c.best && c.best < overallBest) overallBest = c.best;
   }
-
-  // 根据赛道连续物理米数里程实时排序 (完赛赛车按总成绩用时排在最前；起跑格按负里程严格区分 P1~P4)
-  const getScore = (c) => {
-    if (c.finished) return 10000000 - (c.total || 0);
-    return c.raceDist != null ? c.raceDist : -9999;
-  };
-  const sorted = [...cars].map((car, originalIdx) => ({ car, originalIdx })).sort((a, b) => {
-    const diff = getScore(b.car) - getScore(a.car);
-    if (Math.abs(diff) > 0.001) return diff;
-    return a.originalIdx - b.originalIdx;
-  });
 
   const rows = ensureStandingRows(sorted.length);
   for (let rank = 0; rank < sorted.length; rank++) {
@@ -188,58 +231,56 @@ export function updateAIHUD(cars, focusIndex, onSelectCar) {
     const row = rows[rank];
 
     row.setAttribute("data-idx", String(item.originalIdx));
-    if (isFocus) {
-      if (!row.classList.contains("active")) row.classList.add("active");
-    } else {
-      if (row.classList.contains("active")) row.classList.remove("active");
-    }
+    row.classList.toggle("active", isFocus);
+    row.classList.toggle("is-player", !!c.isPlayer);
+    row.classList.toggle("out", !!c.retired);
+    row.classList.toggle("pos-1", rank === 0);
+    row.classList.toggle("pos-2", rank === 1);
+    row.classList.toggle("pos-3", rank === 2);
+    row.style.setProperty("--team-color", c.color || "#e10600");
 
     const rankEl = row.querySelector(".standing-rank");
-    if (rankEl) {
-      rankEl.textContent = `P${rank + 1}`;
-      if (rank === 0) rankEl.classList.add("gold");
-      else rankEl.classList.remove("gold");
-    }
+    if (rankEl) rankEl.textContent = `P${rank + 1}`;
 
     const barEl = row.querySelector(".standing-color-bar");
     if (barEl) barEl.style.backgroundColor = c.color || "#ff4a5e";
 
-    const isPlayer = !!c.isPlayer;
-    if (isPlayer) {
-      if (!row.classList.contains("is-player")) row.classList.add("is-player");
-    } else {
-      if (row.classList.contains("is-player")) row.classList.remove("is-player");
-    }
-
+    const name = driverLabel(c);
     const nameEl = row.querySelector(".standing-name");
     if (nameEl) {
-      const displayName = c.nickname || c.driverName || c.name || c.shortName;
-      const numPrefix = c.number ? `#${c.number} ` : "";
-      nameEl.innerHTML = `${numPrefix}${escapeHtml(displayName)}${isPlayer ? ' <span class="standing-you-tag">YOU</span>' : ""}`;
-      nameEl.title = `${displayName} (${c.shortName || ""})`;
+      nameEl.textContent = name;
+      nameEl.title = `${name} · ${carModelLabel(c)}`;
     }
+
+    const codeEl = row.querySelector(".standing-code");
+    if (codeEl) {
+      codeEl.textContent = c.retired ? "OUT" : (driverCode(c) || carNumberLabel(c));
+    }
+
+    const youEl = row.querySelector(".standing-you-tag");
+    if (youEl) youEl.style.display = c.isPlayer ? "inline-block" : "none";
 
     const camEl = row.querySelector(".standing-cam-tag");
     if (camEl) camEl.style.display = isFocus ? "inline-block" : "none";
+
+    const carEl = row.querySelector(".standing-car");
+    if (carEl) carEl.textContent = carModelLabel(c);
+
+    const gapEl = row.querySelector(".standing-gap");
+    if (gapEl) {
+      gapEl.textContent = gapText(sorted[rank - 1]?.car, c, rank);
+      gapEl.classList.toggle("leader", rank === 0);
+    }
 
     const bestEl = row.querySelector(".standing-best");
     if (bestEl) {
       if (c.best) {
         bestEl.textContent = fmt(c.best);
-        if (c.best === overallBest) {
-          bestEl.classList.add("purple");
-        } else {
-          bestEl.classList.remove("purple");
-        }
+        bestEl.classList.toggle("purple", c.best === overallBest);
       } else {
         bestEl.textContent = "--:--.--";
         bestEl.classList.remove("purple");
       }
-    }
-
-    const speedEl = row.querySelector(".standing-speed");
-    if (speedEl) {
-      speedEl.textContent = `${Math.round(Math.abs(c.speed) * 3.6)} KM/H`;
     }
   }
 }

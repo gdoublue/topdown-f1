@@ -1,44 +1,76 @@
-/* 菜单：赛道切换胶囊 / 赛道弹窗 / 开局流程弹窗 / 弹窗底部操作栏 */
-/* ================= 赛道切换胶囊与选择弹窗 ================= */
+/* 菜单：转播会话条 / 赛道与赛车选择 / 开局流程 / 弹窗操作栏 */
+/* ================= 顶部赛道会话条 ================= */
 .track-pill {
   left: 50%;
   transform: translateX(-50%);
-  top: 16px;
+  top: 14px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 14px;
+  padding: 0 12px 0 0;
   pointer-events: auto;
   cursor: pointer;
-  background: linear-gradient(180deg, rgba(20, 30, 45, 0.95), rgba(10, 16, 24, 0.9));
-  border: 1px solid rgba(0, 229, 255, 0.35);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6), 0 0 12px rgba(0, 229, 255, 0.15);
-  transition: all 0.2s ease;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(18, 23, 31, 0.97), rgba(8, 11, 16, 0.94));
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--f1-red);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+  transition: border-color .18s ease, box-shadow .18s ease;
   z-index: 20;
 }
 .track-pill:hover {
-  border-color: #00e5ff;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.7), 0 0 18px rgba(0, 229, 255, 0.35);
-  transform: translateX(-50%) translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.32);
+  border-top-color: var(--f1-red-hi);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65), 0 0 18px rgba(225, 6, 0, 0.16);
 }
-.track-pill .track-flag { font-size: 16px; line-height: 1; }
-.track-pill .track-name { color: #f8fafc; font-size: 13px; font-weight: 700; letter-spacing: 0.04em; }
-.track-pill .track-len { color: #94a3b8; font-size: 11px; font-variant-numeric: tabular-nums; }
+.track-f1 {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  background: var(--f1-red);
+  color: #fff;
+  font-family: var(--font-num);
+  font-size: 13px;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: -0.04em;
+}
+.track-pill .track-flag { font-size: 15px; line-height: 1; }
+.track-pill .track-name { color: #f8fafc; font-size: 12px; font-weight: 800; letter-spacing: 0.02em; }
+.track-pill .track-len {
+  color: var(--muted);
+  font-size: 10px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+.track-session {
+  color: #fff;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+}
 .track-pill .track-switch-btn {
-  color: #00e5ff;
-  font-size: 11px;
-  font-weight: 700;
-  padding-left: 6px;
-  border-left: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
 }
 
-/* 赛道选择全屏遮罩弹窗 */
+/* ================= 全屏弹窗 ================= */
 .track-modal-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(4, 7, 12, 0.88);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(225, 6, 0, 0.08), transparent 55%),
+    rgba(3, 5, 8, 0.90);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -48,98 +80,123 @@
   transition: opacity 0.22s ease;
   padding: 20px;
 }
+.track-modal-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(135deg, rgba(255,255,255,.022) 0 1px, transparent 1px 14px);
+  pointer-events: none;
+}
 .track-modal-overlay.open {
   opacity: 1;
   pointer-events: auto;
 }
 
 .track-modal-card {
-  width: min(880px, 94%);
+  position: relative;
+  width: min(980px, 94%);
   max-height: 90%;
   overflow-y: auto;
-  background: linear-gradient(180deg, #101824 0%, #090e17 100%);
-  border: 1px solid rgba(160, 200, 250, 0.25);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.85), 0 0 30px rgba(0, 229, 255, 0.12);
-  border-radius: 14px;
-  padding: 22px 26px;
+  background:
+    linear-gradient(180deg, rgba(16, 21, 29, 0.99) 0%, rgba(7, 10, 15, 0.99) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-top: 3px solid var(--f1-red);
+  border-radius: 5px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  padding: 0 26px 22px;
+  transform: translateY(8px) scale(.992);
+  transition: transform .22s cubic-bezier(.2,.8,.3,1);
 }
+.track-modal-overlay.open .track-modal-card { transform: none; }
+.track-modal-card::-webkit-scrollbar { width: 6px; }
+.track-modal-card::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 3px; }
 
 .track-modal-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 18px 0 13px;
 }
+.modal-title-wrap { min-width: 0; }
 .f1-badge {
   display: inline-block;
-  background: #e10600;
+  background: var(--f1-red);
   color: #fff;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 900;
-  letter-spacing: 0.15em;
-  padding: 2px 7px;
-  border-radius: 3px;
-  margin-bottom: 6px;
+  letter-spacing: 0.18em;
+  padding: 3px 7px;
+  border-radius: 2px;
+  margin-bottom: 7px;
 }
 .modal-title {
   margin: 0;
-  font-size: clamp(16px, 1.8vw, 22px);
-  font-weight: 800;
-  color: #f8fafc;
-  letter-spacing: 0.05em;
+  font-size: clamp(19px, 2vw, 25px);
+  font-weight: 900;
+  color: #fff;
+  letter-spacing: 0.01em;
+  line-height: 1.15;
 }
 .track-modal-desc {
-  color: #94a3b8;
+  color: var(--muted);
   font-size: 12px;
-  margin: 10px 0 18px;
+  line-height: 1.65;
+  margin: 11px 0 16px;
 }
 .track-close-btn {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: #cbd5e1;
-  font-size: 16px;
+  font-size: 15px;
   cursor: pointer;
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: 3px;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: all 0.15s ease;
+  flex-shrink: 0;
 }
 .track-close-btn:hover {
-  background: rgba(225, 6, 0, 0.25);
-  border-color: #e10600;
+  background: var(--f1-red);
+  border-color: var(--f1-red);
   color: #fff;
 }
 
+/* ================= 通用卡片 ================= */
 .track-cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 14px;
+  gap: 12px;
 }
 
 .track-card {
-  background: rgba(18, 28, 42, 0.65);
-  border: 1px solid rgba(160, 200, 255, 0.14);
-  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.012) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
   padding: 14px 16px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease;
   position: relative;
   overflow: hidden;
+  outline: none;
 }
 .track-card:hover {
-  background: rgba(24, 38, 58, 0.9);
-  border-color: #00e5ff;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.075) 0%, rgba(255, 255, 255, 0.025) 100%);
+  border-color: rgba(255, 255, 255, 0.34);
   transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 15px rgba(0, 229, 255, 0.2);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+.track-card:focus-visible {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 2px rgba(53, 214, 255, 0.35);
 }
 .track-card.active {
-  border-color: #00ffb4;
-  background: rgba(0, 255, 180, 0.08);
-  box-shadow: 0 0 16px rgba(0, 255, 180, 0.25);
+  border-color: var(--f1-red);
+  background: linear-gradient(180deg, rgba(225, 6, 0, 0.14) 0%, rgba(255, 255, 255, 0.02) 100%);
+  box-shadow: 0 0 24px rgba(225, 6, 0, 0.2), inset 0 0 0 1px rgba(225, 6, 0, 0.25);
 }
 .track-card-top {
   display: flex;
@@ -149,51 +206,65 @@
 }
 .track-card-flag { font-size: 20px; }
 .track-card-len {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  color: #38bdf8;
-  background: rgba(56, 189, 248, 0.1);
+  font-family: var(--font-num);
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: 2px;
 }
 .track-card-title {
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 900;
   color: #fff;
   margin-bottom: 3px;
 }
 .track-card-en {
-  font-size: 11px;
-  color: #64748b;
+  font-size: 10px;
+  color: var(--dim);
   margin-bottom: 8px;
 }
 .track-card-tag {
-  font-size: 10px;
-  font-weight: 700;
-  color: #ffd166;
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--gold);
   margin-bottom: 6px;
   display: inline-block;
+  letter-spacing: 0.03em;
 }
 .track-card-desc {
   font-size: 11px;
-  color: #94a3b8;
-  line-height: 1.4;
+  color: var(--muted);
+  line-height: 1.55;
   margin: 0;
+}
+.track-index {
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  font-family: var(--font-num);
+  font-size: 46px;
+  font-weight: 900;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.045);
+  pointer-events: none;
 }
 .active-badge {
   position: absolute;
-  right: -24px;
-  top: 8px;
-  background: #00ffb4;
-  color: #022c22;
-  font-size: 9px;
+  right: -28px;
+  top: 10px;
+  background: var(--f1-red);
+  color: #fff;
+  font-size: 8px;
   font-weight: 900;
-  padding: 2px 26px;
+  padding: 3px 28px;
   transform: rotate(45deg);
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
 }
 
-/* 赛道弹窗底部操作栏：点卡片只选不跑，必须手动点"开始比赛" */
+/* ================= 赛道弹窗底部操作栏 ================= */
 .track-modal-footer {
   position: sticky;
   bottom: -22px;
@@ -204,22 +275,22 @@
   justify-content: space-between;
   gap: 14px;
   flex-wrap: wrap;
-  background: linear-gradient(180deg, rgba(9, 14, 23, 0.72) 0%, rgba(9, 14, 23, 0.98) 45%);
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(7, 10, 15, 0.72) 0%, rgba(7, 10, 15, 0.99) 45%);
+  border-top: 1px solid var(--line);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 }
 .track-start-summary {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--muted);
   line-height: 1.55;
   min-width: 0;
 }
-.track-start-summary b { color: #f8fafc; font-weight: 800; }
+.track-start-summary b { color: #fff; font-weight: 800; }
 .track-start-summary em {
   font-style: normal;
-  color: #00ffb4;
-  font-weight: 800;
+  color: var(--f1-red-hi);
+  font-weight: 900;
 }
 .results-btn.track-start-btn {
   flex: 0 0 auto;
@@ -231,73 +302,352 @@
 }
 .results-btn.track-start-btn:active { transform: translateY(1px); }
 
-/* ================= 开局流程弹窗（玩法模式 → 赛车选择） ================= */
-.start-modal-card {
-  width: min(920px, 94%);
-}
+/* ================= 开局流程：模式卡 ================= */
+.start-modal-card { width: min(1000px, 95%); }
+.start-back-btn { font-size: 14px !important; }
 
 .mode-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 .mode-card {
-  padding: 18px;
+  --mode-accent: var(--f1-red);
+  min-height: 232px;
+  padding: 18px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mode-card[data-mode="solo"] { --mode-accent: var(--cyan); }
+.mode-card[data-mode="vs"] { --mode-accent: var(--f1-red-hi); }
+.mode-card[data-mode="online"] { --mode-accent: var(--gold); }
+.mode-card::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0;
+  width: 100%; height: 3px;
+  background: var(--mode-accent);
+  opacity: .75;
+}
+.mode-card::after {
+  content: "";
+  position: absolute;
+  right: -40px; top: -40px;
+  width: 150px; height: 150px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--mode-accent) 22%, transparent), transparent 70%);
+  pointer-events: none;
+}
+.mode-card:hover { border-color: color-mix(in srgb, var(--mode-accent) 55%, transparent); }
+.mode-index {
+  position: absolute;
+  right: 12px;
+  top: 8px;
+  font-family: var(--font-num);
+  font-size: 40px;
+  font-weight: 900;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.055);
+  pointer-events: none;
 }
 .mode-icon {
-  font-size: 26px;
-  line-height: 1;
+  width: 46px; height: 46px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 25px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  margin-bottom: 15px;
+}
+.mode-title {
+  font-size: 23px;
+  font-weight: 900;
+  color: #fff;
+  line-height: 1.1;
+  margin-bottom: 2px;
+}
+.mode-en {
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  color: var(--mode-accent);
+  margin-bottom: 11px;
+}
+.mode-desc {
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+.mode-foot {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 11px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.mode-foot .track-card-tag { margin: 0; color: #b8c2ce; font-weight: 700; }
+.mode-cta {
+  color: #fff;
+  font-size: 10px;
+  font-weight: 900;
+  opacity: .55;
+  transform: translateX(-4px);
+  transition: all .18s ease;
+  white-space: nowrap;
+}
+.mode-card:hover .mode-cta {
+  opacity: 1;
+  transform: none;
+  color: var(--mode-accent);
+}
+
+/* ================= 开局流程：赛车卡 ================= */
+.car-grid-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin: 2px 0 10px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: #b8c2ce;
+}
+.car-grid-head span { display: inline-flex; align-items: center; gap: 6px; }
+.car-grid-head span::before {
+  content: "";
+  width: 3px; height: 9px;
+  background: var(--f1-red);
+}
+.car-grid-head small { color: var(--dim); font-weight: 600; letter-spacing: .04em; }
+
+#carCardsGrid {
+  margin-top: 2px;
+  grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
+  gap: 10px;
+}
+.car-card {
+  position: relative;
+  min-height: 242px;
+  padding: 14px 15px 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.012) 70%);
+  border-color: color-mix(in srgb, var(--team-color) 32%, rgba(255,255,255,.1));
+}
+.car-card::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0;
+  width: 100%; height: 3px;
+  background: var(--team-color);
+}
+.car-card::after {
+  content: "";
+  position: absolute;
+  right: -35px; top: -35px;
+  width: 130px; height: 130px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--team-color) 26%, transparent), transparent 70%);
+  pointer-events: none;
+}
+.car-card:hover {
+  border-color: var(--team-color);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 18px color-mix(in srgb, var(--team-color) 28%, transparent);
+}
+.car-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 10px;
+  position: relative;
+  z-index: 1;
+}
+.car-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 2px;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--team-color) 55%, transparent);
+  flex-shrink: 0;
+}
+.car-team {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #cbd5e1;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.car-index {
+  margin-left: auto;
+  font-family: var(--font-num);
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.12);
+}
+.car-model {
+  position: relative;
+  z-index: 1;
+  font-family: var(--font-num);
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1;
+  color: #fff;
+  letter-spacing: -0.02em;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.car-driver {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--team-color);
+  margin-bottom: 13px;
+}
+.car-driver small {
+  font-family: var(--font-num);
+  font-size: 9px;
+  color: var(--dim);
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.car-specs {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.car-spec {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 9px;
+}
+.car-spec > span { color: var(--dim); letter-spacing: .06em; }
+.car-spec b {
+  justify-self: end;
+  font-family: var(--font-num);
+  font-weight: 700;
+  color: #dbe3ec;
+  font-size: 10px;
+}
+.car-spec i {
+  grid-column: 1 / -1;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.car-spec em {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--team-color), color-mix(in srgb, var(--team-color) 35%, #fff));
+}
+.car-cta {
+  position: relative;
+  z-index: 1;
+  margin-top: auto;
+  padding: 10px 0 11px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+}
+.car-cta span { font-size: 13px; transition: transform .18s ease; }
+.car-card:hover .car-cta { color: #fff; }
+.car-card:hover .car-cta span { transform: translateX(4px); }
+
+/* ================= 开局弹窗底栏 ================= */
+.start-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: .03em;
+}
+.start-footer b { color: #cbd5e1; font-family: var(--font-num); }
+.start-footer-credits {
+  flex-basis: 100%;
+  color: rgba(148, 163, 184, 0.55);
+  font-size: 8px;
+  letter-spacing: .01em;
+  line-height: 1.4;
+}
+.start-footer-brand {
+  margin-left: auto;
+  color: var(--f1-red-hi);
+  font-weight: 900;
+  letter-spacing: .14em;
+  font-size: 9px;
 }
 
-#carSelectWrap.hidden {
-  display: none !important;
-}
-.hidden {
-  display: none !important;
-}
-.start-back-btn {
-  font-size: 14px !important;
-}
+#carSelectWrap.hidden { display: none !important; }
+.hidden { display: none !important; }
 
-/* 比赛中"重选模式/赛车"胶囊按钮（赛道切换胶囊正下方）
-   pointer-events:auto 必须显式声明：父级 #hud 是 pointer-events:none，
-   否则这个按钮永远收不到点击（之前"点了没反应"就是这个原因） */
+/* 比赛中"重选模式/赛车"胶囊（赛道会话条下方） */
 .home-pill {
   left: 50%;
   transform: translateX(-50%);
-  top: 58px;
+  top: 60px;
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #ffd166;
-  font-size: 12px;
-  font-weight: 700;
+  color: #dbe3ec;
+  font-size: 11px;
+  font-weight: 800;
   cursor: pointer;
   pointer-events: auto;
-  border: 1px solid rgba(255, 209, 102, 0.35);
-  background: rgba(18, 28, 42, 0.78);
+  border: 1px solid var(--line);
+  border-top: 2px solid rgba(225, 6, 0, 0.82);
+  border-radius: 3px;
+  background: rgba(10, 14, 20, 0.82);
+  padding: 5px 12px;
   transition: all 0.15s ease;
   z-index: 21;
 }
 .home-pill:hover {
   color: #fff;
-  border-color: #ffd166;
-  background: rgba(255, 209, 102, 0.12);
+  border-color: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.08);
 }
 
-/* 赛道卡片缩略图（菜单选图时一眼看清赛道形状） */
+/* 赛道卡片缩略图 */
 .track-mini {
   display: block;
   width: 100%;
-  height: 86px;
-  margin: 4px 0 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(160, 200, 255, 0.14);
-  background: rgba(6, 12, 20, 0.55);
+  height: 92px;
+  margin: 6px 0 10px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(4, 7, 12, 0.6);
   object-fit: contain;
 }
-.track-card.active .track-mini { border-color: rgba(0, 255, 180, 0.35); }
+.track-card.active .track-mini { border-color: rgba(225, 6, 0, 0.45); }
 
 /* ================= 自动驾驶：入口 + 算法设置弹窗 ================= */
 .autopilot-entry {
@@ -305,32 +655,34 @@
   align-items: center;
   gap: 10px;
   margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
   flex-wrap: wrap;
 }
 .autopilot-open {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 800;
-  padding: 8px 14px;
+  padding: 7px 13px;
   cursor: pointer;
   color: #cbd5e1;
-  border: 1px solid rgba(160, 200, 255, 0.25);
-  border-radius: 8px;
-  background: rgba(18, 28, 42, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.05);
   transition: all 0.15s ease;
 }
-.autopilot-open:hover { color: #fff; border-color: #00e5ff; }
+.autopilot-open:hover { color: #fff; border-color: var(--green); }
 .autopilot-open.on {
-  color: #022c22;
-  background: #00ffb4;
-  border-color: #00ffb4;
-  box-shadow: 0 0 16px rgba(0, 255, 180, 0.3);
+  color: #04120c;
+  background: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.28);
 }
-.autopilot-entry-hint { font-size: 11px; color: #64748b; }
+.autopilot-entry-hint { font-size: 10px; color: var(--dim); }
 
 .results-btn.on {
-  color: #022c22;
-  background: #00ffb4;
-  border-color: #00ffb4;
+  color: #04120c;
+  background: var(--green);
+  border-color: var(--green);
 }
 
 .autopilot-card { width: min(920px, 96%); }
@@ -344,51 +696,51 @@
   color: #e2e8f0;
   cursor: pointer;
 }
-.autopilot-switch input { width: 16px; height: 16px; accent-color: #00ffb4; cursor: pointer; }
+.autopilot-switch input { width: 16px; height: 16px; accent-color: var(--green); cursor: pointer; }
 .autopilot-code {
   width: 100%;
   height: 300px;
   resize: vertical;
-  font-family: ui-monospace, "Courier New", monospace;
+  font-family: ui-monospace, "Cascadia Code", "Courier New", monospace;
   font-size: 12px;
   line-height: 1.5;
   color: #d7e3f4;
-  background: #060b13;
-  border: 1px solid rgba(160, 200, 255, 0.2);
-  border-radius: 10px;
+  background: #05080d;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
   padding: 10px 12px;
   outline: none;
   white-space: pre;
   overflow: auto;
   tab-size: 2;
 }
-.autopilot-code:focus { border-color: #00e5ff; }
+.autopilot-code:focus { border-color: var(--f1-red); }
 .autopilot-bar {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: 10px;
 }
-.autopilot-status { flex: 1; font-size: 12px; color: #94a3b8; }
+.autopilot-status { flex: 1; font-size: 12px; color: var(--muted); }
 a.autopilot-doc-link {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   text-decoration: none;
-  color: #38bdf8;
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  border-radius: 6px;
+  color: #b8c2ce;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   transition: all 0.15s ease;
 }
 a.autopilot-doc-link:hover {
   color: #fff;
-  border-color: #38bdf8;
-  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.07);
 }
-.autopilot-status.ok { color: #34d399; }
+.autopilot-status.ok { color: var(--green); }
 .autopilot-status.err { color: #f87171; }
 .results-btn.autopilot-done {
   flex: 0 0 auto;
@@ -398,29 +750,46 @@ a.autopilot-doc-link:hover {
   font-size: 13px;
 }
 
-/* ================= 赛道选择弹窗底部确认按钮 ================= */
+/* 兼容旧结构 */
 .track-modal-actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
   margin-top: 18px;
   padding-top: 14px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--line);
 }
 .start-track-btn {
   padding: 10px 24px;
   font-size: 14px;
   font-weight: 800;
   letter-spacing: 0.05em;
-  background: linear-gradient(135deg, #00e5ff 0%, #0099ff 100%) !important;
-  color: #03121f !important;
+  background: var(--f1-red) !important;
+  color: #fff !important;
   border: none !important;
-  box-shadow: 0 4px 18px rgba(0, 229, 255, 0.4) !important;
+  box-shadow: 0 4px 18px rgba(225, 6, 0, 0.35) !important;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 .start-track-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 24px rgba(0, 229, 255, 0.6) !important;
+  box-shadow: 0 6px 24px rgba(225, 6, 0, 0.5) !important;
 }
 
+@media (max-width: 900px) {
+  #carCardsGrid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+}
+
+@media (max-width: 720px) {
+  .mode-cards { grid-template-columns: 1fr; }
+  .mode-card { min-height: 0; }
+}
+
+@media (max-width: 620px) {
+  .track-modal-overlay { padding: 8px; }
+  .track-modal-card { width: 100%; max-height: 96%; padding: 0 14px 16px; }
+  .track-modal-footer { margin: 16px -14px -16px; padding: 12px 14px; bottom: -16px; }
+  .track-modal-card .track-modal-header { padding-top: 14px; }
+  .start-footer-brand { display: none; }
+  .track-pill .track-len, .track-pill .track-session { display: none; }
+}

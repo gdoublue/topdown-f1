@@ -113,6 +113,7 @@ export function startNetRace(msg, mySessionId) {
     //  · AI 补位车：永远使用配置里固定的车队涂装（红牛就是红牛、法拉利就是红色），
     //    否则同一场比赛里 AI 会被随机成别的车队配色，认不出是谁
     const isAICar = c.id.startsWith("ai:");
+    car.isAI = isAICar;
     const sameModelCount = msg.cars.filter(x => (x.shortName === c.shortName || msg.sameCar)).length;
     if (!isAICar && (sameModelCount > 1 || msg.sameCar)) {
       const livery = getRandomLivery(idx, c.number);

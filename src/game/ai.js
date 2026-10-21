@@ -965,10 +965,14 @@ export const AI_CONFIGS = [
     id: "apex-hunter",
     name: "法拉利 #16 (SF-24 · 机械抓地与弯道出弯之王)",
     shortName: "法拉利 #16",
+    team: "法拉利",
+    model: "SF-24",
     color: "#ff3b3b",
     livery: "ferrari",
     number: "16",
     driverName: "勒克莱尔 (LEC #16)",
+    driverShort: "勒克莱尔",
+    driverCode: "LEC",
     driver: driveApexHunter,
     // 真实特性：慢速发卡弯机械抓地最强、转向响应极度敏捷，出弯牵引爆发力强
     perf: {
@@ -986,10 +990,14 @@ export const AI_CONFIGS = [
     id: "vector-pursuit",
     name: "红牛 #1 (RB20 · DRS大直线极速与高速弯之王)",
     shortName: "红牛 #1",
+    team: "红牛",
+    model: "RB20",
     color: "#00b4d8",
     livery: "redbull",
     number: "1",
     driverName: "维斯塔潘 (VER #1)",
+    driverShort: "维斯塔潘",
+    driverCode: "VER",
     driver: driveVectorPursuit,
     // 真实特性：全场最高直线尾速与 DRS 效率，地面效应高速弯下压力优秀，极限定点晚刹与极早开油出弯
     perf: {
@@ -1007,10 +1015,14 @@ export const AI_CONFIGS = [
     id: "classic-baseline",
     name: "阿斯顿 #14 (AMR24 · 高下压力弯道粘地/原基准)",
     shortName: "阿斯顿 #14",
+    team: "阿斯顿·马丁",
+    model: "AMR24",
     color: "#10b981",
     livery: "aston",
     number: "14",
     driverName: "阿隆索 (ALO #14)",
+    driverShort: "阿隆索",
+    driverCode: "ALO",
     driver: geminiDriver,
     // 真实特性：弯道下压力足，但直道风阻偏大，尾速略逊
     perf: {
@@ -1026,10 +1038,14 @@ export const AI_CONFIGS = [
     id: "mercedes-w15",
     name: "梅奔 #44 (W15 · 深刹时间最优与主动防撞)",
     shortName: "梅奔 #44",
+    team: "梅赛德斯",
+    model: "W15",
     color: "#e2e8f0",
     livery: "mercedes",
     number: "44",
     driverName: "汉密尔顿 (HAM #44)",
+    driverShort: "汉密尔顿",
+    driverCode: "HAM",
     driver: driveSmoothCruiser,
     // 真实特性：极强制动力，晚刹深扎，底盘巡航稳定
     perf: {
@@ -1048,10 +1064,14 @@ export const AI_CONFIGS = [
     id: "AiMotor",
     name: "Ai Motor",
     shortName: "ai",
+    team: "Ai Motor",
+    model: "Cyber",
     color: "#a855f7",        // 排位榜色条 / 小地图点位：紫色（原本白色，和梅奔撞色）
     livery: "cyber",
     number: "55",
-    driverName: "Ai (HAM #55)",
+    driverName: "Ai (AIM #55)",
+    driverShort: "Ai",
+    driverCode: "AIM",
     driver: geminiDriver,
     // 真实特性：极强制动力，晚刹深扎，底盘巡航稳定
     perf: {
@@ -1070,10 +1090,14 @@ export const AI_CONFIGS = [
     id: "smooth-cruiser",
     name: "小米 SU8 Ultra #7 (1548PS · 三电机弹射与碳陶瓷深刹)",
     shortName: "SU8 Ultra #7",
+    team: "小米",
+    model: "SU8 Ultra",
     color: "#f5c518",
     livery: "su7ultra",
     number: "7",
     driverName: "小米车手 (XIAO #7)",
+    driverShort: "小米车手",
+    driverCode: "XIAO",
     driver: geminiDriver,
     // 真实特性：三电机 1138kW，0-100km/h 1.98s 弹射起步；350km/h 电子限速；
     // 民用车物理极限：横向 ≈1.65g、制动 ≈1.8g（碳陶），远低于 F1 的 4.6g/6.3g
@@ -1097,10 +1121,14 @@ export const AI_CONFIGS = [
     id: "yangwang-u9x",
     name: "仰望 U9 Xtreme #9 (3000Ps · 1200V 四电机极速之王)",
     shortName: "U9X #9",
+    team: "仰望",
+    model: "U9 Xtreme",
     color: "#f59e0b",
     livery: "yangwang",
     number: "9",
     driverName: "仰望车手 (U9X #9)",
+    driverShort: "仰望车手",
+    driverCode: "U9X",
     driver: driveSmoothCruiser,
     // 真实特性：全球首款 1200V 超高压平台，四电机单台 555kW 综合超 3000Ps，
     // 实测极速 496.22 km/h（德国 ATP），纽北 6:59.157（量产电车首次进 7 分）；
@@ -1161,10 +1189,14 @@ export function applyCarConfig(car, cfg) {
   car.id = cfg.id;
   car.name = cfg.name;
   car.shortName = cfg.shortName;
+  car.team = cfg.team;
+  car.model = cfg.model;
   car.livery = cfg.livery;          // 车身涂装 → src/car/render.js 的 CAR_LIVERIES
   car.color = cfg.color;            // 主题色 → 小地图 / HUD 排位条 / 遥测
   car.number = cfg.number;
   car.driverName = cfg.driverName;
+  car.driverShort = cfg.driverShort;
+  car.driverCode = cfg.driverCode;
   car.algorithm = cfg.id;
   car.driver = cfg.driver;
   // 每辆车持有自己的性能副本：调校（TUNE）只作用于本车，不污染全局 AI_CONFIGS，
