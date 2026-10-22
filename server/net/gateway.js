@@ -77,7 +77,10 @@ export function broadcastBoards(trackId) {
 // 却让单线程 Node 承担 7 倍的 syscall / C++ addon 跨界开销。
 // 现在改成：每 16ms 把房间内所有幽灵的最新位姿打成一个包广播一次（≈60 次/秒），
 // 客户端收到后用与 peer_state 完全相同的路径入缓冲（样本时刻仍是发送端自报的 st）。
-const PEER_FLUSH_MS = 16;
+// flush 必须挂在 simLoop 的 8ms 驱动上、而不是 30Hz 物理 tick 里，
+// 否则节拍被物理 tick 带成 30Hz，闸门永远放行也发不出 60Hz。
+// 闸门取 15ms 而非 16ms：Windows 定时器若按 15.6ms 粒度派发，16ms 会整拍跳过、掉回 ~32Hz。
+const PEER_FLUSH_MS = 15;
 
 function flushPeerBundle(room, now) {
   if (!room._peersDirty) return;
@@ -146,8 +149,6 @@ function simLoop() {
       if (!sim || sim.destroyed) continue;
       try {
         sim.tick(SIM_DT, now);
-        // 位姿下行合流（≤60Hz）：见 flushPeerBundle 的注释
-        flushPeerBundle(room, now);
         // 房间状态跟随模拟器（倒计时结束 → racing），离开房间判定/大厅展示都依赖它
         if (sim.race.state === "racing" && room.state !== "racing") room.state = "racing";
         // 不足 2 名真人的比赛：真人全部冲线后，剩下的 AI 直接无渲染快进到终局，
@@ -174,6 +175,17 @@ function simLoop() {
         broadcastRoom(room, "error", { code: "race_crashed", msg: e.message });
         broadcastLobby();
       }
+    }
+  }
+
+  // 位姿下行合流与 30Hz 物理 tick 解耦：8ms 驱动每拍检查一次，由 PEER_FLUSH_MS 限频到 ~60Hz。
+  // 挂在 tick 里会被物理节拍带成 30Hz，60Hz 上报的样本有一半会在下一次合包前被覆盖。
+  for (const room of _rooms.values()) {
+    if (!room.sim || room.sim.destroyed) continue;
+    try {
+      flushPeerBundle(room, now);
+    } catch (e) {
+      console.error("[sim] peer bundle error:", e);
     }
   }
 }
@@ -381,7 +393,7 @@ function route(session, msg) {
       const room = findRoomOf(session.id);
       if (room?.sim && !room.sim.destroyed) {
         room.sim.setPlayerState(session.id, msg, performance.now());
-        // 只打脏标记：由 simLoop 里 16ms 一次的合包广播统一发（见 flushPeerBundle）。
+        // 只打脏标记：由 simLoop 的 8ms 驱动按 16ms 闸门合包广播（见 flushPeerBundle）。
         room._peersDirty = true;
       }
       break;
