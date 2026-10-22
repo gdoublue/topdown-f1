@@ -4,7 +4,7 @@
 本文档讲：怎么写、怎么跑、怎么看结果、怎么定位问题，以及开发者怎么用它做新车/新赛道的公平性回归。
 
 > 工具位置：`scripts/autopilot-bench.mjs`（`npm run algo:bench`）
-> 算法可用的全部字段/函数：`autopilot-doc.html`（游戏内「📖 参数说明」是同一份）
+> 算法可用的全部字段/函数：`autopilot-doc.md`（游戏内「📖 参数说明」页面直接渲染同一份 Markdown）
 
 ---
 
@@ -275,7 +275,7 @@ npm run algo:bench -- --algo=superDriver --track=all --car=all --laps=1 --baseli
 | `track.idxAt(米)` / `track.isLinear` / `track.length` / `track.kerbFlag[i]` … | 赛道元信息（实时读取） |
 | `CAR_LENGTH` / `CAR_WIDTH` | 车身包围盒 5.6m × 2.0m |
 
-字段级说明（`car.*`、`o.*`、`out.*`、返回值明细）见 `autopilot-doc.html`。
+字段级说明（`car.*`、`o.*`、`out.*`、返回值明细）见 `autopilot-doc.md`（`autopilot-doc.html` 是它的渲染页）。
 
 ## 附录 B：参数表
 
