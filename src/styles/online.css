@@ -265,6 +265,18 @@
   padding: 1px 5px;
   white-space: nowrap;
 }
+
+/* 排行榜成绩来源标记：房间对战（服务器校验）/ 单人练习（上传校验） */
+.ol-src.tag-race {
+  color: #ffd166;
+  border-color: rgba(255, 209, 102, 0.38);
+  background: rgba(255, 209, 102, 0.08);
+}
+.ol-src.tag-solo {
+  color: #7dd3fc;
+  border-color: rgba(125, 211, 252, 0.32);
+  background: rgba(125, 211, 252, 0.07);
+}
 .ol-sub { color: var(--dim); font-size: 10px; font-weight: 400; margin-left: 6px; }
 .ol-players {
   flex: 0.9;

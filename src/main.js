@@ -9,7 +9,7 @@ import { resetCamera, updateCamera, applyCamera, setZoomScale, cam } from "./gam
 import { initInput, input, NO_INPUT } from "./game/input.js";
 import * as fx from "./game/effects.js";
 import { race, resetRace, tickCountdown, initCarRaceState, updateCarLap, simClock, advanceSimClock, resetSimClock } from "./game/race.js";
-import { initHud, fmt, showMsg, hideMsg, msgText, tickMsg, updateHUD, updateAIHUD, setOnSelectCar } from "./game/hud.js";
+import { initHud, fmt, showMsg, hideMsg, tickMsg, updateHUD, updateAIHUD, setOnSelectCar, showStartLights, hideStartLights } from "./game/hud.js";
 import { initTuner, syncTuner, setTunerEnabled } from "./game/tuner.js";
 import {
   initMenuPanels, currentStep, showModeStep, showCarStep, showOnlineStep,
@@ -637,6 +637,33 @@ function simulateRemainingToEnd(maxSimMs = 300000) {
   // 兜底：极少数卡死/出界的车保持未完赛，结算里按里程排在后段
 }
 
+/* ================= 发车灯（F1 灯灭起步） =================
+   灯组数只从 race.lights 读：
+     · 单机 / 对战 AI：tickCountdown() 每帧写入
+     · 在线对战：服务端快照的 lights 字段（同一套常量算出来的）
+   这里只负责渲染、每组灯一声提示音，以及灯灭瞬间的 GO 反馈。 */
+let startLitShown = -1;
+let goFxShown = false;
+function updateStartLights() {
+  if (race.state === "countdown") {
+    goFxShown = false;
+    const lit = race.lights | 0;
+    if (lit !== startLitShown) {
+      if (lit > startLitShown) audio.beep(620 + lit * 46, 0.1);   // 每组红灯亮起 = 一声
+      startLitShown = lit;
+    }
+    showStartLights(lit);
+    return;
+  }
+  if (!goFxShown) {
+    goFxShown = true;
+    startLitShown = -1;
+    // 灯灭：先把五组灯全部熄掉并保留灯架 0.45s（"熄灭"这一下才是发车信号），再收起
+    showStartLights(0);
+    setTimeout(() => { if (goFxShown) hideStartLights(); }, 450);
+  }
+}
+
 function update(dt, finalStep = true, simNowMs = 0) {
   if (!started) return;
   // 在线退出确认期间比赛照常推进，避免自己的车停在赛道上被撞/被超
@@ -647,14 +674,15 @@ function update(dt, finalStep = true, simNowMs = 0) {
 
   // ---- 在线竞速（幽灵模式）：自车本地物理，远端车幽灵插值 ----
   if (mode === "onlinerace") {
-    if (race.state === "countdown") {
-      const c = String(Math.max(1, Math.ceil(race.countdown)));
-      if (msgText() !== c) { showMsg(c, "", 0); audio.beep(700, 0.12); }
-    } else if (/^\d$/.test(msgText())) {
-      showMsg("GO!", "", 900);   // 倒计时结束：清屏显示 GO
+    // 发车灯：灯数来自服务端快照（与单机同一套 F1 灯灭规则）。
+    // 必须"先跑 updateNetRace 再渲染"：状态翻转就发生在它内部的快照处理里。
+    const wasCountdown = race.state === "countdown";
+    const ev = updateNetRace(dt, input, simNowMs || performance.now(), fx, finalStep);
+    updateStartLights();
+    if (wasCountdown && race.state !== "countdown") {
+      showMsg("GO!", "", 900);
       audio.beep(1200, 0.35, 0.2);
     }
-    const ev = updateNetRace(dt, input, simNowMs || performance.now(), fx, finalStep);
     if (ev === "lap") {
       const me = cars.find(c => c.isPlayer);
       showMsg("LAP " + Math.min(me.lap, effectiveLaps(currentTrack?.laps)) + "/" + effectiveLaps(currentTrack?.laps), me.shortName, 1100);
@@ -674,15 +702,13 @@ function update(dt, finalStep = true, simNowMs = 0) {
 
   if (race.state === "countdown") {
     const r = tickCountdown(dt);
+    updateStartLights();   // 灯架渲染 + 每组一声 + 灯灭（tickCountdown 已把 lights 清零）
     if (r === "go") {
       showMsg("GO!", "", 900);
       audio.beep(1200, 0.35, 0.2);
       audio.startSound();
-      // 圈速与总时从绿灯起算：否则第 1 圈会把 3 秒倒计时计入（服务端同理）
+      // 圈速与总时从灯灭起算：否则第 1 圈会把发车灯时间计入（服务端同理）
       for (const c of cars) { c.raceStart = simClock; c.lapStart = simClock; }
-    } else if (msgText() !== r) {
-      showMsg(r, "", 0);
-      audio.beep(700, 0.12);
     }
     return;
   }
@@ -1579,6 +1605,15 @@ function showResults() {
       });
     } else if (mode === "solo" && onlinePractice) {
       uploadEl.textContent = "⚠️ 未连接服务器，成绩未上传";
+    } else if (online) {
+      // 房间对战：成绩由服务器在 race_end 之前就写库（无需客户端上传），这里只回报结果
+      const mySid = conn.session?.sid;
+      const me = (netrace.results || []).find(r => r.sessionId === mySid);
+      uploadEl.textContent = (me && me.finished && me.valid && me.bestLapMs > 0)
+        ? "✅ 个人最快圈已计入排行榜（来源标记：房间对战）"
+        : (me && me.finished)
+          ? "⚠️ 成绩未通过服务器合理性校验，本次最快圈未计入排行榜"
+          : "⚠️ 未完赛，本次没有可入榜的最快圈";
     } else {
       uploadEl.textContent = "";
     }

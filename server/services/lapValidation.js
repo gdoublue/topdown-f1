@@ -15,6 +15,12 @@ const carById = new Map(AI_CONFIGS.map(c => [c.id, c]));
 // 客户端物理步长与发车格位置会带来极小差异，理论下限再放宽 4%
 const STRAIGHT_SAFETY = 0.96;
 
+// 房间比赛（成绩由客户端本地计时上报，服务器无法重算）的放行系数。
+// 只能有一个来源：sim.reportFinish 判"名次是否有效"、leaderboard 判"能否上榜"
+// 用同一个系数，否则会出现"比赛里算有效、榜单却判无效"的分裂
+// （表现就是房间比赛跑完了，排行榜里查不到这一圈）。
+export const RACE_MIN_LAP_SAFETY = 0.9;
+
 // 单人练习允许实时调校（极速最高 560km/h、功率 2400kW、加速倍率 2.2 等），
 // 校验必须以该车"可调出的最快形态"为下限，否则合法调校成绩会被误杀。
 function maxTunedPerf(perf) {

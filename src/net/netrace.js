@@ -26,7 +26,7 @@ import { createCar, stepCar, finishedCarInput, getCarDistance, nearestIndex } fr
 import { getRandomPartLivery } from "../car/render.js";
 import { updateCarLap } from "../game/race.js";
 import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput } from "../game/ai.js";
-import { race as globalRace, simClock } from "../game/race.js";
+import { race as globalRace, simClock, START_LIGHT_COUNT } from "../game/race.js";
 import { conn } from "./connection.js";
 import { sampleRemote, createClockOffset, createPlayoutClock, createDelayController } from "./remoteSync.js";
 import * as audio from "../game/audio.js";
@@ -168,7 +168,10 @@ export function startNetRace(msg, mySessionId) {
   lastBumpSoundTime = 0;
   serverState = "countdown";
   globalRace.state = "countdown";
-  globalRace.countdown = 3;
+  // 发车灯先清空：灯数/倒计时随后由服务端快照下发（与单机同一套 F1 灯灭规则）
+  globalRace.countdown = 0;
+  globalRace.countdownTotal = 0;
+  globalRace.lights = 0;
 
   switchTrack(msg.trackId);
   setRaceLaps(msg.laps || 0);
@@ -368,7 +371,18 @@ function onSnapshot(msg) {
   if (stateRank(msg.state) >= stateRank(serverState)) {
     serverState = msg.state;
     globalRace.state = msg.state === "racing" ? "racing" : msg.state;
-    if (msg.state === "countdown") globalRace.countdown = msg.countdown;
+    if (msg.state === "countdown") {
+      // 发车灯：以服务端下发的灯组数为准（和单机共用 race.js 的同一套规则），
+      // 老服务端没有 lights 字段时按剩余秒数退化推算，保证灯仍然是"逐组亮、灭灯起步"。
+      globalRace.countdown = Number(msg.countdown) || 0;
+      globalRace.lights = typeof msg.lights === "number"
+        ? Math.max(0, Math.min(START_LIGHT_COUNT, msg.lights | 0))
+        : (globalRace.countdown > 0
+            ? Math.max(1, Math.min(START_LIGHT_COUNT, START_LIGHT_COUNT - Math.ceil(globalRace.countdown) + 1))
+            : 0);
+    } else {
+      globalRace.lights = 0;   // 发车 / 结束：灯全灭
+    }
   }
 
   // 开赛瞬间：本地圈速/总时计时起点对齐绿灯（与单机同源，统一用模拟时钟）

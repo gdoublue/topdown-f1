@@ -46,13 +46,19 @@ export const SERVER_CONFIG = {
 };
 
 // 各赛道理论最短单圈（毫秒）——排行榜合理性校验下限。
-// 数值来自 scripts/ai-sim.mjs 内置 AI 全盛圈速 × 0.92 的经验安全系数。
-// 新增赛道时在此补充；缺失时回退到 defaultMinLapMs。
+// 标定依据：node scripts/ai-sim.mjs <track>（内置 AI 最快车 RB20 的全盛圈速），
+// 再按 0.83~0.89 的经验系数留出"玩家算法 / 调校"的余量。
+// 新增或改赛道（长度/走线变动）后**必须重新标定**，否则会出现
+// "成绩合法却被判无效"（下限比实际能跑出来的圈速还慢）。
+// 实测 AI 最快圈：shanghai 76.7s / monza 69.9s / silverstone 77.3s / spa 84.4s / redbullring 54.7s
+// 缺失时回退到 DEFAULT_MIN_LAP_MS。
 export const TRACK_MIN_LAP_MS = {
-  shanghai: 68000,
-  monza: 58000,
-  silverstone: 63000,
-  spa: 85000,
-  redbullring: 48000,
+  shanghai: 68000,      // AI 76.7s（0.89）
+  monza: 58000,         // AI 69.9s（0.83）
+  silverstone: 63000,   // AI 77.3s（0.81）
+  // 原来是 85000 —— 比内置 AI 的 84.4s 还慢，任何正常成绩都过不了校验
+  // （自动驾驶 85.2s 会被判无效）。按 AI × 0.85 重新标定为 72s，余量与其他赛道一致。
+  spa: 72000,           // AI 84.4s（0.85）
+  redbullring: 48000,   // AI 54.7s（0.88）
 };
 export const DEFAULT_MIN_LAP_MS = 60000;

@@ -563,12 +563,15 @@ function boardsHtml() {
           <span class="ol-name">${escapeHtml(r.nickname)}</span>
           <span class="ol-car">${escapeHtml(carLabel(r.carId) || "未知车型")}${num ? `<small class="ol-num">${num}</small>` : ""}</span>
           <span class="ol-time">${fmtMs(r.bestLapMs)}</span>
-          <span class="ol-src">${r.source === "online_race" ? "对战" : "练习"}</span>
+          <span class="ol-src ${r.source === "online_race" ? "tag-race" : "tag-solo"}"
+                title="${r.source === "online_race"
+                  ? "房间对战：完赛后由服务器校验名次有效性，有效成绩自动入榜"
+                  : "单人练习：客户端上传，经理论最短圈校验后入榜"}">${r.source === "online_race" ? "房间对战" : "单人练习"}</span>
         </div>`;
     }).join("")
     : `<div class="online-empty">该赛道还没有有效成绩，来做第一个刷榜的人！</div>`;
   return `
-    <p class="track-modal-desc">各赛道最快单圈榜 · 前往"单人在线练习"刷圈即可上传成绩</p>
+    <p class="track-modal-desc">各赛道最快单圈榜 · 单人练习与房间对战都会入榜（右侧标注成绩来源）</p>
     <div class="online-chips">${chips}</div>
     <div class="online-list">${entries.length ? head : ""}${rows}</div>`;
 }

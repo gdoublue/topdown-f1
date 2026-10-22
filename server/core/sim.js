@@ -9,10 +9,10 @@
 import { activateContext, createTrackContext } from "../../src/track/geometry.js";
 import { createCar, stepCar, nearestIndex, finishedCarInput, resolveCarCollisions, getCarDistance } from "../../src/car/physics.js";
 import { applyCarConfig, createAIInput, driveAI, AI_CONFIGS } from "../../src/game/ai.js";
-import { createRaceState, initCarRaceState, updateCarLap } from "../../src/game/race.js";
+import { createRaceState, initCarRaceState, updateCarLap, lightsFor } from "../../src/game/race.js";
 import { TOTAL_LAPS, PHYS, setRaceLaps } from "../../src/config.js";
 import { TRACK_MIN_LAP_MS, DEFAULT_MIN_LAP_MS } from "../config.js";
-import { minLapMsFor } from "../services/lapValidation.js";
+import { minLapMsFor, RACE_MIN_LAP_SAFETY } from "../services/lapValidation.js";
 
 const FX_STUB = { addSkid() {}, addDust() {}, clearEffects() {} };
 
@@ -231,7 +231,8 @@ export class RaceSim {
     const totalMs = Math.round(Number(r.totalMs) || 0);
     const bestLapMs = Math.round(Number(r.bestLapMs) || 0);
     const laps = Math.max(1, Math.round(Number(r.laps)) || 1);
-    const valid = bestLapMs >= minLap * 0.9 && totalMs >= laps * minLap * 0.9;
+    const valid = bestLapMs >= minLap * RACE_MIN_LAP_SAFETY
+      && totalMs >= laps * minLap * RACE_MIN_LAP_SAFETY;
     this.finishReports.set(sid, { totalMs, bestLapMs, laps, valid });
     g.car.finished = true;
     g.car.total = totalMs;
@@ -356,7 +357,13 @@ export class RaceSim {
       tick: this.tickNo++,
       ts,
       state: this.race.state,
-      countdown: Math.max(0, Math.ceil(this.race.countdown || 0)),
+      // 发车灯（真实 F1：五组红灯逐组亮 → 随机等待 → 灯灭发车）。
+      // countdown 改成浮点：客户端要靠它算"还剩多少"做灯架动画，整数秒会一格一格跳；
+      // lights 直接给灯组数，客户端不用再自己推时间轴（同一套规则见 src/game/race.js）。
+      countdown: Math.max(0, Math.round((this.race.countdown || 0) * 100) / 100),
+      lights: this.race.state === "countdown"
+        ? lightsFor(this.race.countdown, this.race.countdownTotal)
+        : 0,
       cars: [
         // st = 该样本的采样时刻（各自时钟域）：
         //  · 真人：客户端上报时自己打的时间戳，服务端原样中继（真实采样间隔不被量化）

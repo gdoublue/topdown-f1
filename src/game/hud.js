@@ -3,7 +3,7 @@ function escapeHtml(s) {
 }
 import { M, effectiveLaps } from "../config.js";
 import { N, currentTrack } from "../track/geometry.js";
-import { race, simClock } from "./race.js";
+import { race, simClock, START_LIGHT_COUNT } from "./race.js";
 import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "../ui/labels.js";
 
 const el = {};
@@ -115,6 +115,55 @@ export function hideMsg(force) {
   el.msg.classList.remove("show");
   if (force) { el.msgMain.textContent = ""; el.msgSub.textContent = ""; }
   msgTimer = 0;
+}
+
+/* ================= 发车灯架（F1 五组红灯） =================
+   灯组数由 race.lights 驱动（单机 tickCountdown / 在线服务端快照），
+   这里只做 DOM 渲染，不参与任何计时。 */
+let lightCols = null;      // [[dot, dot], ...]：每组上下两盏
+let lightShown = -1;       // 当前已渲染的灯组数（脏检查）
+
+function ensureLights() {
+  if (lightCols) return true;
+  const box = document.getElementById("startLights");
+  if (!box) return false;
+  box.innerHTML = "";
+  lightCols = [];
+  for (let i = 0; i < START_LIGHT_COUNT; i++) {
+    const col = document.createElement("div");
+    col.className = "sl-col";
+    const top = document.createElement("i");
+    const bottom = document.createElement("i");
+    col.appendChild(top);
+    col.appendChild(bottom);
+    box.appendChild(col);
+    lightCols.push([top, bottom]);
+  }
+  return true;
+}
+
+// lit = 已点亮的灯组数（0 = 全灭）。灯架保持可见，收起由 hideStartLights 负责。
+export function showStartLights(lit) {
+  if (!ensureLights()) return;
+  const box = document.getElementById("startLights");
+  const n = Math.max(0, Math.min(START_LIGHT_COUNT, lit | 0));
+  box.classList.add("show");
+  if (lightShown === n) return;
+  lightShown = n;
+  for (let i = 0; i < START_LIGHT_COUNT; i++) {
+    const on = i < n;
+    lightCols[i][0].classList.toggle("on", on);
+    lightCols[i][1].classList.toggle("on", on);
+  }
+}
+
+export function hideStartLights() {
+  const box = document.getElementById("startLights");
+  if (box) box.classList.remove("show");
+  lightShown = -1;
+  if (lightCols) {
+    for (const c of lightCols) { c[0].classList.remove("on"); c[1].classList.remove("on"); }
+  }
 }
 
 export function msgText() {

@@ -4,7 +4,7 @@
 //  - "solo_practice" 在线单人练习 → 客户端上报，需通过合理性校验
 import crypto from "node:crypto";
 import { loadDb, saveDb } from "../db/store.js";
-import { minLapMsFor } from "./lapValidation.js";
+import { minLapMsFor, RACE_MIN_LAP_SAFETY } from "./lapValidation.js";
 
 export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, laps, source }) {
   const db = loadDb();
@@ -14,11 +14,15 @@ export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, 
 
   // ---- 合理性校验（防止客户端乱报成绩）----
   // 单人练习的车允许调校，阈值按可调出的最快形态计算；在线对战的车由客户端锁死调校
-  const minLap = minLapMsFor(trackId, carId, { tuned: source !== "online_race" });
+  const isRace = source === "online_race";
+  // 房间比赛的成绩在 sim.reportFinish 里已经按 RACE_MIN_LAP_SAFETY 放行过一次，
+  // 这里必须用同一个下限，否则"比赛判定有效"的成绩会在上榜前被二次判死。
+  const minLap = Math.round(minLapMsFor(trackId, carId, { tuned: !isRace })
+    * (isRace ? RACE_MIN_LAP_SAFETY : 1));
   const validated =
     bestLapMs >= minLap &&                                    // 不可能快于理论最短圈
     bestLapMs < 60 * 60 * 1000 &&                             // 不可能慢于 1 小时
-    (source === "online_race" || totalMs >= laps * minLap);   // 总时 >= 圈数 × 最短圈
+    (isRace || totalMs >= laps * minLap);                     // 总时 >= 圈数 × 最短圈
 
   const record = {
     id: "lap_" + crypto.randomBytes(8).toString("hex"),
