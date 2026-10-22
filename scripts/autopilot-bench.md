@@ -5,6 +5,7 @@
 
 > 工具位置：`scripts/autopilot-bench.mjs`（`npm run algo:bench`）
 > 算法可用的全部字段/函数：`autopilot-doc.md`（游戏内「📖 参数说明」页面直接渲染同一份 Markdown）
+> 配套的**算法体检 / 验收**工具：`scripts/algo-debug.md`（`npm run algo:doctor` / `npm run algo:check`）
 
 ---
 
@@ -152,6 +153,9 @@ function driver(car, out, dt) {
 ---
 
 ## 4. 调试套路（按顺序来最省时间）
+
+> 完整流水线（初筛 → 定位 → 验收）与症状→对策表见 `scripts/algo-debug.md`，
+> 定位阶段用 `npm run algo:doctor`，矩阵验收用 `npm run algo:check`。
 
 1. **先保证能完赛**：`--car=apex-hunter --mode=solo --laps=2`，要求 `违规/异常 = 0 / 0`、
    草地 < 5%、有总时。跑不完先别管圈速。

@@ -62,6 +62,16 @@ function sendWs(obj) {
 handlers.set("rtc_offer", new Set([(m) => rtc.handleOffer(m && m.sdp)]));
 handlers.set("rtc_ice", new Set([(m) => rtc.handleIce(m)]));
 
+// 拆掉底层连接但不通知上层：重连换连接时用（那种情况不是掉线，不该弹提示/再触发重连）
+function teardown() {
+  const sock = ws;
+  ws = null;
+  status = "idle";
+  session = null;
+  rtc.stop();
+  if (sock) { try { sock.close(); } catch { /* ignore */ } }
+}
+
 export const conn = {
   get status() { return status; },
   url: null,
@@ -75,7 +85,9 @@ export const conn = {
   // 连接并完成 hello 握手；resolve(welcomePayload) / reject(error)
   connect(url, { fingerprint, nickname }) {
     return new Promise((resolve, reject) => {
-      this.close();
+      // 换连接前先拆掉旧 socket：拆的时候不发 _closed，
+      // 否则"重连"会先被当成一次掉线（上层会弹提示并再触发一轮重连）
+      teardown();
       // 无路径的地址自动补全默认网关路径 /ws（与 server/net/gateway.js 对应）
       try {
         const u = new URL(url.replace(/^ws/i, "http"));
@@ -90,24 +102,32 @@ export const conn = {
       }
       status = "connecting";
       settle = { resolve, reject, done: false };
-      ws = new WebSocket(url);
+      const sock = new WebSocket(url);
+      ws = sock;
+      // 旧 socket 的 onclose 是异步到达的，可能晚于新连接建立；
+      // 只要 ws 已经不是它自己，就说明这条事件已经过期，必须忽略。
+      const stale = () => ws !== sock;
 
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ t: "hello", fingerprint, nickname }));
+      sock.onopen = () => {
+        if (stale()) return;
+        sock.send(JSON.stringify({ t: "hello", fingerprint, nickname }));
       };
-      ws.onmessage = (e) => {
+      sock.onmessage = (e) => {
+        if (stale()) return;
         let msg;
         try { msg = JSON.parse(e.data); } catch { return; }
         dispatch(msg);
       };
-      ws.onerror = () => {
+      sock.onerror = () => {
+        if (stale()) return;
         if (settle && !settle.done) {
           settle.done = true;
           status = "error";
           reject(new Error("connect_failed"));
         }
       };
-      ws.onclose = () => {
+      sock.onclose = () => {
+        if (stale()) return;   // 已主动拆掉 / 已被新连接取代：不算掉线
         status = "closed";
         session = null;
         rtc.stop();          // 连接没了，UDP 通道一并释放
@@ -130,10 +150,11 @@ export const conn = {
 
   isOpen() { return !!ws && ws.readyState === 1; },
 
+  // 主动断开：先拆连接再通知上层
+  // （onlineUI 靠 _closed 复位"主动断开"标记；旧 socket 迟到的 onclose 已被 stale 检查忽略）
   close() {
-    rtc.stop();
-    if (ws) { try { ws.close(); } catch { /* ignore */ } ws = null; }
-    status = "idle";
-    session = null;
+    const had = !!ws;
+    teardown();
+    if (had) emit("_closed", {});
   },
 };

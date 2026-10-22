@@ -108,8 +108,7 @@
   transition: transform .22s cubic-bezier(.2,.8,.3,1);
 }
 .track-modal-overlay.open .track-modal-card { transform: none; }
-.track-modal-card::-webkit-scrollbar { width: 6px; }
-.track-modal-card::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 3px; }
+/* 滚动条统一样式见 online.css 末尾「科技感滚动条」一节 */
 
 .track-modal-header {
   display: flex;

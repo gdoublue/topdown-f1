@@ -12,10 +12,12 @@ export class Room {
     this.hostId = host.id;
     this.state = "lobby";
     this.trackId = opts.trackId || "shanghai";
+    this.laps = 0;                               // 房主指定的圈数（0 = 赛道默认），开赛前对全员可见
     this.sameCar = opts.sameCar === true;        // 旧字段保留（房间 UI 已不再暴露"同车竞技"）
     this.fillAI = opts.fillAI !== false;         // AI 补位空余发车位；false = 纯玩家对战
     this.maxPlayers = Math.min(opts.maxPlayers || SERVER_CONFIG.maxPlayersPerRoom, SERVER_CONFIG.maxPlayersPerRoom);
     this.members = new Map();                    // sessionId -> { session, carId, ready, scriptId }
+    this.chatHistory = [];                       // 房间聊天记录（最近 10 条，进房时补发）
     this.createdAt = Date.now();
     this.trackCtx = null;                        // 比赛开始时构建（createTrackContext）
     this.sim = null;                             // RaceSim 实例（开赛时创建）
@@ -59,6 +61,7 @@ export class Room {
       id: this.id,
       state: this.state,
       trackId: this.trackId,
+      laps: this.laps,
       sameCar: this.sameCar,
       fillAI: this.fillAI,
       hostId: this.hostId,

@@ -296,6 +296,17 @@
 .online-create select:focus { border-color: var(--f1-red); }
 .online-ck { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; }
 .online-ck input { accent-color: var(--f1-red); }
+
+/* 非房主：房主设定的只读展示（赛道 / 圈数 / 玩法） */
+.online-create.room-rules {
+  gap: 8px 14px;
+  padding: 9px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  background: rgba(5, 8, 13, 0.55);
+}
+.online-create.room-rules b { color: #fff; font-weight: 800; }
+.online-create.room-rules .rule-name { color: var(--dim); font-size: 11px; letter-spacing: .04em; }
 .online-track-mini {
   width: 132px;
   height: 48px;
@@ -305,7 +316,8 @@
   border-radius: 3px;
   background: rgba(4, 7, 12, 0.6);
 }
-.online-room-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+/* 居中排布：左下角有聊天面板，按钮放中间不会被它压住 */
+.online-room-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; justify-content: center; }
 
 /* 单人练习房：赛道预览 + 房间式开赛设置 */
 .practice-preview {
@@ -390,3 +402,203 @@
   .ol-players { display: none; }
   .online-list { max-height: 45vh; }
 }
+
+/* ================= 在线聊天面板（左下角） ================= */
+.chat-panel {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  width: 300px;
+  z-index: 120;                 /* 高于全屏弹窗(100)：大厅 / 房间 / 比赛中都固定浮在左下角 */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 9px;
+  border: 1px solid rgba(255, 255, 255, .09);
+  border-radius: 6px;
+  /* 半透明玻璃：盖在赛道/弹窗上也能看清底下的东西 */
+  background: linear-gradient(180deg, rgba(10, 16, 26, .58), rgba(6, 10, 16, .72));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+  color: #dbe4ef;
+  font-size: 11px;
+  pointer-events: auto;
+}
+.chat-panel.hidden { display: none; }
+.chat-head { display: flex; align-items: center; gap: 8px; }
+.chat-title { font-size: 8px; font-weight: 900; letter-spacing: .18em; color: #7d8ea2; }
+.chat-scope {
+  margin-left: auto;
+  background: rgba(5, 8, 13, .5);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 3px;
+  color: #e2e8f0;
+  font-size: 10px;
+  padding: 2px 4px;
+  font-family: var(--font-ui);
+  outline: none;
+}
+.chat-scope-tag { margin-left: auto; font-size: 10px; color: #8ea0b5; }
+.chat-scope.hidden, .chat-scope-tag.hidden { display: none; }
+.chat-toggle {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, .12);
+  color: #9fb0c2;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.chat-log {
+  height: 168px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}
+.chat-panel.collapsed .chat-log,
+.chat-panel.collapsed .chat-input-row { display: none; }
+.chat-line {
+  line-height: 1.45;
+  word-break: break-word;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .8);   /* 面板半透明：给文字一点底，压在浅色赛道上也清楚 */
+}
+.chat-time {
+  color: #6f8098;
+  font-size: 9px;
+  margin-right: 5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+}
+.chat-line .chat-tag { font-size: 9px; margin-right: 4px; }
+.chat-line.global .chat-tag { color: #6ea8ff; }
+.chat-line.room .chat-tag { color: #7ee0a8; }
+.chat-line b { color: #fff; font-weight: 700; margin-right: 4px; }
+.chat-line.mine b { color: var(--f1-red-hi); }
+.chat-line.sys { color: #ffd479; }
+.chat-input-row { display: flex; gap: 6px; }
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(5, 8, 13, .5);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 3px;
+  color: #e8eef6;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  outline: none;
+}
+.chat-input:focus { border-color: var(--f1-red); }
+.chat-send {
+  flex: none;
+  background: var(--f1-red);
+  border: none;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+/* 聊天面板展开时把操作说明顶上去，避免叠在一起 */
+body.chat-on #help { bottom: 254px; }
+
+/* ================= 昵称 / 分享弹窗 ================= */
+.nick-card { width: min(460px, 94%); }
+.share-card { width: min(640px, 94%); }
+.nick-input {
+  width: 100%;
+  background: rgba(5, 8, 13, .9);
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 3px;
+  color: #e8eef6;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  outline: none;
+}
+.nick-input:focus { border-color: var(--f1-red); }
+.nick-hint { min-height: 15px; margin: 6px 0 0; font-size: 11px; color: #ffb4a2; }
+.share-link {
+  width: 100%;
+  resize: vertical;
+  background: rgba(5, 8, 13, .9);
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 3px;
+  color: #a8c0d8;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  line-height: 1.5;
+  outline: none;
+  word-break: break-all;
+}
+
+@media (max-width: 900px) {
+  .chat-panel { width: 232px; left: 10px; bottom: 10px; }
+  .chat-log { height: 120px; }
+  body.chat-on #help { bottom: 214px; }
+}
+
+/* ================= 科技感滚动条（聊天 / 房间列表 / 排行榜 / 弹窗） =================
+   细窄暗轨 + 红色能量条 + 内发光，和 F1 转播红白配色一致。
+   Firefox 走 scrollbar-width/-color，WebKit/Blink 走伪元素。 */
+:is(.online-list, .chat-log, .track-modal-card, .autopilot-code) {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(225, 6, 0, 0.62) rgba(255, 255, 255, 0.045);
+}
+:is(.online-list, .chat-log, .track-modal-card, .autopilot-code)::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+:is(.online-list, .chat-log, .track-modal-card, .autopilot-code)::-webkit-scrollbar-track {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.012));
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.55);
+}
+:is(.online-list, .chat-log, .track-modal-card, .autopilot-code)::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  border: 1px solid rgba(255, 140, 130, 0.35);
+  background: linear-gradient(180deg, #ff4b41 0%, #c8140d 45%, #7a0b07 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.5),
+    0 0 8px rgba(225, 6, 0, 0.45);
+}
+:is(.online-list, .chat-log, .track-modal-card, .autopilot-code)::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #ff6a5f 0%, #e21810 50%, #941009 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 0 12px rgba(255, 60, 40, 0.65);
+}
+:is(.online-list, .chat-log, .track-modal-card, .autopilot-code)::-webkit-scrollbar-thumb:active {
+  background: linear-gradient(180deg, #ff8a80 0%, #ff2a1c 100%);
+}
+:is(.online-list, .chat-log, .track-modal-card, .autopilot-code)::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 聊天面板的滚动条再淡一档：完全透明轨道 + 半透明红色细条，不抢内容的视线 */
+.chat-panel .chat-log { scrollbar-width: thin; scrollbar-color: rgba(255, 96, 84, .38) transparent; }
+.chat-panel .chat-log::-webkit-scrollbar { width: 6px; height: 6px; }
+.chat-panel .chat-log::-webkit-scrollbar-track {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.chat-panel .chat-log::-webkit-scrollbar-thumb {
+  border: none;
+  border-radius: 3px;
+  background: rgba(255, 96, 84, .28);
+  box-shadow: none;
+}
+.chat-panel .chat-log::-webkit-scrollbar-thumb:hover { background: rgba(255, 96, 84, .46); }
+.chat-panel .chat-log::-webkit-scrollbar-thumb:active { background: rgba(255, 96, 84, .62); }
+.chat-panel .chat-log::-webkit-scrollbar-corner { background: transparent; }

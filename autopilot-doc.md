@@ -90,7 +90,6 @@ function driver(car, out, dt, otherCars) {
 | `perf.powerKW` / `perf.massKg` / `perf.launchAccel` | 电车功率模型参数（有 `powerKW` 时走功率限速）。 |
 | `perf.steerRate` | 方向盘跟随速度，只影响 `car.steer` 的平滑（不改物理转向角速度）。 |
 | `perf.cornerGripMult` | 调校面板的「弯速极限」，**会同时缩放两张弯速表**（`A_LAT = latGrip × min(1, 系数 × cornerGripMult)`）。 |
-| `perf.vtGripFactor` / `perf.vtBrakeFactor` | 只用于生成 `car.vTarget`；两张 `*Cap` 表用各自固定系数（0.96 / 0.965），不吃这两个字段。 |
 
 ---
 

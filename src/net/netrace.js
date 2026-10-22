@@ -13,15 +13,17 @@
 //    - 发送端采样时间戳 st：真人真实采样间隔被完整保留，不被 33ms 网格量化
 //    - 非均匀 Catmull-Rom 样条插值：关键帧处速度连续，不会"快一帧慢一帧"
 //    - 断流速度外推（Dead Reckoning）+ 12ms 微平滑兜底，绝不急刹卡顿
+//    - 远端车轮胎印：不跑物理，用插值出来的位姿本地反推纵向/横向加速度自己补印
+//      （零带宽、零协议改动；见 emitRemoteSkid）
 // 3. 联网碰撞（QQ 飞车非对称碰撞模型）：
 //    - 自车与远端车本地碰撞检测（getCarDistance），自车即时硬分离与减速阻挡（0 延迟、绝不穿模）
 //    - 后车追尾前车时，后车承担动量损失，前车速度保持（公平无穿车漏洞、不被后方顶飞）
 //    - 远端车受击时叠加微量平滑弹性排斥（Visual Pushback），带接触火花扬尘、车身震动与碰撞音效
 // 4. 比赛时钟（倒计时/开赛/结束）由服务器权威驱动
-import { switchTrack, LAP_LENGTH, isLinear, indexAtDistance } from "../track/geometry.js";
+import { switchTrack, LAP_LENGTH, isLinear, indexAtDistance, hw, kerbFlag } from "../track/geometry.js";
 import { setRaceLaps } from "../config.js";
-import { createCar, stepCar, finishedCarInput, getCarDistance } from "../car/physics.js";
-import { getRandomLivery } from "../car/render.js";
+import { createCar, stepCar, finishedCarInput, getCarDistance, nearestIndex } from "../car/physics.js";
+import { getRandomPartLivery } from "../car/render.js";
 import { updateCarLap } from "../game/race.js";
 import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput } from "../game/ai.js";
 import { race as globalRace, simClock } from "../game/race.js";
@@ -149,6 +151,8 @@ function wrapAngle(a) {
   return a;
 }
 
+const clamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
+
 export function startNetRace(msg, mySessionId) {
   myId = mySessionId;
   finishResults = null;
@@ -182,17 +186,23 @@ export function startNetRace(msg, mySessionId) {
     car.sessionId = c.id;
 
     // 涂装规则：
-    //  · 真人玩家：同车竞技 / 同场出现同款车时分配专属随机涂装，方便区分
+    //  · 真人玩家：同车竞技 / 同场出现同款车时逐部件随机配色（车身/侧箱/尾翼/拉花/头盔各自随机），
+    //    不再套用某一套现成车队涂装，同场多车也不会撞色
     //  · AI 补位车：永远使用配置里固定的车队涂装（红牛就是红牛、法拉利就是红色），
     //    否则同一场比赛里 AI 会被随机成别的车队配色，认不出是谁
     const isAICar = c.id.startsWith("ai:");
     car.isAI = isAICar;
     const sameModelCount = msg.cars.filter(x => (x.shortName === c.shortName || msg.sameCar)).length;
     if (!isAICar && (sameModelCount > 1 || msg.sameCar)) {
-      const livery = getRandomLivery(idx, c.number);
+      // 种子用 sid（所有客户端拿到的参赛名单一致）：
+      // 涂装在任何一台机器上算出来都相同，不会出现"自己看是青色、别人看是紫色"
+      const livery = getRandomPartLivery(idx, c.number, c.id);
       car.customLivery = livery;
-      car.color = c.color || livery.color;
-      car.number = c.number || livery.num;
+      // 同车竞技：服务器已给每位玩家分配互不相同的主题色与车号，直接用；
+      // 非同一场比赛的同款车（例如玩家开法拉利、AI 也出法拉利）：用随机涂装的主题色/车号，
+      // 免得小地图点位与车号和那台 AI 完全一样。
+      car.color = msg.sameCar ? (c.color || livery.color) : livery.color;
+      car.number = msg.sameCar ? (c.number || livery.num) : livery.num;
     } else {
       car.customLivery = null;
       car.color = c.color || cfg.color;
@@ -220,6 +230,7 @@ export function startNetRace(msg, mySessionId) {
       leadEwma: 0,        // 领先量的平滑值（缓冲深度控制器只看它，避免被 16.7ms 阶梯带抖）
       extrap: false,      // 上一帧是否在直线外推（诊断用）
       extrapMs: 0,        // 当前这段连续外推已经持续多久（决定要不要做回弹补偿）
+      sk: null,           // 轮胎印推算状态（懒初始化，见 emitRemoteSkid）
     });
   });
 
@@ -311,6 +322,7 @@ function resetEntityTimeline(e) {
   e.recX = 0;
   e.recY = 0;
   e.wasExtrap = false;
+  e.sk = null;          // 时间轴作废 = 位姿不连续，轮胎印推算也要重新起印，别连一条几十米的直线
   if (e.off && typeof e.off.reset === "function") e.off.reset();
 }
 
@@ -442,13 +454,147 @@ function onSnapshot(msg) {
 
 
 
+/* ================= 远端车轮胎印（纯本地推算，零带宽） =================
+ * 远端车没有本地物理，只有延后 80ms 播放的插值位姿，所以 physics.js 里那套
+ * "刹车制动强度 / 极限侧向 G → addSkid" 的触发条件对它们永远不会成立。
+ * 这里用【正在显示的位姿】反推同样的两个物理量：
+ *   a_lon ≈ Δv / Δt        （v 已经是样条速度 + 80ms 平滑，稳态下导数不失真）
+ *   a_lat ≈ v · Δθ / Δt    （航向角差分 = 横摆角速度，再 × v）
+ * 阈值与本地同源（本地：accel < -11.5 m/s²、gLat > 3.8），但差分量噪声更大，故：
+ *   · 纵向：慢车 60Hz 重采样 + 0.1m/s 量化 → 先做 50ms 指数平滑；
+ *     inBrake（30Hz 快照，且【不】随播放缓冲延后）只当"提前开闸"用，不作为必要条件，
+ *     否则闸门会比车身早关 80ms，把印子的尾巴削掉一截。
+ *   · 横向：阈值抬到 3.7G，并要求连续 2 帧成立才起印，消掉单帧噪声的假印。
+ * 落印点用与 physics.js 完全相同的轴距/轮距/阿克曼半径差几何，
+ * 因此四条痕迹与"画出来的车轮"严格重合（车和印都由同一个位姿得出，视觉不会错位）。
+ */
+const SKID_HALF_BASE = 1.75;   // 半轴距（m），与 physics.js stepCar 保持一致
+const SKID_TRACK_F = 0.77;     // 前半轮距（m）
+const SKID_TRACK_R = 0.79;     // 后半轮距（m）
+const SKID_STEP_MIN = 0.12;    // 落印位移门限下限（m）：小于它先攒着，避免高帧率把印子切成零长段
+const SKID_STEP_SEC = 0.016;   // 目标段长 = 1/60s 的行程：与本地 stepCar"每帧一段"的密度对齐，
+                               // 否则高速时远端印子会比自车的密好几倍，段数直接翻倍、挤爆池子
+const SKID_MAX_SEG = 4.0;      // 单帧连线超过它 = 位姿跳变，重新起印而不是拉一条长线
+const SKID_HOLD_S = 0.12;      // 条件消失后继续留印的时长（s），消掉"一帧有一帧无"的断点
+const SKID_ACCEL_TAU = 0.05;   // 纵向加速度平滑常数（s）
+const SKID_GLAT_TAU = 0.035;   // 横向 G 平滑常数（s）
+
+// 远端车的路面判定：逻辑与 physics.js stepCar 内联的那段严格一致（0 沥青 / 1 路肩 / 2 草地）。
+// 只在地面判定为"要落印"时才调用，频率极低，不用担心 nearestIndex 的窗口扫描开销。
+function remoteSurface(c) {
+  const near = nearestIndex(c.x, c.y, c.nearIdx);
+  const hwHere = hw[near.i];
+  const d = near.d;
+  if (d < hwHere) return 0;
+  if (isLinear || kerbFlag[near.i] === 1) return d < hwHere + 1.5 ? 1 : 2;
+  return d < hwHere + 0.4 ? 0 : 2;
+}
+
+function emitRemoteSkid(e, dt, fx) {
+  const c = e.car;
+  // 失联隐身 / 已退赛：不留印，并且把状态清掉（重新出现时从干净状态起印）
+  if (c.ghostHidden || c.retired) { e.sk = null; return; }
+
+  const sk = e.sk;
+  if (!sk) {
+    // 首帧只采样基准值，不落印：没有"上一帧轮位"可连线
+    e.sk = { spd: c.speed, ang: c.angle, accel: 0, glat: 0, i: 0, arm: 0, hold: 0, last: 0, wheels: null };
+    return;
+  }
+
+  // 帧间隔异常（切后台回来 / 掉帧补推）：差分会被放大成上百 G，这一帧只重置基准
+  if (!(dt > 1e-4) || dt > 0.1) {
+    sk.spd = c.speed; sk.ang = c.angle; sk.wheels = null;
+    return;
+  }
+
+  const spd = Math.abs(c.speed);
+  const accelRaw = (c.speed - sk.spd) / dt;
+  const yawRate = wrapAngle(c.angle - sk.ang) / dt;
+  sk.spd = c.speed;
+  sk.ang = c.angle;
+  sk.accel += (accelRaw - sk.accel) * (1 - Math.exp(-dt / SKID_ACCEL_TAU));
+  sk.glat += (Math.abs(c.speed * yawRate) / 9.81 - sk.glat) * (1 - Math.exp(-dt / SKID_GLAT_TAU));
+
+  let target = 0, frontBias = 1.0, rearBias = 1.0;
+  if (spd > 3.5) {
+    // 1. 制动工况：闸门取 -14（此时只可能是真的在踩刹车，滑行只有 0.23g）
+    const gate = c.inBrake > 0 ? -9.5 : -14;
+    if (sk.accel < gate) {
+      target = clamp((-sk.accel - 9.5) / 36, 0.18, 0.95);
+      frontBias = 1.0; rearBias = 0.88;      // 重心前移：前轮印更深（与本地一致）
+    } else if (sk.glat > 3.7) {
+      // 2. 极限过弯侧滑：后轴先失稳，后轮印更深
+      target = clamp((sk.glat - 3.7) / 1.1, 0.15, 0.65);
+      frontBias = 0.88; rearBias = 1.0;
+    }
+  }
+
+  // 起印确认 + 尾部保持：
+  //   · 单帧成立不算，连续 2 帧（≈33ms）才落第一段 —— 差分量的单帧毛刺不会留下假印
+  //   · 条件消失后再拖 SKID_HOLD_S（≈2 帧）才收印 —— 否则 30Hz 快照上的刹车信号一抖，
+  //     印子就会变成一串虚线
+  if (target > 0) {
+    if (sk.arm < 2) sk.arm++;
+    sk.hold = SKID_HOLD_S;
+    sk.last = target;
+  } else {
+    sk.hold -= dt;
+    if (sk.hold <= 0) { sk.hold = 0; sk.arm = 0; }
+  }
+  const active = sk.arm >= 2;
+  // 拖尾期间强度按最后一段的 70% 渐隐，而不是直接归零（避免收印处出现硬边）
+  const want = active ? (target > 0 ? target : (sk.last || 0.2) * 0.7) : 0;
+  sk.i += (want - sk.i) * Math.min(1, dt * 20);
+
+  // 四轮几何（含阿克曼半径差与极限滑移外扩，公式照抄 physics.js stepCar）
+  const cosA = Math.cos(c.angle), sinA = Math.sin(c.angle);
+  const pxPerp = -sinA, pyPerp = cosA;
+  const turnSign = yawRate >= 0 ? 1 : -1;
+  const kappa = spd > 3 ? Math.abs(yawRate) / spd : 0;
+  const radiusGap = clamp(0.5 * (2 * SKID_HALF_BASE) * (2 * SKID_HALF_BASE) * kappa, 0, 0.45);
+  const slip = clamp((sk.glat - 2.0) / 2.6, 0, 1);
+  const outDir = -turnSign;
+  const offF = outDir * clamp(radiusGap + slip * 0.40, 0, 0.45);
+  const offR = -outDir * clamp(radiusGap + slip * 0.10, 0, 0.28);
+  const bx = cosA * SKID_HALF_BASE, by = sinA * SKID_HALF_BASE;
+  const latFL = SKID_TRACK_F + offF, latFR = -SKID_TRACK_F + offF;
+  const latRL = SKID_TRACK_R + offR, latRR = -SKID_TRACK_R + offR;
+  const fl = { x: c.x + bx + pxPerp * latFL, y: c.y + by + pyPerp * latFL };
+  const fr = { x: c.x + bx + pxPerp * latFR, y: c.y + by + pyPerp * latFR };
+  const rl = { x: c.x - bx + pxPerp * latRL, y: c.y - by + pyPerp * latRL };
+  const rr = { x: c.x - bx + pxPerp * latRR, y: c.y - by + pyPerp * latRR };
+
+  const prev = sk.wheels;
+  if (!prev) {
+    sk.wheels = { fl, fr, rl, rr };   // 起印基准，不连线
+    return;
+  }
+
+  // 位移门限：不足"一帧的行程"就先攒着（prevWheels 不动），攒够了再一次性连过去
+  const moved = Math.hypot(rl.x - prev.rl.x, rl.y - prev.rl.y);
+  if (moved > SKID_MAX_SEG) {
+    sk.wheels = { fl, fr, rl, rr };   // 跳变：断开重起，绝不拉长线
+    return;
+  }
+  if (moved < Math.max(SKID_STEP_MIN, spd * SKID_STEP_SEC)) return;
+
+  if (active && sk.i > 0.06 && fx && typeof fx.addSkid === "function" && remoteSurface(c) !== 2) {
+    fx.addSkid(prev.fl, fl, sk.i * frontBias, 0.32);
+    fx.addSkid(prev.fr, fr, sk.i * frontBias, 0.32);
+    fx.addSkid(prev.rl, rl, sk.i * rearBias, 0.42);
+    fx.addSkid(prev.rr, rr, sk.i * rearBias, 0.42);
+  }
+  sk.wheels = { fl, fr, rl, rr };
+}
+
 // 远端车辆：在"最新时刻 − REMOTE_DELAY_MS"处采样（固定延时缓冲），
 // 用 Catmull-Rom 样条（C1 连续，关键帧处速度无突变）+ 断流外推 + 微平滑重建位姿。
 //
 // 为什么不用线性插值：真人样本间隔并不严格相等（33~79ms），线性插值会让速度
 // 在每个关键帧处跳变 —— 看起来就是"一快一慢"的抽搐。样条用相邻样本差分求切线，
 // 整条曲线速度连续；再叠加极小的指数平滑兜住残余抖动。
-function interpolateRemoteCars(dt) {
+function interpolateRemoteCars(dt, fx) {
   const nowMs = performance.now();
   // 采样时间轴：含自适应延迟（好链路 = 80ms，抖动大时自动加深）
   const playMs = clock.playMs;
@@ -538,7 +684,7 @@ function interpolateRemoteCars(dt) {
     // 目标点会一次性前跳 8 米 —— 那也是一次"闪"。
     const silenceMs = Math.max(0, c.netAge || 0);
     const res = sampleRemote(buf, entryPlayMs, Math.min(250, 30 + silenceMs));
-    if (!res) continue;
+    if (!res) { e.sk = null; continue; }   // 无样本 = 本帧不动，轮胎印的差分基准要作废
 
     // 自适应延迟的反馈信号：这一帧缓冲区是否真的被掏空（正在直线外推）。
     // 只统计"采样间隔正常、且没有失联"的对端 —— 慢对端天生每帧见底，不该带偏全场延迟。
@@ -631,6 +777,9 @@ function interpolateRemoteCars(dt) {
       if (Math.abs(e.pushX) < 0.001) e.pushX = 0;
       if (Math.abs(e.pushY) < 0.001) e.pushY = 0;
     }
+
+    // ---- 4. 轮胎印：用最终显示位姿本地推算（必须在微平滑/弹开之后，否则印子会离车轮几厘米）----
+    emitRemoteSkid(e, dt, fx);
   }
 }
 
@@ -792,7 +941,7 @@ export function updateNetRace(dt, localInput, now, fx, finalStep = true) {
   // 用的是上一帧的 netStarved（一帧延迟对 15ms 级别的调整没有影响）。
   clock.setDelay(delayCtl.update(dt, netStarved));
   clock.update(dt);
-  interpolateRemoteCars(dt);
+  interpolateRemoteCars(dt, fx);
 
   // ---- 3. QQ 飞车式客户端非对称碰撞与打击感响应 ----
   if (me) {

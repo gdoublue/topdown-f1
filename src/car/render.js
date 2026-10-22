@@ -1,4 +1,4 @@
-// 赛车渲染：以“米”为单位绘制（车宽 2m、车长 5.6m），再按 M 缩放到世界
+// 赛车渲染：以"米"为单位绘制（车宽 2m、车长 5.6m），再按 M 缩放到世界
 import { M } from "../config.js";
 import { TAU, rrect } from "../utils.js";
 
@@ -135,6 +135,75 @@ export function getRandomLivery(slotIdx = 0, defaultNum = null) {
   const num = defaultNum || numList[slotIdx % numList.length] || String(slotIdx + 1);
   return {
     ...p,
+    num,
+  };
+}
+
+/* ================= 逐部件随机涂装（在线 PK 用） =================
+  与上面的整包配色板不同：不抽取现成的一套配色，而是车身渐变、侧箱、尾翼、
+  引擎盖拉花、头盔、车号颜色各自独立随机，同场多台车几乎不可能撞色。
+  车身三段渐变共用一个随机色相族（否则整车像调色盘），
+  其余部件强制与车身色相错开 70°~290°，保证部件之间看得清边界。 */
+const LIVERY_NUM_POOL = ["1", "16", "44", "55", "11", "81", "4", "63", "7", "9", "23", "77"];
+const LIVERY_NUM_COLORS = ["#ffffff", "#0f172a", "#fde047", "#f8fafc"];
+
+// 稳定种子：同一台车（sid / 车号）在任何客户端算出的涂装必须完全一样，
+// 否则联机时"自己屏幕上是青色车、别人屏幕上是紫色车"。
+function hashSeed(v) {
+  const s = String(v ?? "");
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+// mulberry32：小而稳的确定性伪随机数发生器（同种子 → 同序列）
+function mulberry32(a) {
+  let t0 = a >>> 0;
+  return function () {
+    t0 = (t0 + 0x6D2B79F5) >>> 0;
+    let t = t0;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function hslStr(h, s, l, a = null) {
+  const hh = Math.round(((h % 360) + 360) % 360);
+  const ss = Math.round(s);
+  const ll = Math.round(l);
+  return a == null ? `hsl(${hh}, ${ss}%, ${ll}%)` : `hsla(${hh}, ${ss}%, ${ll}%, ${a})`;
+}
+
+// seed == null → 真随机（单机）；给 seed 则确定性生成（联机，靠 sid 对齐）
+export function getRandomPartLivery(slotIdx = 0, defaultNum = null, seed = null) {
+  const rnd = seed == null ? Math.random : mulberry32(hashSeed(seed));
+  const randRange = (a, b) => a + rnd() * (b - a);
+  const randHue = () => rnd() * 360;
+  // 与 base 色相至少错开 minGap，方向随机（制造强对比的部件色）
+  const contrastHue = (base, minGap) => {
+    const gap = randRange(minGap, 360 - minGap);
+    return base + (rnd() < 0.5 ? gap : -gap);
+  };
+
+  const hBody = randHue();
+  const satBody = randRange(60, 92);
+  const num = defaultNum || LIVERY_NUM_POOL[slotIdx % LIVERY_NUM_POOL.length] || String(slotIdx + 1);
+  return {
+    name: "逐部件随机",
+    grad: [
+      hslStr(hBody + randRange(-12, 12), satBody, randRange(56, 72)),
+      hslStr(hBody, satBody, randRange(38, 50)),
+      hslStr(hBody + randRange(-16, 16), Math.min(96, satBody + 6), randRange(20, 30)),
+    ],
+    side: hslStr(contrastHue(hBody, 70), randRange(55, 90), randRange(32, 52)),
+    wing: hslStr(contrastHue(hBody, 90), randRange(70, 95), randRange(45, 62)),
+    stripe: hslStr(contrastHue(hBody, 90), randRange(70, 95), 72, 0.92),
+    helmet: hslStr(randHue(), randRange(75, 95), randRange(52, 68)),
+    numColor: LIVERY_NUM_COLORS[Math.floor(rnd() * LIVERY_NUM_COLORS.length)],
+    color: hslStr(hBody, 78, 52),        // 小地图 / HUD 排位条主题色跟随车身主色
     num,
   };
 }

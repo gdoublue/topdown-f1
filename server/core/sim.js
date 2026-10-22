@@ -45,10 +45,10 @@ export class RaceSim {
       ? (this.humans[0]?.carId || AI_CONFIGS[0].id)
       : null;
     let gridPos = this.humans.length;   // 人类占前排发车位，AI 排后
-    const usedCfg = new Set(this.humans.map(h => h.carId));
+    // AI 阵容固定：人类选了同一款车也照常出这台 AI（保留它原本的车和车手），
+    // 不再从 AI 名单里剔除被玩家占用的车型；同款车的区分交给客户端的随机涂装。
     for (const cfg of AI_CONFIGS) {
       if (this.aiEntries.length >= aiCount) break;
-      if (!sameCarId && usedCfg.has(cfg.id)) continue;
       const perfCfg = sameCarId
         ? (AI_CONFIGS.find(c => c.id === sameCarId) || AI_CONFIGS[0])
         : cfg;

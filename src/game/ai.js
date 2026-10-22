@@ -40,11 +40,9 @@ export function buildCarVTarget(perf = {}, opts = {}, data = null) {
   const topSpeed = perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0];
   const latGrip = perf.latGrip ?? PHYS.latGrip;
   const maxOmega = perf.maxOmega ?? PHYS.maxOmega;
-  const brakePlan = PHYS.brake * (perf.brakeMult ?? 1.0)
-    * (opts.brakeFactor ?? perf.vtBrakeFactor ?? 0.58);
-  // cornerGripMult：实时调校用的弯速极限系数（1 = 配置原始值，>1 更激进、<1 更保守）
+  const brakePlan = PHYS.brake * (perf.brakeMult ?? 1.0) * (opts.brakeFactor ?? 0.58);
   const A_LAT = latGrip
-    * Math.min(1.0, (opts.gripFactor ?? perf.vtGripFactor ?? 0.78) * (perf.cornerGripMult ?? 1));
+    * Math.min(1.0, (opts.gripFactor ?? 0.78) * (perf.cornerGripMult ?? 1));
   const vt = new Float32Array(_N);
 
   const w = Math.max(1, Math.round(30 / Math.max(0.1, _DS)));
@@ -978,17 +976,14 @@ export const AI_CONFIGS = [
     driverName: "勒克莱尔 (LEC #16)",
     driverShort: "勒克莱尔",
     driverCode: "LEC",
-    driver: driveApexHunter,
-    // 真实特性：慢速发卡弯机械抓地最强、转向响应极度敏捷，出弯牵引爆发力强
+    driver: geminiDriver,
     perf: {
-      maxSpeed: [100.0, 90.0, 33.6],   // 沥青极速 360.0 km/h
-      latGrip: 48.2,                   // 最大横向抓地 4.9g (弯道极限最高)
-      maxOmega: 3.75,                  // 方向盘转向响应最快最灵敏
-      accelMult: 1.05,                 // 出弯加速最快
+      maxSpeed: [100.0, 90.0, 33.6],
+      latGrip: 48.2,
+      maxOmega: 3.75,
+      accelMult: 1.05,
       brakeMult: 1.03,
-      steerRate: 13.5,
-      vtGripFactor: 0.86,
-      vtBrakeFactor: 0.82
+      steerRate: 13.5
     }
   },
   {
@@ -1003,17 +998,14 @@ export const AI_CONFIGS = [
     driverName: "维斯塔潘 (VER #1)",
     driverShort: "维斯塔潘",
     driverCode: "VER",
-    driver: driveVectorPursuit,
-    // 真实特性：全场最高直线尾速与 DRS 效率，地面效应高速弯下压力优秀，极限定点晚刹与极早开油出弯
+    driver: geminiDriver,
     perf: {
-      maxSpeed: [101.5, 92.0, 34.0],   // 沥青极速 369.0 km/h (全场最高极速)
-      latGrip: 47.6,                   // 高速弯地面效应强下压力
-      maxOmega: 3.60,                  // 极度敏捷激进的前轴响应
-      accelMult: 1.03,                 // 本田 RBPT 混合动力强劲出弯扭矩
-      brakeMult: 1.04,                 // 极限定点晚刹制动 bite
-      steerRate: 13.8,                 // 闪电般直接的转向手感
-      vtGripFactor: 0.87,              // 弯道极限抓地利用率
-      vtBrakeFactor: 0.84              // 晚刹车规划利用率
+      maxSpeed: [101.5, 92.0, 34.0],
+      latGrip: 47.6,
+      maxOmega: 3.60,
+      accelMult: 1.03,
+      brakeMult: 1.04,
+      steerRate: 13.8
     }
   },
   {
@@ -1029,10 +1021,9 @@ export const AI_CONFIGS = [
     driverShort: "阿隆索",
     driverCode: "ALO",
     driver: geminiDriver,
-    // 真实特性：弯道下压力足，但直道风阻偏大，尾速略逊
     perf: {
-      maxSpeed: [100.3, 87.5, 33.0],    // 沥青极速
-      latGrip: 47.2,                   // 弯中抓地
+      maxSpeed: [100.3, 87.5, 33.0],
+      latGrip: 47.2,
       maxOmega: 3.55,
       accelMult: 0.99,
       brakeMult: 0.98,
@@ -1051,18 +1042,14 @@ export const AI_CONFIGS = [
     driverName: "汉密尔顿 (HAM #44)",
     driverShort: "汉密尔顿",
     driverCode: "HAM",
-    driver: driveSmoothCruiser,
-    // 真实特性：极强制动力，晚刹深扎，底盘巡航稳定
+    driver: geminiDriver,
     perf: {
-      maxSpeed: [103.2, 92.8, 33.6],   // 沥青极速
+      maxSpeed: [103.2, 92.8, 33.6],
       latGrip: 46.0,
-      maxOmega: 3.30,                  // 沉稳平顺，不神经质
+      maxOmega: 3.30,
       accelMult: 1.00,
-      brakeMult: 1.08,                 // 全场最强刹车
-      steerRate: 10.5,
-      // Smooth Cruiser Pro 速度规划调优：更高抓地利用率 + 贴近真实制动能力
-      vtGripFactor: 0.88,
-      vtBrakeFactor: 0.92
+      brakeMult: 1.08,
+      steerRate: 10.5
     }
   },
     {
@@ -1078,17 +1065,13 @@ export const AI_CONFIGS = [
     driverShort: "Ai",
     driverCode: "AIM",
     driver: geminiDriver,
-    // 真实特性：极强制动力，晚刹深扎，底盘巡航稳定
     perf: {
-      maxSpeed: [101.5, 91.8, 33.6],   // 沥青极速
+      maxSpeed: [101.5, 91.8, 33.6],
       latGrip: 47.0,
-      maxOmega: 3.40,                  // 沉稳平顺，不神经质
+      maxOmega: 3.40,
       accelMult: 1.02,
-      brakeMult: 1.08,                 // 全场最强刹车
-      steerRate: 13.5,
-      // Smooth Cruiser Pro 速度规划调优：更高抓地利用率 + 贴近真实制动能力
-      vtGripFactor: 0.95,
-      vtBrakeFactor: 0.92
+      brakeMult: 1.08,
+      steerRate: 13.5
     }
   },
   {
@@ -1104,22 +1087,15 @@ export const AI_CONFIGS = [
     driverShort: "小米车手",
     driverCode: "XIAO",
     driver: geminiDriver,
-    // 真实特性：三电机 1138kW，0-100km/h 1.98s 弹射起步；350km/h 电子限速；
-    // 民用车物理极限：横向 ≈1.65g、制动 ≈1.8g（碳陶），远低于 F1 的 4.6g/6.3g
     perf: {
-      maxSpeed: [133.2, 88.0, 63.6],    // 沥青极速 350 km/h（SU7 Ultra 电子限速）
-      latGrip: 16.2,                   // ≈1.65g：赛道热熔胎横向抓地物理极限（F1 为 4.6g）
-      maxOmega: 3.50,                  //低速最大转向角速度，限制发卡弯过弯速度
-      powerKW: 1740,                    //  机持续轮上功率
-
-      massKg: 2300,                    // 整备质量
-      launchAccel: 14.2,               // 四四驱弹射起步极限 → 0-100km/h ≈1.96s（官方 1.98s）
-      accelMult: 1.25,                 // （电车走功率模型，此系数仅作后备）
-      brakeMult: 1.90,                 // 碳陶 ≈1.8g 制动（F1 为 6.3g）
-      steerRate: 9.5,
-      // Smooth Cruiser Pro 速度规划调优：更高抓地利用率 + 贴近真实制动能力
-      vtGripFactor: 0.88,
-      vtBrakeFactor: 0.92
+      maxSpeed: [133.2, 88.0, 63.6],
+      latGrip: 16.2,
+      maxOmega: 3.50,
+      powerKW: 1740,
+      massKg: 2300,
+      launchAccel: 14.2,
+      brakeMult: 0.29,
+      steerRate: 9.5
     }
   },
     {
@@ -1134,23 +1110,16 @@ export const AI_CONFIGS = [
     driverName: "仰望车手 (U9X #9)",
     driverShort: "仰望车手",
     driverCode: "U9X",
-    driver: driveSmoothCruiser,
-    // 真实特性：全球首款 1200V 超高压平台，四电机单台 555kW 综合超 3000Ps，
-    // 实测极速 496.22 km/h（德国 ATP），纽北 6:59.157（量产电车首次进 7 分）；
-    // 2.4 吨车身民用车物理极限：横向 ≈1.73g、制动 ≈2.0g（碳陶）
+    driver: geminiDriver,
     perf: {
-      maxSpeed: [137.8, 124.0, 33.6],  // 沥青极速 496.22 km/h（实测）
-      latGrip: 17.0,                   // ≈1.73g：赛道热熔胎横向抓地极限（F1 为 4.6g）
-      maxOmega: 2.60,                  // 四电机矢量扭矩分配，低速转向稍好于同重量
-      powerKW: 1600,                   // 四电机持续功率 ≈1600kW（峰值 2210kW / 超 3000Ps）
-      massKg: 2475,                    // 整备质量
-      launchAccel: 14.6,               // 弹射抓地极限 ≈1.49g → 0-100km/h = 27.78/14.6 ≈ 1.90s（官方 1.9s）
-      accelMult: 1.35,                 // （电车走功率模型，此系数仅作后备）
-      brakeMult: 0.32,                 // 碳陶 ≈2.0g 制动
-      steerRate: 9.5,
-      // Smooth Cruiser Pro 速度规划调优：更高抓地利用率 + 贴近真实制动能力
-      vtGripFactor: 0.88,
-      vtBrakeFactor: 0.92
+      maxSpeed: [137.8, 124.0, 33.6],
+      latGrip: 17.0,
+      maxOmega: 2.60,
+      powerKW: 1600,
+      massKg: 2475,
+      launchAccel: 14.6,
+      brakeMult: 0.32,
+      steerRate: 9.5
     }
   }
 ];
@@ -1216,6 +1185,7 @@ export function applyCarConfig(car, cfg) {
 // 内置算法同样走这条路（它们只写 car._xxx），所以玩家代码与内置代码看到的世界完全一致。
 // this 用空对象：裸调用会让非严格模式函数的 this 变成全局对象（= 把 window 递过去）。
 export function driveAI(car, out, dt, otherCars) {
-  const driver = car.driver || (AI_CONFIGS.find(c => c.id === car.algorithm)?.driver) || driveApexHunter;
+  // 兜底算法统一为 geminiDriver（AI_CONFIGS 里的所有车都已使用它）
+  const driver = car.driver || (AI_CONFIGS.find(c => c.id === car.algorithm)?.driver) || geminiDriver;
   driver.call(DRIVER_THIS, driverCarView(car), out, dt, driverCarsView(otherCars));
 }

@@ -4,7 +4,7 @@ import { TRACKS, getTrack } from "./track/tracks.js";
 import { WORLD, pts, N, switchTrack, currentTrack, currentTrackId } from "./track/geometry.js";
 import { buildTrackCanvas } from "./track/render.js";
 import { createCar, stepCar, resolveCarCollisions, finishedCarInput } from "./car/physics.js";
-import { drawCar, getRandomLivery } from "./car/render.js";
+import { drawCar, getRandomPartLivery } from "./car/render.js";
 import { resetCamera, updateCamera, applyCamera, setZoomScale, cam } from "./game/camera.js";
 import { initInput, input, NO_INPUT } from "./game/input.js";
 import * as fx from "./game/effects.js";
@@ -24,7 +24,13 @@ import * as audio from "./game/audio.js";
 import { AI_CONFIGS, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
 import { conn } from "./net/connection.js";
 import { rtc } from "./net/rtc.js";
-import { initOnlineUI, showOnline as showOnlineUI, showOnlineRoom, showOnlinePracticeRoom, hideOnline as hideOnlineUI, leaveOnlineRoom } from "./net/onlineUI.js";
+import {
+  initOnlineUI, showOnline as showOnlineUI, showOnlineRoom, showOnlinePracticeRoom,
+  hideOnline as hideOnlineUI, leaveOnlineRoom, isInRoom,
+  joinSharedRoom, getSavedNickname, saveNickname
+} from "./net/onlineUI.js";
+import { initChatPanel, showChat, setChatRoom, pushSystemChat } from "./ui/chatPanel.js";
+import { buildShareLink, readShareInvite, decodeShareToken } from "./net/share.js";
 import { getFingerprint } from "./net/fingerprint.js";
 import { startNetRace, stopNetRace, updateNetRace, bindNetRaceHandlers, netrace, forfeitNetRace, setNetAutopilot } from "./net/netrace.js";
 import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "./ui/labels.js";
@@ -65,7 +71,6 @@ let mode = SPECTATE ? "spectate" : null;
 let playerCarId = null;   // 玩家选择的赛车 id（solo / vs）
 let playerIndex = 0;      // 玩家在 cars 数组中的下标
 let started = false;
-let startedOnce = false;      // 完成"模式 → 赛车"选择后才开始倒计时
 
 // 赛车列表：对战/观战模式装载全部 AI 配置；单人模式只有玩家一辆
 let cars = [];
@@ -148,19 +153,35 @@ function setupCars() {
     return;
   }
 
-  // 发车位：读取 AI_CONFIGS 中各车 gridPos 指定的杆位，其余车辆随机填入剩余格位
-  const carGrid = buildGridSlots(AI_CONFIGS, true);
+  // vs：玩家占了一台车，但电脑仍要保留这个型号的车手 → 名单 = 全部车型 + 一台同款车（玩家开）
+  // 观战：名单就是全部车型，没有玩家车
   const chosen = AI_CONFIGS.findIndex(c => c.id === playerCarId);
-  playerIndex = (mode === "vs" && chosen >= 0) ? chosen : 0;
+  const playerCfg = AI_CONFIGS[chosen >= 0 ? chosen : 0];
+  const roster = mode === "vs" ? [...AI_CONFIGS, playerCfg] : AI_CONFIGS;
+  // 玩家车固定排在名单末尾（前面全是 AI 的车队车手）
+  playerIndex = mode === "vs" ? AI_CONFIGS.length : 0;
 
-  for (let i = 0; i < AI_CONFIGS.length; i++) {
-    const car = applyCarConfig(createCar(carGrid[i]), AI_CONFIGS[i]);
+  // 发车位：读取配置中 gridPos 指定的杆位，其余车辆随机填入剩余格位
+  const carGrid = buildGridSlots(roster, true);
+
+  for (let i = 0; i < roster.length; i++) {
+    const car = applyCarConfig(createCar(carGrid[i]), roster[i]);
     // 观战模式没有“玩家车”：不要给 P1 误标 YOU
     car.isPlayer = mode === "vs" && i === playerIndex;
     car.isAI = !car.isPlayer;
     initCarRaceState(car);
     cars.push(car);
     aiInputs.push(createAIInput());
+  }
+
+  // 玩家与 AI 同款车并存：玩家车换成逐部件随机配色（与在线 PK 同一套规则），
+  // 否则两台一模一样的车在小地图点位和车流里分不清。
+  if (mode === "vs") {
+    const me = cars[playerIndex];
+    const livery = getRandomPartLivery(playerIndex);
+    me.customLivery = livery;
+    me.color = livery.color;
+    me.number = livery.num;
   }
 }
 
@@ -277,7 +298,7 @@ let quitConfirmAutoTakeover = false;
 
 // 用真实弹窗状态重算冻结标记：避免某个弹窗还开着、比赛却已经放行的漏洞
 export function syncModalOpen() {
-  isModalOpen = ["startModal", "trackModal", "resultsModal", "confirmModal", "autopilotModal"]
+  isModalOpen = ["startModal", "trackModal", "resultsModal", "confirmModal", "autopilotModal", "nickModal", "shareModal"]
     .some(id => document.getElementById(id)?.classList.contains("open"));
   return isModalOpen;
 }
@@ -324,14 +345,16 @@ function renderLapChips() {
   updateTrackStartSummary();
 }
 
-// 底部开始栏：显示即将开跑的赛道 / 圈数 / 长度
+// 底部开始栏：显示即将开跑的赛车 / 赛道 / 圈数 / 长度
 function updateTrackStartSummary() {
   const el = document.getElementById("trackStartSummary");
   if (!el) return;
   const t = getTrack(pendingTrackId || currentTrackId);
   if (!t) return;
   const laps = effectiveLaps(t.laps);
-  el.innerHTML = `即将开跑：<b>${t.flag} ${t.name}</b> · <em>${laps} 圈</em> · ${(t.length / 1000).toFixed(2)} km`;
+  const cfg = AI_CONFIGS.find(c => c.id === playerCarId);
+  const carText = cfg ? ` · 🚗 <b>${cfg.team} ${cfg.model}</b>` : "";
+  el.innerHTML = `即将开跑：<b>${t.flag} ${t.name}</b> · <em>${laps} 圈</em> · ${(t.length / 1000).toFixed(2)} km${carText}`;
 }
 
 function onLapChipClick(e) {
@@ -339,8 +362,8 @@ function onLapChipClick(e) {
   if (!chip) return;
   setRaceLaps(chip.getAttribute("data-laps"));
   renderLapChips();
-  // 比赛已开始：改变圈数立即重开比赛生效（与切换赛道同规则）
-  if (started && mode !== "onlinerace") reset();
+  // 比赛中改圈数立即重开生效；开局流程（第 3 步选赛道）里只记录，等点「开始比赛」再发车
+  if (started && mode !== "onlinerace" && !trackModalFromStart) reset();
 }
 
 let pendingTrackId = null;
@@ -372,14 +395,36 @@ function renderTrackCards() {
 // fromStart：开局流程（选完车 → 选赛道）打开的，取消时要退回"选赛车"而不是直接开赛
 let trackModalFromStart = false;
 
+// 面板文案随入口切换：
+//  · 开局第 3 步（已选好赛车）→ 选赛道 + 圈数，确认后才发车
+//  · 比赛中点顶部胶囊 → 换赛道，关闭即继续比赛
+function syncTrackModalChrome() {
+  const title = document.getElementById("trackModalTitle");
+  const desc = document.getElementById("trackModalDesc");
+  const closeBtn = document.getElementById("closeTrackModal");
+  if (trackModalFromStart) {
+    const cfg = AI_CONFIGS.find(c => c.id === playerCarId);
+    if (title) title.textContent = "选择赛道与圈数 (CIRCUIT & LAPS)";
+    if (desc) {
+      desc.textContent = cfg
+        ? `第 3 步 · 你的赛车：${cfg.team} ${cfg.model} · 选好赛道与圈数后点击「开始比赛」发车，按 ← 可返回重选赛车`
+        : "选好赛道与圈数后点击「开始比赛」发车";
+    }
+    if (closeBtn) { closeBtn.textContent = "←"; closeBtn.title = "返回上一步（重新选择赛车）"; }
+  } else {
+    if (title) title.textContent = "选择大奖赛赛道 (SELECT CIRCUIT)";
+    if (desc) desc.textContent = "精选 5 座真实世界传奇 F1 赛车场 · 物理引擎与自动驾驶 AI 100% 自动适配";
+    if (closeBtn) { closeBtn.textContent = "✕"; closeBtn.title = "关闭并继续比赛"; }
+  }
+}
+
 export function openTrackModal(fromStart = false) {
   const modal = document.getElementById("trackModal");
   if (!modal) return;
   trackModalFromStart = !!fromStart;
   pendingTrackId = currentTrackId;
   renderTrackCards();
-  const closeBtn = document.getElementById("closeTrackModal");
-  if (closeBtn) closeBtn.title = fromStart ? "返回上一步（重新选择赛车）" : "关闭并继续比赛";
+  syncTrackModalChrome();
   modal.classList.add("open");
   isModalOpen = true;
 }
@@ -407,14 +452,26 @@ export function cancelTrackModal() {
   closeTrackModal();
 }
 
+// 赛道贴图与小地图都是按"当前赛道上下文"预渲染的位图快照：
+// 任何改变当前赛道的路径（选赛道 / 在线开赛 / 练习房）都必须调这里，
+// 否则物理已经跑到新赛道，画面还停在上一张，车会在旧赛道上"越野"。
+// 贴图是一张超大离屏画布（SS=4 时上百 MB），赛道没变就不重建。
+let visualTrackId = currentTrackId;
+function rebuildTrackVisuals() {
+  if (visualTrackId === currentTrackId) return;
+  visualTrackId = currentTrackId;
+  trackCanvas = buildTrackCanvas(currentTrackSS);
+  pendingTrackId = currentTrackId;
+  initMinimap();
+}
+
 export function applyTrack(trackId) {
   trackModalFromStart = false;
   switchTrack(trackId || currentTrackId);
   pendingTrackId = currentTrackId;
-  trackCanvas = buildTrackCanvas(currentTrackSS);
 
   updateTrackUI();
-  initMinimap();
+  rebuildTrackVisuals();
   renderTrackCards();
   // 先关闭面板再重开比赛：避免面板还开着时后台已经开始倒计时/跑圈
   closeTrackModal();
@@ -470,6 +527,18 @@ function initTrackSelector() {
 // 键盘按键：T/t 切换赛道面板，Esc 关闭面板，1~4 或 Tab 切换跟随赛车
 window.addEventListener("keydown", (e) => {
   if (resultsShown) return;   // 结算大屏展示中屏蔽比赛快捷键
+  // 正在输入（聊天 / 昵称 / 分享链接 / 算法代码）：一个快捷键都不要响应
+  const typingTag = (e.target && e.target.tagName) || "";
+  if (typingTag === "INPUT" || typingTag === "TEXTAREA" || typingTag === "SELECT" || e.target?.isContentEditable) return;
+  // 昵称 / 分享弹窗：Esc 关闭，其他键屏蔽
+  if (document.getElementById("nickModal")?.classList.contains("open")) {
+    if (e.key === "Escape") { e.preventDefault(); closeNickModal(); }
+    return;
+  }
+  if (document.getElementById("shareModal")?.classList.contains("open")) {
+    if (e.key === "Escape") { e.preventDefault(); closeShareModal(); }
+    return;
+  }
   const startModalOpen = document.getElementById("startModal")?.classList.contains("open");
   if (startModalOpen) {
     // 开局弹窗打开时屏蔽比赛快捷键，但保留 Esc = 返回上一步（根步骤不响应）
@@ -677,11 +746,14 @@ function update(dt, finalStep = true, simNowMs = 0) {
     finishAt = performance.now() - 3000;   // 让本帧末尾立刻弹出结算大屏
   }
 
-  // 检查是否全员完赛；未完赛时用超时兜底，避免一辆车卡死导致永远不结算
+  // 检查是否全员完赛；未完赛时用超时兜底，避免一辆车卡死导致永远不结算。
+  // vs 模式：AI 先冲线不能结束比赛 —— 玩家自己的车还没冲线时，20s 掉队兜底与
+  // 硬上限一律不生效，必须等玩家完赛（玩家冲线后由上面的快进把剩余 AI 跑完）。
   const allFinished = cars.every(c => c.finished);
+  const waitPlayerFinish = mode === "vs" && myCar && !myCar.finished;
   if (allFinished && !finishAt) {
     finishAt = performance.now();
-  } else if (!finishAt) {
+  } else if (!finishAt && !waitPlayerFinish) {
     if (!firstFinishAt && cars.some(c => c.finished)) firstFinishAt = simClock;
     const stalled = firstFinishAt && simClock - firstFinishAt > STALL_FINISH_MS;
     const tooLong = simClock > raceHardLimitMs();
@@ -795,10 +867,13 @@ function selectMode(m) {
     openStartModal();
     isModalOpen = true;
     showOnlineUI();
+    showChat(true);              // 连上服务器后才真正显示；大厅里只能发全局
+    setChatRoom(isInRoom());
     return;
   }
   mode = m;
   try { location.hash = "#/" + m; } catch (e) {}
+  showChat(false);               // 单机 / 对战 AI：不显示在线聊天
   showCarStep(m);
   openStartModal();
   isModalOpen = true;
@@ -809,6 +884,8 @@ function selectMode(m) {
 function backToModeStep() {
   if (onlineQuitConfirmOpen) closeConfirmModal();   // 归还临时自动驾驶
   leaveOnlineSession();
+  showChat(false);              // 离开在线流程：收起聊天面板
+  setChatRoom(false);
   mode = null;
   releaseFocusAutopilot(true);   // 离开对局：把"换视角临时接管"的自动驾驶还回去
   onlinePractice = false;
@@ -826,6 +903,7 @@ function backToModeStep() {
 }
 
 // 第二步：选择赛车（对战模式下其余车辆自动交给 AI）
+// 选完车不直接发车：进入第三步「赛道与圈数」，由玩家确认后才开跑
 function selectCar(carId) {
   playerCarId = carId;
   closeStartModal();
@@ -833,7 +911,7 @@ function selectCar(carId) {
   startGame();
 }
 
-function startGame({ skipTrackModal = false, forceTrackSetup = false } = {}) {
+function startGame({ skipTrackModal = false } = {}) {
   started = true;
   resultsShown = false;
   isModalOpen = false;
@@ -852,11 +930,8 @@ function startGame({ skipTrackModal = false, forceTrackSetup = false } = {}) {
   updateTrackUI();
   updateHelpText();
   updateTopControls();   // 从在线对局切回单机/对战时，把联机里隐藏的控件恢复回来
-  // 开局先选赛道；URL 显式指定过 ?track= / 练习房已选好赛道时直接开赛
-  if (!skipTrackModal && mode !== "spectate" && (forceTrackSetup || !startedOnce)) {
-    startedOnce = true;
-    openTrackModal(true);
-  }
+  // 单人 / 对战 AI：每次开局都先停在「赛道与圈数」这一步（练习房已选好赛道时直接发车）
+  if (!skipTrackModal && mode !== "spectate") openTrackModal(true);
 }
 
 
@@ -938,6 +1013,112 @@ function closeConfirmModal() {
   syncModalOpen();
 }
 
+// ================= 昵称弹窗（邀请链接进来、本机还没存过昵称时） =================
+let nickConfirmCb = null;
+
+function openNickModal(onConfirm) {
+  const modal = document.getElementById("nickModal");
+  if (!modal) return;
+  const input = document.getElementById("nickModalInput");
+  const hint = document.getElementById("nickModalHint");
+  if (hint) hint.textContent = "";
+  if (input) input.value = "";
+  nickConfirmCb = onConfirm || null;
+  modal.classList.add("open");
+  isModalOpen = true;
+  setTimeout(() => input?.focus(), 60);
+}
+
+function closeNickModal() {
+  document.getElementById("nickModal")?.classList.remove("open");
+  nickConfirmCb = null;
+  syncModalOpen();
+}
+
+function confirmNickModal() {
+  const input = document.getElementById("nickModalInput");
+  const hint = document.getElementById("nickModalHint");
+  const name = saveNickname(input?.value || "");
+  if (!name) {
+    if (hint) hint.textContent = "昵称不能为空（1-12 个字）";
+    input?.focus();
+    return;
+  }
+  const fn = nickConfirmCb;
+  closeNickModal();
+  fn?.(name);
+}
+
+// ================= 分享房间（游戏地址明文 + 服务器地址加密） =================
+function openShareModal(roomId) {
+  const modal = document.getElementById("shareModal");
+  if (!modal) return;
+  const text = document.getElementById("shareLinkText");
+  const hint = document.getElementById("shareHint");
+  if (text) text.value = buildShareLink(roomId);
+  if (hint) hint.textContent = "游戏地址为明文；服务器地址与房间号已加密";
+  modal.classList.add("open");
+  isModalOpen = true;
+  setTimeout(() => { text?.focus(); text?.select(); }, 60);
+}
+
+function closeShareModal() {
+  document.getElementById("shareModal")?.classList.remove("open");
+  syncModalOpen();
+}
+
+async function copyShareLink() {
+  const text = document.getElementById("shareLinkText");
+  const hint = document.getElementById("shareHint");
+  const link = text?.value || "";
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(link);
+    ok = true;
+  } catch {
+    try { text?.select(); ok = document.execCommand("copy"); } catch { ok = false; }
+  }
+  if (hint) hint.textContent = ok ? "✅ 已复制，直接发给好友即可" : "⚠️ 自动复制失败，请手动全选复制上面的链接";
+}
+
+// ================= 邀请链接：#/join?h=<游戏地址明文>&k=<加密的服务器地址+房间号> =================
+// 返回 true 表示本次进入由邀请链接接管（不再走常规 hash 路由）
+function runInviteFlow() {
+  const invite = readShareInvite();
+  if (!invite) return false;
+  const payload = decodeShareToken(invite.k);
+  if (!payload || !payload.s) {
+    pushSystemChat("⚠️ 邀请链接解析失败（可能已过期）");
+    return false;
+  }
+
+  // 游戏站点不同源 → 先跳到链接里的站点（http 地址是明文），由那边的页面继续解析
+  let gameOrigin = "";
+  let gameTarget = "";
+  try {
+    const u = new URL(invite.h || location.origin);
+    gameOrigin = u.origin;
+    gameTarget = u.origin + u.pathname;
+  } catch { /* 地址不合法就按当前站点处理 */ }
+  if (gameOrigin && gameOrigin !== location.origin) {
+    location.replace(gameTarget + location.hash);
+    return true;
+  }
+
+  selectMode("online");
+  showChat(true);
+  setChatRoom(false);
+
+  const join = () => {
+    pushSystemChat("正在连接邀请里的服务器…");
+    joinSharedRoom({ wsUrl: payload.s, roomId: payload.r });
+  };
+  // 本机还没昵称：先让玩家填一个，填完再连服务器进房
+  if (getSavedNickname()) join();
+  else openNickModal(() => join());
+  return true;
+}
+
 // 只退出"自己这辆车"的在线比赛：停止本地渲染与状态上报，不动服务器上的其他车手。
 // 用于房间内点「离开房间」/ 断线重连后看到房间界面等场景：
 // 之前这里不处理比赛态，会出现"已经退出房间，但本地比赛还在跑"的情况。
@@ -953,6 +1134,7 @@ function exitLocalNetRace() {
   resultsShown = false;
   finishAt = 0;
   winner = null;
+  showChat(true);
   updateTopControls();
 }
 
@@ -1002,9 +1184,9 @@ function updateHelpText() {
   } else if (mode === "spectate") {
     help.innerHTML = "AI 锦标赛 · 点击顶部或按 T 选赛道 · 1-7 换视角 · + / - 倍速快进 · R 重开 · Esc 菜单";
   } else if (mode === "vs") {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到选车" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
   } else {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到选车" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
   }
 }
 
@@ -1034,6 +1216,28 @@ function initStartFlow() {
   document.getElementById("closeConfirmModal")?.addEventListener("click", closeConfirmModal);
   document.getElementById("confirmCancelBtn")?.addEventListener("click", closeConfirmModal);
 
+  // 昵称弹窗（邀请链接进入、本机无昵称）
+  document.getElementById("nickModalOk")?.addEventListener("click", confirmNickModal);
+  const cancelNick = () => {
+    closeNickModal();
+    pushSystemChat("已取消加入房间：可以手动连接服务器或加入其它房间");
+  };
+  document.getElementById("nickModalCancel")?.addEventListener("click", cancelNick);
+  document.getElementById("nickModalClose")?.addEventListener("click", cancelNick);
+  document.getElementById("nickModalInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); confirmNickModal(); }
+  });
+
+  // 分享弹窗
+  document.getElementById("shareCopyBtn")?.addEventListener("click", copyShareLink);
+  document.getElementById("shareModalCancel")?.addEventListener("click", closeShareModal);
+  document.getElementById("shareModalClose")?.addEventListener("click", closeShareModal);
+  document.getElementById("shareModal")?.addEventListener("click", (e) => {
+    if (e.target.id === "shareModal") closeShareModal();
+  });
+
+  initChatPanel();   // 左下角在线聊天
+
   initResultsModal();
 
   initOnlineUI({
@@ -1042,13 +1246,23 @@ function initStartFlow() {
     onOpenAutopilot: () => openAutopilot(),
     // 退出房间前：把自己正在跑的比赛彻底停掉（认输/移出由服务端统一处理，其他车友不受影响）
     onBeforeLeaveRoom: exitLocalNetRace,
+    // 进 / 出房间：决定聊天面板能不能选「房间」频道
+    onRoomState: (inRoom) => setChatRoom(inRoom),
+    // 房间里的「🔗 分享房间」
+    onShareRoom: (roomId) => openShareModal(roomId),
+    // 服务端提示（例如邀请房间已失效）
+    onNotice: (title, sub) => showMsg(title, sub, 2600),
     onDisconnected: () => {
       // 在线比赛中掉线：终止比赛退回主菜单
       if (mode === "onlinerace") {
         stopNetRace();
         backToMainMenu();
+        showMsg("与服务器断开连接", "本局比赛已终止", 2500);
+        return;
       }
-      showMsg("与服务器断开连接", "", 2500);
+      // 单人计时 / 对战 AI 与服务器无关：之前连过在线留下的旧连接掉线时，
+      // 不能把"已断开连接"弹到单机赛道上打断比赛
+      if (mode === "online") showMsg("与服务器断开连接", "", 2500);
     },
   });
 
@@ -1075,6 +1289,8 @@ function startOnlineRace(msg) {
   onlinePractice = false;
   mode = "onlinerace";
   started = true;
+  showChat(true);       // 比赛中聊天面板保留，可切「全局 / 房间」
+  setChatRoom(true);
   lastNetSimAt = 0;   // 新一局：重置在线节拍的时间基准
 
   resetSimClock(0);
@@ -1086,6 +1302,9 @@ function startOnlineRace(msg) {
   // 在线对战的玩家车在本地模拟：自动驾驶算法交给 netrace 驱动
   setNetAutopilot(isAutopilotOn(), getAutopilotDriver());
   cars = startNetRace(msg, conn.session?.sid);
+  // startNetRace 内部按服务端下发的 trackId 切了赛道上下文（房间里换赛道后可能和上一局不同）：
+  // 贴图与小地图必须同步重建，否则这一局画面还停在旧赛道
+  rebuildTrackVisuals();
   focusIndex = Math.max(0, cars.findIndex(c => c.isPlayer));
   releaseFocusAutopilot(true);   // 上一局残留的"换视角接管"不能带进新一局
   switchFocusCar(focusIndex);
@@ -1114,11 +1333,10 @@ function startOnlinePractice(setup = {}) {
   setRaceLaps(laps);
   if (trackId !== currentTrackId) {
     switchTrack(trackId);
-    trackCanvas = buildTrackCanvas(currentTrackSS);
-    pendingTrackId = currentTrackId;
-    initMinimap();
+    rebuildTrackVisuals();
   }
   playerCarId = carId;
+  showChat(true);
   startGame({ skipTrackModal: true });   // 开赛设置已在练习房完成
   syncModalOpen();
 }
@@ -1139,6 +1357,7 @@ function returnToPracticeRoom() {
   try { location.hash = "#/online"; } catch (e) {}
   showOnlineStep();
   openStartModal();
+  showChat(true);
   showOnlinePracticeRoom();
   syncModalOpen();
   updateTopControls();
@@ -1148,7 +1367,14 @@ function returnToPracticeRoom() {
 // ================= 规范 Hash 路由调度器 =================
 function handleRoute() {
   const hash = (location.hash || "").replace(/^#\/?/, "");
-  const [route] = hash.split("/");
+  // 邀请链接形如 #/join?h=..&k=..：query 要剥掉才能取到路由名
+  const route = (hash.split("/")[0] || "").split("?")[0];
+
+  if (route === "join") {
+    // 运行中把邀请链接粘到地址栏（hashchange）也走同一套解析
+    if (!runInviteFlow()) updateTopControls();
+    return;
+  }
 
   if (route === "spectate") {
     if (mode !== "spectate" || !started) {
@@ -1196,8 +1422,8 @@ function exitRaceFlow() {
   winner = null;
   updateTopControls();
   updateHelpText();
-  // 上一层的默认落点是「赛道 / 圈数」设置；取消则继续退到「选车」
-  startGame({ forceTrackSetup: true });
+  // 上一层的默认落点是「赛道与圈数」步骤；再按 ← 才退到「选车」
+  startGame();
   syncModalOpen();
 }
 
@@ -1236,6 +1462,8 @@ function hideResults() {
   const modal = document.getElementById("resultsModal");
   if (modal) modal.classList.remove("open");
   resultsShown = false;
+  // 在线流程里结算屏关掉后聊天面板恢复（单机不带聊天）
+  if (mode === "onlinerace" || mode === "online" || (mode === "solo" && onlinePractice)) showChat(true);
   syncModalOpen();   // 只在没有其他弹窗打开时解除比赛冻结
 }
 
@@ -1335,6 +1563,7 @@ function showResults() {
   }
 
   modal.classList.add("open");
+  showChat(false);   // 结算大屏优先，聊天面板先收起来（返回房间/大厅时再显示）
 
   // 在线单人练习：成绩上传服务器排行榜
   const uploadEl = document.getElementById("resultsUpload");
@@ -1685,7 +1914,8 @@ updateTopControls();
 if (SPECTATE) {
   location.hash = "#/spectate";
   startGame();
-} else {
+} else if (!runInviteFlow()) {
+  // 邀请链接（#/join?h=..&k=..）优先：解析后自动连接并进房，其余情况走常规 hash 路由
   handleRoute();
 }
 

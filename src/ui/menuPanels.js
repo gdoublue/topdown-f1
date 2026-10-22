@@ -131,7 +131,7 @@ export function renderCarCards() {
             <i><em style="width:${gripPct}%"></em></i>
           </div>
         </div>
-        <div class="car-cta">驾驶此车 <span>→</span></div>
+        <div class="car-cta">下一步：赛道与圈数 <span>→</span></div>
       </div>
     `;
   }).join("");

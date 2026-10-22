@@ -157,6 +157,25 @@
     <div id="fpsCounter" title="实时帧率"><span>FPS</span><b id="fpsValue">60</b></div>
   </div>
 
+  <!-- 在线聊天：大厅只能发全局；房间 / 比赛中可选「全局 / 房间」 -->
+  <div id="chatPanel" class="chat-panel hidden">
+    <div class="chat-head">
+      <span class="chat-title">CHAT</span>
+      <select id="chatScope" class="chat-scope hidden" title="选择发送范围">
+        <option value="global">🌐 全局</option>
+        <option value="room">🏠 房间</option>
+      </select>
+      <span id="chatScopeTag" class="chat-scope-tag">🌐 全局</span>
+      <button id="chatToggle" class="chat-toggle" title="收起 / 展开聊天">—</button>
+    </div>
+    <div id="chatLog" class="chat-log"></div>
+    <div class="chat-input-row">
+      <input id="chatInput" class="chat-input" type="text" maxlength="120" autocomplete="off"
+             placeholder="说点什么…（Enter 发送）">
+      <button id="chatSend" class="chat-send" title="发送（Enter）">发送</button>
+    </div>
+  </div>
+
   <!-- 开局流程弹窗：玩法模式 → 赛车选择 -->
   <div id="startModal" class="track-modal-overlay">
     <div class="track-modal-card start-modal-card">
@@ -208,7 +227,7 @@
       <div id="carSelectWrap" class="hidden">
         <div class="car-grid-head">
           <span>SELECT YOUR MACHINE</span>
-          <small id="carGridHint">点击赛车立即进入赛道选择</small>
+          <small id="carGridHint">点击赛车 → 下一步选择赛道与圈数</small>
         </div>
         <div id="carCardsGrid" class="track-cards-grid"></div>
         <div class="autopilot-entry">
@@ -261,11 +280,11 @@
       <div class="track-modal-header">
         <div class="modal-title-wrap">
           <span class="f1-badge">FORMULA 1 GRAND PRIX</span>
-          <h2 class="modal-title">选择大奖赛赛道 (SELECT CIRCUIT)</h2>
+          <h2 class="modal-title" id="trackModalTitle">选择大奖赛赛道 (SELECT CIRCUIT)</h2>
         </div>
         <button id="closeTrackModal" class="track-close-btn" title="关闭并继续比赛">✕</button>
       </div>
-      <p class="track-modal-desc">精选 5 座真实世界传奇 F1 赛车场 · 物理引擎与自动驾驶 AI 100% 自动适配</p>
+      <p class="track-modal-desc" id="trackModalDesc">精选 5 座真实世界传奇 F1 赛车场 · 物理引擎与自动驾驶 AI 100% 自动适配</p>
       <div class="laps-row">
         <span class="laps-label">🏁 比赛圈数</span>
         <div id="lapChips" class="online-chips"></div>
@@ -357,6 +376,54 @@
         <a class="vt-mini autopilot-doc-link" href="./autopilot-doc.html" target="_blank" rel="noopener">📖 参数说明</a>
         <span id="autopilotStatus" class="autopilot-status"></span>
         <button id="autopilotDone" class="results-btn primary autopilot-done">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 邀请链接进入房间：本机没有昵称时先让玩家填一个 -->
+  <div id="nickModal" class="track-modal-overlay">
+    <div class="track-modal-card nick-card">
+      <div class="track-modal-header">
+        <div class="modal-title-wrap">
+          <span class="f1-badge">JOIN ROOM · INVITE LINK</span>
+          <h2 class="modal-title">加入好友房间</h2>
+        </div>
+        <button id="nickModalClose" class="track-close-btn">✕</button>
+      </div>
+      <p class="track-modal-desc">
+        本机还没有昵称。填一个就会显示在房间成员列表与聊天里，填完自动连接服务器并进入房间。
+      </p>
+      <div class="online-create">
+        <input id="nickModalInput" class="nick-input" type="text" maxlength="12"
+               placeholder="你的昵称（1-12 个字）" autocomplete="off" spellcheck="false">
+      </div>
+      <p class="nick-hint" id="nickModalHint"></p>
+      <div class="results-actions">
+        <button id="nickModalCancel" class="results-btn">取消</button>
+        <button id="nickModalOk" class="results-btn primary">连接并加入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 房间分享：链接里的游戏 http 是明文，服务器地址已加密 -->
+  <div id="shareModal" class="track-modal-overlay">
+    <div class="track-modal-card share-card">
+      <div class="track-modal-header">
+        <div class="modal-title-wrap">
+          <span class="f1-badge">SHARE ROOM · INVITE</span>
+          <h2 class="modal-title">邀请好友进入房间</h2>
+        </div>
+        <button id="shareModalClose" class="track-close-btn">✕</button>
+      </div>
+      <p class="track-modal-desc">
+        好友点开链接会自动连上本服务器并加入这个房间；房间不存在时会提示「房间已失效」并进入该服务器大厅。
+        链接里的游戏地址是明文，服务器地址已加密（只有本游戏页面能解析）。
+      </p>
+      <textarea id="shareLinkText" class="share-link" readonly rows="3" spellcheck="false"></textarea>
+      <p class="nick-hint" id="shareHint"></p>
+      <div class="results-actions">
+        <button id="shareCopyBtn" class="results-btn primary">📋 复制链接</button>
+        <button id="shareModalCancel" class="results-btn">关闭</button>
       </div>
     </div>
   </div>

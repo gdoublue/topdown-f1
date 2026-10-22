@@ -38,6 +38,25 @@ function broadcastRoom(room, type, payload) {
   }
 }
 
+// 圈数：0 = 跟随赛道默认；1~50 为房主指定
+function clampLaps(v) {
+  const n = Math.round(Number(v) || 0);
+  return n <= 0 ? 0 : Math.max(1, Math.min(50, n));
+}
+
+// 聊天记录：全局一份、每个房间一份，各保留最近 10 条，新连上/刚进房时补发
+const CHAT_HISTORY_MAX = 10;
+const globalChatHistory = [];
+
+function rememberChat(bucket, entry) {
+  bucket.push(entry);
+  while (bucket.length > CHAT_HISTORY_MAX) bucket.shift();
+}
+
+function sendRoomHistory(ws, room) {
+  send(ws, { t: "chat_history", scope: "room", items: room.chatHistory || [] });
+}
+
 // ================= 大厅推送：房间列表 / 在线人数 / 排行榜 =================
 // 任何房间或成绩变化都把最新视图推给所有在线会话，客户端大厅无需重连即可即时刷新。
 // 用 120ms 防抖合并同一批操作（例：开赛瞬间多名成员同时就绪）。
@@ -299,6 +318,8 @@ function route(session, msg) {
         ),
         rooms: listRooms(),
       });
+      // 刚连上：补发最近的全局聊天记录（含发送时间）
+      send(ws, { t: "chat_history", scope: "global", items: globalChatHistory });
       broadcastLobby();   // 在线人数变化 → 其他人的大厅同步刷新
             // 建 WebRTC DataChannel（UDP）：信令走 WS，数据通道建好后快照/位姿自动改走 UDP。
             // 建不起来也只是回落 WebSocket，不影响任何功能。
@@ -317,6 +338,7 @@ function route(session, msg) {
       const res = createRoom(session, { trackId: msg.trackId, sameCar: msg.sameCar, fillAI: msg.fillAI });
       if (!res.ok) return send(ws, { t: "error", code: res.reason });
       send(ws, { t: "room_update", room: res.room.view() });
+      sendRoomHistory(ws, res.room);
       broadcastLobby();
       break;
     }
@@ -326,6 +348,7 @@ function route(session, msg) {
       const res = joinRoom(session, msg.roomId);
       if (!res.ok) return send(ws, { t: "error", code: res.reason });
       broadcastRoom(res.room, "room_update", { room: res.room.view() });
+      sendRoomHistory(ws, res.room);   // 刚进房：补发房间最近聊天
       broadcastLobby();
       break;
     }
@@ -402,9 +425,11 @@ function route(session, msg) {
         if (msg.sameCar !== undefined) room.sameCar = !!msg.sameCar;
         if (msg.fillAI !== undefined) room.fillAI = !!msg.fillAI;   // 是否需要 AI 补位车
         if (msg.trackId) room.trackId = String(msg.trackId).slice(0, 32);
+        // 圈数也进房间状态：非房主要能提前看到房主的设定（不只是开赛时才知道）
+        if (msg.laps !== undefined) room.laps = clampLaps(msg.laps);
       }
       broadcastRoom(room, "room_update", { room: room.view() });
-      if (msg.trackId !== undefined || msg.fillAI !== undefined) broadcastLobby();
+      if (msg.trackId !== undefined || msg.fillAI !== undefined || msg.laps !== undefined) broadcastLobby();
       break;
     }
 
@@ -459,7 +484,8 @@ function route(session, msg) {
         return send(ws, { t: "error", code: "not_all_ready", msg: stuck.join("、") + " 未选车/未就绪" });
       }
       try {
-        if (msg.laps) room.laps = Math.max(1, Math.min(50, Math.round(Number(msg.laps))));
+        // 圈数：客户端显式传了就用它，否则沿用房间设置（0 → 赛道默认）
+        room.laps = clampLaps(msg.laps !== undefined ? msg.laps : room.laps);
         const humans = members.map(m => ({
           sid: m.session.id,
           nickname: m.session.player?.nickname || "Pilot",
@@ -499,6 +525,47 @@ function route(session, msg) {
         room.sim = null;
         send(ws, { t: "error", code: "start_failed", msg: e.message });
       }
+      break;
+    }
+
+    // 聊天：scope=global 广播给所有在线会话；scope=room 只发给同房间成员。
+    // 大厅里的客户端只能发 global，房间/比赛中可以二选一。
+    case "chat": {
+      if (!session.player) return send(ws, { t: "error", code: "not_authed" });
+      const text = String(msg.text || "").replace(/\s+/g, " ").trim().slice(0, 120);
+      if (!text) return;
+      const now = Date.now();
+      // 限流：最多 2 条/秒。超频不静默丢弃，回一条提示让客户端告诉玩家
+      if (now - (session.lastChatAt || 0) < 500) return send(ws, { t: "chat_slow" });
+      session.lastChatAt = now;
+      const from = { sid: session.id, nickname: session.player?.nickname || "车手" };
+      if (msg.scope === "room") {
+        const room = findRoomOf(session.id);
+        if (!room) return send(ws, { t: "error", code: "not_in_room" });
+        const entry = { scope: "room", from, text, ts: now };
+        rememberChat(room.chatHistory, entry);
+        broadcastRoom(room, "chat", entry);
+      } else {
+        const entry = { scope: "global", from, text, ts: now };
+        rememberChat(globalChatHistory, entry);
+        const payload = JSON.stringify({ t: "chat", ...entry });
+        for (const s of sessions.values()) {
+          if (s.ws.readyState === 1) s.ws.send(payload);
+        }
+      }
+      break;
+    }
+
+    // 客户端主动要历史：切换「全局 / 房间」频道、面板重新显示时补齐最近记录
+    case "chat_history_req": {
+      if (!session.player) return send(ws, { t: "error", code: "not_authed" });
+      if (msg.scope === "room") {
+        const room = findRoomOf(session.id);
+        // 不在房间就给空历史（不要走 error，否则客户端会弹一条红色提示条）
+        if (!room) return send(ws, { t: "chat_history", scope: "room", items: [] });
+        return sendRoomHistory(ws, room);
+      }
+      send(ws, { t: "chat_history", scope: "global", items: globalChatHistory });
       break;
     }
 

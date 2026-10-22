@@ -2,7 +2,10 @@
 export const skids = [];
 export const dust = [];
 
-const MAX_SKIDS = 5200;
+// 在线模式里远端车也会落印（netrace.emitRemoteSkid 本地推算，4 条/车），
+// 8 车同场时峰值产出约是单人的 8 倍，池子上限从 5200 提到 9000：
+// 再多就只剩"挤掉最老的印子"这一个后果（留存时间被压缩），而不是卡帧。
+const MAX_SKIDS = 9000;
 const MAX_DUST = 200;
 
 export function addSkid(a, b, intensity = 0.5, width = 0.38) {
