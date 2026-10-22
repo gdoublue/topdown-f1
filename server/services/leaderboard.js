@@ -36,16 +36,11 @@ export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, 
   return record;
 }
 
-// 每玩家只保留最好一条 → 生成榜单（默认按最快单圈）
+// 每条成绩独立上榜（同一玩家同一赛道多次跑不合并），默认按最快单圈排序
 export function getLeaderboard(trackId, { limit = 20, sortBy = "bestLapMs" } = {}) {
   const db = loadDb();
-  const best = new Map();   // playerId -> record
-  for (const r of db.lapRecords) {
-    if (r.trackId !== trackId || !r.validated) continue;
-    const cur = best.get(r.playerId);
-    if (!cur || r[sortBy] < cur[sortBy]) best.set(r.playerId, r);
-  }
-  return [...best.values()]
+  return db.lapRecords
+    .filter(r => r.trackId === trackId && r.validated)
     .sort((a, b) => a[sortBy] - b[sortBy])
     .slice(0, limit);
 }

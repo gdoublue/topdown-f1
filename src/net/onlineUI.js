@@ -258,6 +258,14 @@ export function showOnline() {
   else showAddr();
 }
 
+// 比赛结束回到当前房间：保留 room 视图状态，不清空房间
+export function showOnlineRoom() {
+  el.wrap.classList.remove("hidden");
+  if (room) { renderRoom(); switchView("room"); }
+  else if (conn.isOpen()) { renderLobby(); switchView("lobby"); }
+  else showAddr();
+}
+
 export function hideOnline() {
   el.wrap.classList.add("hidden");
 }

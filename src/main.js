@@ -24,7 +24,7 @@ import * as audio from "./game/audio.js";
 import { AI_CONFIGS, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
 import { conn } from "./net/connection.js";
 import { rtc } from "./net/rtc.js";
-import { initOnlineUI, showOnline as showOnlineUI, hideOnline as hideOnlineUI, leaveOnlineRoom } from "./net/onlineUI.js";
+import { initOnlineUI, showOnline as showOnlineUI, showOnlineRoom, hideOnline as hideOnlineUI, leaveOnlineRoom } from "./net/onlineUI.js";
 import { getFingerprint } from "./net/fingerprint.js";
 import { startNetRace, stopNetRace, updateNetRace, bindNetRaceHandlers, netrace, forfeitNetRace, setNetAutopilot } from "./net/netrace.js";
 import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "./ui/labels.js";
@@ -596,9 +596,9 @@ function update(dt, finalStep = true, simNowMs = 0) {
       audio.finishSound();
     }
 
-    // 服务器权威排名 → 结算大屏
-    if (netrace.results && !resultsShown) {
-      showResults();
+    // 比赛结束：服务器已把房间切回等待状态，直接回到房间，不再弹"再来一局"结算屏
+    if (netrace.results) {
+      returnToOnlineRoom();
     }
     return;
   }
@@ -932,6 +932,19 @@ function exitLocalNetRace() {
   finishAt = 0;
   winner = null;
   updateTopControls();
+}
+
+// 在线比赛结束：服务器已把房间切回等待状态，直接展示当前房间，
+// 不再弹"再来一局"结算屏；名次与成绩由服务端落库并在大厅榜单刷新。
+function returnToOnlineRoom() {
+  if (mode !== "onlinerace") return;
+  exitLocalNetRace();
+  closeConfirmModal();
+  try { location.hash = "#/online"; } catch (e) {}
+  showOnlineStep();
+  openStartModal();
+  showOnlineRoom();
+  syncModalOpen();
 }
 
 // 主动离开在线流程：终止/认输在线比赛 + 退出房间。

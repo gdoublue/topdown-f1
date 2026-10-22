@@ -306,15 +306,18 @@ export class RaceSim {
       }
     }
 
-    // 终局判定：全部人类已上报完赛 且 全部 AI 完赛；或超时兜底
-    // 超时阈值按圈数放宽（理论最短圈 × 圈数 × 1.8 + 60s 缓冲）：
-    // 固定 150s 会把长赛道多圈的比赛提前掐断，导致所有人被记成未完赛。
+    // 终局判定：
+    //  · 多人房：所有真人完赛即结束，不再等 AI 跑完（AI 按当前进度参与排名）
+    //  · 单人房：真人完赛后由 gateway 快进 AI 到终局，保留完整的 AI 成绩
+    //  · 超时阈值按圈数放宽（理论最短圈 × 圈数 × 1.8 + 60s 缓冲）：
+    //    固定 150s 会把长赛道多圈的比赛提前掐断，导致所有人被记成未完赛。
     if (!this.ended) {
-      const allHumanDone = [...this.ghosts.keys()].every(sid => this.finishReports.has(sid));
+      const humansAllDone = this.humansAllDone();
       const allAIDone = this.aiEntries.every(e => e.car.finished);
+      const multiHuman = this.ghosts.size >= 2;
       const minLap = TRACK_MIN_LAP_MS[this.room.trackId] ?? DEFAULT_MIN_LAP_MS;
       const timeout = now - this.race.raceStart > minLap * this.maxLaps * 1.8 + 60000;
-      if ((allHumanDone && allAIDone) || timeout) {
+      if ((humansAllDone && (multiHuman || allAIDone)) || timeout) {
         this.ended = true;
         this.race.state = "finished";
       }
