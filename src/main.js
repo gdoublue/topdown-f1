@@ -715,11 +715,25 @@ function isCarVisible(car) {
          car.y > v.y - CAR_CULL_MARGIN && car.y < v.y + v.h + CAR_CULL_MARGIN;
 }
 
+// 分段耗时统计（__gp.perf.sections）：指数平滑的每帧平均毫秒。
+// 目的：不用猜"到底是什么在吃帧预算"——把绘制拆成 赛道/特效/车辆/小地图，
+// 再加网络物理、HUD 两段，一局就能看出瓶颈在哪。
+const secAvg = { track: 0, effects: 0, cars: 0, minimap: 0, update: 0, hud: 0 };
+function markSection(key, ms) {
+  // alpha 0.08 ≈ 最近 12 帧的滑动平均，既稳又能跟上场景变化
+  secAvg[key] = secAvg[key] ? secAvg[key] * 0.92 + ms * 0.08 : ms;
+}
+
 function draw() {
   const activeCar = cars[focusIndex] || cars[0];
+  const tDraw0 = performance.now();
   applyCamera(ctx, canvas, activeCar.shake);
   ctx.drawImage(trackCanvas, 0, 0, WORLD.w, WORLD.h);
+  const tTrack = performance.now();
+  markSection("track", tTrack - tDraw0);
   fx.drawEffects(ctx, cam.view);
+  const tFx = performance.now();
+  markSection("effects", tFx - tTrack);
 
   // 绘制当前焦点赛车的前瞻目标点与引线（视图面板可随时关闭）
   if (showAILine && mode !== "solo" && aiInputs[focusIndex]?.targetX) {
@@ -745,13 +759,17 @@ function draw() {
   // 绘制所有赛车（从后向前绘制，主焦点赛车最后绘制避免被遮挡）
   // retired = 已退出房间的车友：直接消失，不在赛道上留下幽灵车
   // ghostHidden / ghostAlpha = 在线对战的失联分档：半透明 → 彻底隐藏
+  const tCars0 = performance.now();
   for (let i = 0; i < cars.length; i++) {
     if (i !== focusIndex && isCarVisible(cars[i])) drawCarWithGhostAlpha(cars[i]);
   }
   if (isCarVisible(cars[focusIndex])) drawCarWithGhostAlpha(cars[focusIndex]);
+  markSection("cars", performance.now() - tCars0);
 
   // 小地图
+  const tMini0 = performance.now();
   drawMinimap(cars, focusIndex);
+  markSection("minimap", performance.now() - tMini0);
 }
 
 // ================= 开局流程：玩法模式 → 赛车 → 赛道 =================
@@ -1587,6 +1605,7 @@ function frame(ts) {
   //   · 在线：两次绘制之间物理实际推进了多少（可能来自定时器 + 掉帧补偿），画面就用多少
   //   · 单机：模拟时间 = 真实时间 × 倍速
   let visualDt;
+  const tUpd0 = performance.now();
   if (mode === "onlinerace") {
     // 在线对战统一走"真实时间"节拍：rAF 正常时就是这里推进，被节流时由定时器接管
     advanceNetSim(now);
@@ -1604,6 +1623,7 @@ function frame(ts) {
     }
     visualDt = scaled;
   }
+  markSection("update", performance.now() - tUpd0);
   lastVisualDt = visualDt;
   syncTuner(cars[focusIndex]);   // 切车时把调校面板同步到当前焦点赛车
 
@@ -1635,6 +1655,7 @@ function frame(ts) {
   // 刷新 HUD（对战/观战模式刷新多车排位与实时 G 值遥测；单人模式刷新单人 HUD）
   // 计时塔属于低频信息：10~12Hz 肉眼完全够用。144Hz 屏上每帧刷 8 行 DOM（约 160 次写操作）
   // 会把 6.9ms 的单帧预算吃掉一大块，这是双人联机掉到 30fps 的主要来源之一。
+  const tHud0 = performance.now();
   if (mode !== "solo") {
     if (now - lastAiHudAt >= AI_HUD_INTERVAL_MS) {
       lastAiHudAt = now;
@@ -1644,6 +1665,7 @@ function frame(ts) {
     lastSoloHudAt = now;
     updateHUD(activeCar);
   }
+  markSection("hud", performance.now() - tHud0);
 }
 
 resize();
@@ -1694,6 +1716,13 @@ window.__gp = {
     },
     // 当前渲染档位 / 动态分辨率 / 实际后备像素 / 赛道贴图超采样倍率
     get quality() { return getQualityStats(); },
+    // 每帧分段耗时（ms，指数平滑）：track=赛道底图 drawImage，effects=刹车痕/尘土，
+    // cars=8 车绘制，minimap=小地图，update=网络解析+插值+物理，hud=计时塔 DOM
+    get sections() {
+      const r = {};
+      for (const k in secAvg) r[k] = +secAvg[k].toFixed(2);
+      return r;
+    },
     // 画布实际像素：填充成本与像素面积成正比，4K/Retina 上这是最容易失控的一项
     get canvas() {
       return {
