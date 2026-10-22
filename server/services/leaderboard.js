@@ -4,7 +4,7 @@
 //  - "solo_practice" 在线单人练习 → 客户端上报，需通过合理性校验
 import crypto from "node:crypto";
 import { loadDb, saveDb } from "../db/store.js";
-import { TRACK_MIN_LAP_MS, DEFAULT_MIN_LAP_MS } from "../config.js";
+import { minLapMsFor } from "./lapValidation.js";
 
 export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, laps, source }) {
   const db = loadDb();
@@ -13,7 +13,8 @@ export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, 
   laps = Math.max(1, Math.round(Number(laps) || 1));
 
   // ---- 合理性校验（防止客户端乱报成绩）----
-  const minLap = TRACK_MIN_LAP_MS[trackId] ?? DEFAULT_MIN_LAP_MS;
+  // 单人练习的车允许调校，阈值按可调出的最快形态计算；在线对战的车由客户端锁死调校
+  const minLap = minLapMsFor(trackId, carId, { tuned: source !== "online_race" });
   const validated =
     bestLapMs >= minLap &&                                    // 不可能快于理论最短圈
     bestLapMs < 60 * 60 * 1000 &&                             // 不可能慢于 1 小时

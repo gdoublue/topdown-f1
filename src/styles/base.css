@@ -344,9 +344,35 @@ canvas#cv {
 #stats .row b.hi { color: var(--purple); }
 
 @media (max-width: 760px) {
-  #miniWrap { width: 176px; top: 10px; left: 10px; }
-  #mini { width: 158px; height: 102px; }
-  #viewTools { display: none; }
+  /* 小地图精简：去掉标题栏只留赛道图，缩小并降低面板底色的不透明度 */
+  #miniWrap {
+    width: 132px;
+    top: 10px;
+    left: 10px;
+    padding: 4px;
+    background: rgba(6, 9, 14, 0.34);
+    border-color: rgba(255, 255, 255, 0.07);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  }
+  #miniWrap .panel-header { display: none; }
+  #mini { width: 124px; height: 80px; border-color: transparent; }
+  /* 视图工具保留在移动端：收纳在小地图下方，默认折叠，展开也保持窄栏不盖住计时塔 */
+  #viewTools {
+    left: 10px;
+    top: 108px;
+    width: 138px;
+    padding: 6px 8px 8px;
+    background: rgba(6, 9, 14, 0.34);
+    border-color: rgba(255, 255, 255, 0.07);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  }
+  #viewTools .panel-header { padding-bottom: 4px; }
+  #viewTools:not(.collapsed) .panel-header { margin-bottom: 5px; }
+  #viewTools .vt-row { margin-top: 6px; gap: 6px; font-size: 10px; }
+  #viewTools .vt-select { min-width: 54px; font-size: 9px; }
+  #viewTools .speed-chips { flex-wrap: wrap; justify-content: flex-end; }
+  #viewTools .vt-mini { min-width: 52px; padding: 3px 6px; font-size: 9px; }
+  #zoomRange { width: 74px; }
   #speedo, #stats { right: 10px; width: 170px; }
   #speedo { top: 10px; }
   #stats { top: 88px; }

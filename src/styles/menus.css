@@ -609,7 +609,7 @@
 #carSelectWrap.hidden { display: none !important; }
 .hidden { display: none !important; }
 
-/* 比赛中"重选模式/赛车"胶囊（赛道会话条下方） */
+/* 比赛中"退出比赛"胶囊（赛道会话条下方） */
 .home-pill {
   left: 50%;
   transform: translateX(-50%);

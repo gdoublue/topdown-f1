@@ -206,7 +206,7 @@ function checkRaceEnd(room) {
     if (!playerId) continue;
     if (r.finished && r.valid && r.bestLapMs > 0) {
       submitLapRecord({
-        playerId, trackId: room.trackId, carId: member.carId || "unknown",
+        playerId, trackId: room.trackId, carId: r.carId || member.carId || "unknown",
         bestLapMs: r.bestLapMs, totalMs: r.totalMs, laps: r.laps || 1,
         source: "online_race",
       });
@@ -239,11 +239,14 @@ function onClosed(session) {
   sessions.delete(session.ws);
   // 比赛中掉线/退出：只把这台车移出比赛（判负），其余车手照常完赛
   if (res && !res.destroyed && res.room.sim && !res.room.sim.ended) {
+    const alreadyOut = res.room.sim.hasForfeited(session.id);
     res.room.sim.retirePlayer(session.id);
-    broadcastRoom(res.room, "player_forfeit", {
-      sid: session.id,
-      nickname: session.player?.nickname || "Player",
-    });
+    if (!alreadyOut) {
+      broadcastRoom(res.room, "player_forfeit", {
+        sid: session.id,
+        nickname: session.player?.nickname || "Player",
+      });
+    }
     checkRaceEnd(res.room);
   }
   broadcastLobby();
@@ -327,16 +330,44 @@ function route(session, msg) {
       break;
     }
 
-    case "surrender":
+    case "surrender": {
+      // 比赛认输：只退出当前这一场，房间成员身份保留（客户端回到房间等待本场结束）。
+      // 真正离开房间请走 room_leave。
+      if (!session.player) return;
+      const room = findRoomOf(session.id);
+      if (!room) return;
+      if (room.sim && !room.sim.ended) {
+        const humanCount = room.members.size;
+        const alreadyOut = room.sim.hasForfeited(session.id);
+        room.sim.retirePlayer(session.id);
+        if (humanCount > 1 && !alreadyOut) {
+          broadcastRoom(room, "player_forfeit", {
+            sid: session.id,
+            nickname: session.player?.nickname || "Player",
+          });
+        }
+        checkRaceEnd(room);
+      }
+      // 认输后回到房间不自动准备：是否参加下一局由玩家自己决定
+      const member = room.members.get(session.id);
+      if (member && session.id !== room.hostId) member.ready = false;
+      // 同步房间视图（成员仍在房间里），让客户端立即切换到等待界面
+      send(ws, { t: "room_update", room: room.view() });
+      broadcastLobby();
+      break;
+    }
+
     case "room_leave": {
       if (!session.player) return;
       const room = findRoomOf(session.id);
       if (room) {
         if (room.sim && !room.sim.ended) {
-          // 比赛进行中退出：只把这台车移出比赛（判负），其他人的比赛完全不受影响
+          // 比赛进行中离开房间：只把这台车移出比赛（判负），其他人的比赛完全不受影响。
+          // 已认输过的车不再重复广播，避免其他玩家收到两次"认输"提示。
           const humanCount = room.members.size;
+          const alreadyOut = room.sim.hasForfeited(session.id);
           room.sim.retirePlayer(session.id);
-          if (humanCount > 1) {
+          if (humanCount > 1 && !alreadyOut) {
             broadcastRoom(room, "player_forfeit", {
               sid: session.id,
               nickname: session.player?.nickname || "Player",

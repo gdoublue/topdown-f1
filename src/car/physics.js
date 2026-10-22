@@ -203,6 +203,28 @@ function evAccelAt(perf, v, surf) {
   return Math.max(a, 0);
 }
 
+// 直线赛理论最快用时（毫秒）：静止起步、全油门、无转向，按该车纵向物理积分。
+// 各车型极速差距很大（F1 ≈360km/h，U9 ≈496km/h），固定时间阈值会把高极速
+// 电车的合法成绩判成作弊；成绩校验以这里的物理下限为基准。
+export function estimateStraightTimeMs(perf, distance) {
+  perf = perf || {};
+  const dt = 1 / 120;
+  const maxSpeed = perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0];
+  const accelMult = perf.accelMult ?? 1.0;
+  const highBoost = perf.highSpeedAccel ?? 1.0;
+  let v = 0, s = 0, t = 0;
+  while (s < distance && t < 3600) {
+    const a = perf.powerKW != null
+      ? evAccelAt(perf, v, 0)
+      : accelAt(v, 0, accelMult, highBoost);
+    v += a * dt;
+    if (v > maxSpeed) v = Math.max(maxSpeed, v - 120 * dt);
+    s += v * dt;
+    t += dt;
+  }
+  return t * 1000;
+}
+
 export function stepLongitudinal(car, dt, input, surf) {
   const perf = car.perf || {};
   const maxSpeed = perf.maxSpeed ? perf.maxSpeed[surf] : PHYS.maxSpeed[surf];

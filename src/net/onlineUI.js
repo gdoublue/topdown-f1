@@ -6,10 +6,11 @@ import { AI_CONFIGS } from "../game/ai.js";
 import { conn } from "./connection.js";
 import { getFingerprint } from "./fingerprint.js";
 import { isAutopilotOn } from "../ui/autopilot.js";
+import { trackThumbUrl } from "../ui/trackThumb.js";
 
 const el = {};
 let cb = {};                       // { onStartPractice }
-let currentTab = "boards";
+let currentTab = "rooms";          // 默认先看房间列表
 let room = null;                   // 当前所在房间 view
 let lastRoomId = null;             // 重连后尝试重新加入
 let myCarId = null;
@@ -23,6 +24,11 @@ let lobbyRefreshTimer = 0;
 let autoCarRoomId = null;          // 已为哪个房间自动同步过默认车（避免重复发送）
 let roomError = "";                // 服务端拒绝原因（not_all_ready 等），展示 4 秒
 let roomErrorTimer = 0;
+
+// 单人在线练习房：先在房间里选好赛道 / 圈数 / 赛车，再开始比赛
+let practiceTrackId = TRACKS[0].id;
+let practiceLaps = 0;              // 0 = 赛道默认圈数
+let practiceCarId = null;
 
 const ADDR_KEY = "gp_server_url";
 const NICK_KEY = "gp_nickname";
@@ -70,6 +76,21 @@ function trackLabel(trackId) {
   return t ? `${t.flag} ${t.name}` : String(trackId || "");
 }
 
+// 赛道选择统一配小地图：所有下拉选择器旁边都能直接看到赛道形状
+function trackPreview(trackId, imgId = "") {
+  const t = TRACKS.find(x => x.id === trackId) || TRACKS[0];
+  const idAttr = imgId ? ` id="${imgId}"` : "";
+  return `<img${idAttr} class="online-track-mini" src="${trackThumbUrl(t.id)}" alt="${escapeHtml(t.name)} 赛道小地图">`;
+}
+
+function syncTrackPreview(imgId, trackId) {
+  const img = $(imgId);
+  if (!img) return;
+  const t = TRACKS.find(x => x.id === trackId) || TRACKS[0];
+  img.src = trackThumbUrl(t.id);
+  img.alt = `${t.name} 赛道小地图`;
+}
+
 // 没填昵称时给一个可编辑的默认昵称（避免大厅里显示成指纹派生的 "Pilot-xxxx"）
 function defaultNickname() {
   return "车手" + String(Math.floor(1000 + Math.random() * 9000));
@@ -105,6 +126,7 @@ export function initOnlineUI(callbacks = {}) {
     disconnectBtn: $("onlineDisconnectBtn"),
     lobbyBody: $("lobbyBody"),
     roomView: $("onlineRoom"),
+    practiceView: $("onlinePracticeRoom"),
   });
   if (!el.wrap) return;
 
@@ -120,7 +142,7 @@ export function initOnlineUI(callbacks = {}) {
   });
   el.practiceBtn.addEventListener("click", () => {
     leaveOnlineRoom();
-    cb.onStartPractice?.();
+    showOnlinePracticeRoom();
   });
 
   // Tab 切换按钮是静态 DOM（在 lobbyBody 外），单独绑定
@@ -139,6 +161,8 @@ export function initOnlineUI(callbacks = {}) {
   el.lobbyBody.addEventListener("keydown", markLobbyInteract, true);
   el.roomView.addEventListener("click", onRoomClick);
   el.roomView.addEventListener("change", onRoomChange);
+  el.practiceView?.addEventListener("click", onPracticeClick);
+  el.practiceView?.addEventListener("change", onPracticeChange);
 
   // 服务端拒绝（not_all_ready / not_host / already_racing ...）必须可见，
   // 否则"点击没反应"根本无从排查
@@ -249,6 +273,7 @@ function switchView(v) {
   el.addrStep.classList.toggle("hidden", v !== "addr");
   el.lobby.classList.toggle("hidden", v !== "lobby");
   el.roomView.classList.toggle("hidden", v !== "room");
+  el.practiceView?.classList.toggle("hidden", v !== "practice");
 }
 
 export function showOnline() {
@@ -264,6 +289,79 @@ export function showOnlineRoom() {
   if (room) { renderRoom(); switchView("room"); }
   else if (conn.isOpen()) { renderLobby(); switchView("lobby"); }
   else showAddr();
+}
+
+// 单人练习房：开赛前统一在这里选赛道 / 圈数 / 赛车，和多人房间保持同一套流程
+export function showOnlinePracticeRoom() {
+  el.wrap.classList.remove("hidden");
+  if (!conn.isOpen()) { showAddr("连接已断开，请重新连接"); return; }
+  renderPracticeRoom();
+  switchView("practice");
+}
+
+function renderPracticeRoom() {
+  if (!el.practiceView) return;
+  const track = TRACKS.find(t => t.id === practiceTrackId) || TRACKS[0];
+  practiceTrackId = track.id;
+  if (!AI_CONFIGS.some(c => c.id === practiceCarId)) practiceCarId = AI_CONFIGS[0].id;
+
+  const trackOpts = TRACKS.map(t =>
+    `<option value="${t.id}" ${t.id === track.id ? "selected" : ""}>${t.flag} ${t.name}</option>`).join("");
+  const lapsOpts = [0, 1, 2, 3, 5, 8, 10, 15, 20].map(n =>
+    `<option value="${n}" ${practiceLaps === n ? "selected" : ""}>${n === 0 ? "赛道默认圈数" : n + " 圈"}</option>`).join("");
+  const carOpts = AI_CONFIGS.map(c =>
+    `<option value="${c.id}" ${c.id === practiceCarId ? "selected" : ""}>${c.team} · ${c.model} (#${c.number})</option>`).join("");
+  const laps = practiceLaps || track.laps;
+
+  el.practiceView.innerHTML = `
+    <p class="track-modal-desc">单人练习房 · 先选好赛道与圈数再发车，完赛成绩自动上传服务器排行榜</p>
+    <div class="practice-preview">
+      <img class="track-mini" src="${trackThumbUrl(track.id)}" alt="${escapeHtml(track.name)} 赛道图">
+      <div class="practice-preview-info">
+        <span class="practice-preview-tag">PRACTICE ROOM</span>
+        <b>${track.flag} ${escapeHtml(track.name)}</b>
+        <span class="ol-sub">${(track.length / 1000).toFixed(2)} km · ${track.turns} 弯 · ${laps} 圈 · 计时赛</span>
+      </div>
+    </div>
+    <div class="online-create">
+      <label>赛道 <select id="practiceTrackSel">${trackOpts}</select></label>
+      <label>圈数 <select id="practiceLapsSel">${lapsOpts}</select></label>
+      <label>赛车 <select id="practiceCarSel">${carOpts}</select></label>
+    </div>
+    <div class="online-room-actions">
+      <button class="results-btn primary online-btn" id="practiceStartBtn">🏁 开始比赛</button>
+      <button class="results-btn online-btn ${isAutopilotOn() ? "on" : ""}" id="practiceAutopilotBtn"
+        title="开启后由算法驾驶你的赛车（本地运行，支持自定义算法）">🤖 自动驾驶：${isAutopilotOn() ? "开" : "关"}</button>
+      <button class="results-btn online-btn" id="practiceBackBtn">← 返回大厅</button>
+    </div>`;
+}
+
+function onPracticeClick(e) {
+  if (e.target.closest("#practiceStartBtn")) {
+    cb.onStartPractice?.({
+      trackId: practiceTrackId,
+      laps: practiceLaps,
+      carId: practiceCarId,
+    });
+    return;
+  }
+  if (e.target.closest("#practiceAutopilotBtn")) {
+    cb.onOpenAutopilot?.();
+    return;
+  }
+  if (e.target.closest("#practiceBackBtn")) {
+    renderLobby();
+    switchView("lobby");
+  }
+}
+
+function onPracticeChange(e) {
+  const id = e.target.id;
+  if (id === "practiceTrackSel") practiceTrackId = e.target.value;
+  else if (id === "practiceLapsSel") practiceLaps = Number(e.target.value) || 0;
+  else if (id === "practiceCarSel") practiceCarId = e.target.value;
+  else return;
+  renderPracticeRoom();
 }
 
 export function hideOnline() {
@@ -369,6 +467,7 @@ function renderLobbyBody() {
   const fillAI = $("createFillAI");
   if (trackSel && prevTrack) trackSel.value = prevTrack;
   if (fillAI && prevFillAI !== undefined) fillAI.checked = prevFillAI;
+  if (trackSel) syncTrackPreview("createTrackPreview", trackSel.value);
 }
 
 function boardsHtml() {
@@ -433,6 +532,7 @@ function roomsHtml() {
     <p class="track-modal-desc">创建房间与好友同场 PK · 可自行决定是否加 AI 补位车</p>
     <div class="online-create">
       <select id="createTrackSel">${trackOpts}</select>
+      ${trackPreview(s.tracks[0]?.id, "createTrackPreview")}
       <label class="online-ck"><input type="checkbox" id="createFillAI" checked> 加入 AI 补位车（取消则仅玩家对战）</label>
       <button class="results-btn primary online-btn" id="createRoomBtn">➕ 创建房间</button>
     </div>
@@ -456,7 +556,9 @@ function onLobbyClick(e) {
   if (join) conn.send({ t: "room_join", roomId: join.getAttribute("data-join-room") });
 }
 
-function onLobbyChange() { /* 预留 */ }
+function onLobbyChange(e) {
+  if (e.target.id === "createTrackSel") syncTrackPreview("createTrackPreview", e.target.value);
+}
 
 // 服务端错误码 → 人话
 function errorText(msg) {
@@ -527,16 +629,20 @@ function renderRoom() {
     `<option value="${t.id}" ${t.id === room.trackId ? "selected" : ""}>${t.flag} ${t.name}</option>`).join("");
   const carOpts = AI_CONFIGS.map(c =>
     `<option value="${c.id}" ${c.id === myCarId ? "selected" : ""}>${c.team} · ${c.model} (#${c.number})</option>`).join("");
+  // 认输后回到房间时本场可能仍在进行：此时不能开下一局，只展示等待提示
+  const inRace = room.state === "racing" || room.state === "countdown";
   // 房主不需要准备就绪：只要自己选好车、其他玩家全部"选车 + 就绪"即可开赛
   const othersReady = room.players.filter(p => p.id !== room.hostId).every(p => p.carId && p.ready);
-  const canStart = isHost && room.players.length > 0 && !!myCarId && othersReady;
+  const canStart = !inRace && isHost && room.players.length > 0 && !!myCarId && othersReady;
   // 禁用时把原因直接写在按钮上，避免"看着能点、点了没反应"
   const waitingNames = room.players
     .filter(p => p.id !== room.hostId && (!p.carId || !p.ready))
     .map(p => p.nickname || "车手");
-  const startReason = !myCarId
-    ? "先选择你的赛车"
-    : (waitingNames.length ? `等待 ${waitingNames.join("、")} 就绪` : "全员就绪，开赛！");
+  const startReason = inRace
+    ? "本场比赛还在进行中"
+    : !myCarId
+      ? "先选择你的赛车"
+      : (waitingNames.length ? `等待 ${waitingNames.join("、")} 就绪` : "全员就绪，开赛！");
   // AI 补位数量与服务器一致：maxPlayers - 真人数量（最多 7 台，AI_CONFIGS 只有 7 套配置）
   const aiCount = room.fillAI
     ? Math.max(0, Math.min(AI_CONFIGS.length, (room.maxPlayers || 8) - room.players.length))
@@ -554,11 +660,13 @@ function renderRoom() {
       · 即时网络碰撞 · 0 延迟阻挡 · 动量防穿模
       · ${room.playerCount}/${room.maxPlayers} 人
     </p>
+    ${inRace ? `<p class="online-error">⏳ 本场比赛仍在进行中，结束后即可开始下一局</p>` : ""}
     <div class="online-list">${players}</div>
     ${roomError ? `<p class="online-error">⚠️ ${escapeHtml(roomError)}</p>` : ""}
     ${isHost ? `
       <div class="online-create">
         <label>赛道 <select id="roomTrackSel">${trackOpts}</select></label>
+        ${trackPreview(room.trackId, "roomTrackPreview")}
         <label>圈数 <select id="roomLapsSel">${lapsOpts}</select></label>
         <label class="online-ck"><input type="checkbox" id="roomFillAI" ${room.fillAI ? "checked" : ""}> AI 补位车</label>
       </div>` : ""}
@@ -602,7 +710,10 @@ function onRoomClick(e) {
 
 function onRoomChange(e) {
   const id = e.target.id;
-  if (id === "roomTrackSel") conn.send({ t: "room_set", trackId: e.target.value });
+  if (id === "roomTrackSel") {
+    syncTrackPreview("roomTrackPreview", e.target.value);
+    conn.send({ t: "room_set", trackId: e.target.value });
+  }
   else if (id === "roomFillAI") conn.send({ t: "room_set", fillAI: e.target.checked });
   else if (id === "roomLapsSel") roomLaps = Number(e.target.value) || 0;
   else if (id === "roomCarSel") {

@@ -609,9 +609,45 @@ body.ai-mode #help { bottom: 104px; }
 }
 
 @media (max-width: 760px) {
-  #standingsPanel { right: 10px; top: 10px; width: 240px; }
-  #standingsList { max-height: calc(100vh - 220px); }
-  .standing-code, .timing-legend { display: none; }
+  /* 手机：计时塔只留「名次 / 车手 / 差距」，底色减淡把赛道视野让出来 */
+  #standingsPanel {
+    right: 8px;
+    top: 8px;
+    width: min(196px, calc(100vw - 166px));
+    background: rgba(6, 9, 14, 0.32);
+    border-color: rgba(255, 255, 255, 0.07);
+    border-top-width: 2px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  }
+  #standingsPanel .panel-header {
+    padding: 5px 8px 4px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom-color: rgba(255, 255, 255, 0.06);
+    font-size: 8px;
+    letter-spacing: 0.12em;
+  }
+  #standingsPanel .panel-header small { font-size: 8px; }
+  .live-dot { width: 4px; height: 4px; }
+  #standingsList {
+    gap: 1px;
+    padding: 3px;
+    max-height: calc(100vh - 200px);
+  }
+  .standing-row {
+    grid-template-columns: 22px 2px minmax(0, 1fr);
+    gap: 4px;
+    padding: 3px 5px 3px 1px;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .standing-rank { font-size: 13px; }
+  .standing-color-bar { width: 2px; min-height: 18px; }
+  .standing-name { font-size: 10px; }
+  .standing-gap { font-size: 9px; }
+  .standing-code,
+  .standing-bottom,
+  .standing-you-tag,
+  .standing-cam-tag,
+  .timing-legend { display: none; }
   /* 窄屏：顶部会话条让位给计时塔，控制胶囊移到小地图下方，避免遮住 P1/P2 */
   .track-pill { display: none; }
   #reopenStartBtn,
@@ -620,7 +656,14 @@ body.ai-mode #help { bottom: 104px; }
   #reopenStartBtn,
   #quitOnlineBtn { top: 180px; }
   #autopilotPill { top: 216px; }
-  #carStatusPanel { bottom: 10px; max-width: calc(100% - 20px); }
+  /* 底部遥测条同样减淡，长时间比赛时不至于压住赛道 */
+  #carStatusPanel {
+    bottom: 8px;
+    max-width: calc(100% - 16px);
+    background: rgba(6, 9, 14, 0.42);
+    border-color: rgba(255, 255, 255, 0.07);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+  }
   .cs-pos { min-width: 54px; padding: 6px 8px; }
   .cs-pos b { font-size: 23px; }
   .car-badge { min-width: 0; padding: 6px 10px; }

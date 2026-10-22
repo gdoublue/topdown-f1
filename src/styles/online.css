@@ -151,6 +151,18 @@
   overflow-y: auto;
   padding-right: 2px;
 }
+/* 大厅固定高度：排行榜 / 房间来回切换时面板不跳高度，列表内部滚动 */
+#lobbyBody {
+  display: flex;
+  flex-direction: column;
+  height: clamp(320px, 44vh, 420px);
+  min-height: 0;
+}
+#lobbyBody > .online-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
 .online-row {
   display: flex;
   align-items: center;
@@ -284,7 +296,51 @@
 .online-create select:focus { border-color: var(--f1-red); }
 .online-ck { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; }
 .online-ck input { accent-color: var(--f1-red); }
+.online-track-mini {
+  width: 132px;
+  height: 48px;
+  flex: none;
+  object-fit: contain;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+  background: rgba(4, 7, 12, 0.6);
+}
 .online-room-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+
+/* 单人练习房：赛道预览 + 房间式开赛设置 */
+.practice-preview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.practice-preview .track-mini {
+  width: 220px;
+  height: 96px;
+  margin: 0;
+  flex: none;
+}
+.practice-preview-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.practice-preview-info b { font-size: 15px; color: #f3f6fb; }
+.practice-preview-tag {
+  color: var(--f1-red);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+@media (max-width: 640px) {
+  .practice-preview { flex-direction: column; align-items: stretch; }
+  .practice-preview .track-mini { width: 100%; }
+}
 
 /* ================= 在线模式退出按钮与确认弹窗 ================= */
 .danger-pill {

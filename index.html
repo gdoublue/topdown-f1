@@ -67,9 +67,9 @@
       <span class="track-switch-btn">▾</span>
     </div>
 
-    <!-- 比赛中随时重选模式 / 赛车 -->
-    <button id="reopenStartBtn" class="panel home-pill" title="重新选择玩法模式与赛车">⟲ 重选模式</button>
-    <button id="quitOnlineBtn" class="panel danger-pill hidden" title="退出在线比赛（多人对战将判定为认输）">🏳️ 退出比赛</button>
+    <!-- 比赛中退出：不直接跳主菜单，而是回到当前模式的上一层 -->
+    <button id="reopenStartBtn" class="panel home-pill" title="退出比赛并返回上一层">⏏ 退出比赛</button>
+    <button id="quitOnlineBtn" class="panel danger-pill hidden" title="退出在线比赛（多人对战将判定为认输，返回房间）">🏳️ 退出比赛</button>
     <!-- 自动驾驶开关：随时随地由玩家自己决定（在线换视角时会自动接管，可点这里关掉） -->
     <button id="autopilotPill" class="panel home-pill autopilot-pill" title="自动驾驶：由算法驾驶你的赛车，随时可开关（快捷键 B）">🤖 自动驾驶：关</button>
 
@@ -239,17 +239,18 @@
           <div class="online-lobby-head">
             <span id="onlineConnInfo" class="online-conn-info"></span>
             <span class="online-lobby-actions">
-              <button id="onlinePracticeBtn" class="results-btn primary online-btn">⏱ 单人在线练习</button>
+              <button id="onlinePracticeBtn" class="results-btn primary online-btn" title="先进入练习房，选好赛道、圈数与赛车再开始">⏱ 单人在线练习</button>
               <button id="onlineDisconnectBtn" class="vt-mini">断开</button>
             </span>
           </div>
           <div class="online-tabs">
-            <button class="online-tab active" data-tab="boards">排行榜 <small>LEADERBOARD</small></button>
-            <button class="online-tab" data-tab="rooms">房间 <small>ROOMS</small></button>
+            <button class="online-tab active" data-tab="rooms">房间 <small>ROOMS</small></button>
+            <button class="online-tab" data-tab="boards">排行榜 <small>LEADERBOARD</small></button>
           </div>
           <div id="lobbyBody"></div>
         </div>
         <div id="onlineRoom" class="hidden"></div>
+        <div id="onlinePracticeRoom" class="hidden"></div>
       </div>
     </div>
   </div>

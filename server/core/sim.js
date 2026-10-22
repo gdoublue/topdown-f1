@@ -12,6 +12,7 @@ import { applyCarConfig, createAIInput, driveAI, AI_CONFIGS } from "../../src/ga
 import { createRaceState, initCarRaceState, updateCarLap } from "../../src/game/race.js";
 import { TOTAL_LAPS, PHYS, setRaceLaps } from "../../src/config.js";
 import { TRACK_MIN_LAP_MS, DEFAULT_MIN_LAP_MS } from "../config.js";
+import { minLapMsFor } from "../services/lapValidation.js";
 
 const FX_STUB = { addSkid() {}, addDust() {}, clearEffects() {} };
 
@@ -79,7 +80,7 @@ export class RaceSim {
     const color = this.room.sameCar ? colorList[slotIdx % colorList.length] : cfg.color;
     const number = this.room.sameCar ? numList[slotIdx % numList.length] : cfg.number;
     this.ghosts.set(sid, {
-      sid, nickname, shortName: cfg.shortName, color, number,
+      sid, nickname, carId: cfg.id, shortName: cfg.shortName, color, number,
       car, lastAt: 0,
       // 反作弊基线：上一次被接受的位置 / 里程 / 圈数（见 setPlayerState）
       lastRd: Number(car.raceDist) || 0,
@@ -185,6 +186,10 @@ export class RaceSim {
     });
   }
 
+  hasForfeited(sid) {
+    return !!this.finishReports.get(sid)?.forfeited;
+  }
+
   // 玩家退出房间 / 掉线：该车彻底退赛（判负留名次），
   // 后续快照不再下发这台车 —— 其他人既不会被挡路，也不会看到一辆停在赛道上的幽灵车。
   retirePlayer(sid) {
@@ -222,7 +227,7 @@ export class RaceSim {
   reportFinish(sid, r) {
     const g = this.ghosts.get(sid);
     if (!g || this.finishReports.has(sid)) return;
-    const minLap = TRACK_MIN_LAP_MS[this.room.trackId] ?? DEFAULT_MIN_LAP_MS;
+    const minLap = minLapMsFor(this.room.trackId, g.carId);
     const totalMs = Math.round(Number(r.totalMs) || 0);
     const bestLapMs = Math.round(Number(r.bestLapMs) || 0);
     const laps = Math.max(1, Math.round(Number(r.laps)) || 1);
@@ -371,6 +376,7 @@ export class RaceSim {
       rows.push({
         sessionId: g.sid,
         nickname: g.nickname,
+        carId: g.carId,
         shortName: g.shortName,
         color: g.color,
         finished: isForfeited ? false : !!rep,

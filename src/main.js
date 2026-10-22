@@ -24,7 +24,7 @@ import * as audio from "./game/audio.js";
 import { AI_CONFIGS, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
 import { conn } from "./net/connection.js";
 import { rtc } from "./net/rtc.js";
-import { initOnlineUI, showOnline as showOnlineUI, showOnlineRoom, hideOnline as hideOnlineUI, leaveOnlineRoom } from "./net/onlineUI.js";
+import { initOnlineUI, showOnline as showOnlineUI, showOnlineRoom, showOnlinePracticeRoom, hideOnline as hideOnlineUI, leaveOnlineRoom } from "./net/onlineUI.js";
 import { getFingerprint } from "./net/fingerprint.js";
 import { startNetRace, stopNetRace, updateNetRace, bindNetRaceHandlers, netrace, forfeitNetRace, setNetAutopilot } from "./net/netrace.js";
 import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "./ui/labels.js";
@@ -520,7 +520,7 @@ window.addEventListener("keydown", (e) => {
     }
     if (started) {
       e.preventDefault();
-      reopenStartFlow();
+      exitRaceFlow();
       return;
     }
   }
@@ -596,9 +596,9 @@ function update(dt, finalStep = true, simNowMs = 0) {
       audio.finishSound();
     }
 
-    // 比赛结束：服务器已把房间切回等待状态，直接回到房间，不再弹"再来一局"结算屏
-    if (netrace.results) {
-      returnToOnlineRoom();
+    // 服务器权威排名 → 结算大屏（在线也先展示完整成绩，30 秒后自动回房间）
+    if (netrace.results && !resultsShown) {
+      showResults();
     }
     return;
   }
@@ -815,7 +815,7 @@ function selectCar(carId) {
   startGame();
 }
 
-function startGame() {
+function startGame({ skipTrackModal = false, forceTrackSetup = false } = {}) {
   started = true;
   resultsShown = false;
   isModalOpen = false;
@@ -834,8 +834,11 @@ function startGame() {
   updateTrackUI();
   updateHelpText();
   updateTopControls();   // 从在线对局切回单机/对战时，把联机里隐藏的控件恢复回来
-  // 开局先选赛道；URL 显式指定过 ?track= 则直接开赛
-  if (!startedOnce && mode !== "spectate") { startedOnce = true; openTrackModal(true); }
+  // 开局先选赛道；URL 显式指定过 ?track= / 练习房已选好赛道时直接开赛
+  if (!skipTrackModal && mode !== "spectate" && (forceTrackSetup || !startedOnce)) {
+    startedOnce = true;
+    openTrackModal(true);
+  }
 }
 
 
@@ -851,7 +854,8 @@ function updateTopControls() {
   } else {
     if (reopenBtn) {
       reopenBtn.classList.remove("hidden");
-      reopenBtn.textContent = "⟲ 重选模式";
+      reopenBtn.textContent = "⏏ 退出比赛";
+      reopenBtn.title = "退出比赛并返回上一层";
     }
     if (quitOnlineBtn) quitOnlineBtn.classList.add("hidden");
   }
@@ -898,7 +902,7 @@ function openOnlineQuitConfirm() {
   onlineQuitConfirmOpen = true;
   openConfirmModal(
     "确认退出比赛",
-    "比赛仍在继续，你的赛车已暂时交给自动驾驶。多人对战中途退出将被判定为认输 (Surrender)。确认退出并返回在线大厅吗？",
+    "比赛仍在继续，你的赛车已暂时交给自动驾驶。多人对战中途退出将被判定为认输 (Surrender)。确认退出并返回房间吗？",
     quitOnlineRaceWithSurrender
   );
 }
@@ -934,8 +938,8 @@ function exitLocalNetRace() {
   updateTopControls();
 }
 
-// 在线比赛结束：服务器已把房间切回等待状态，直接展示当前房间，
-// 不再弹"再来一局"结算屏；名次与成绩由服务端落库并在大厅榜单刷新。
+// 回到当前在线房间（比赛结束或主动认输都走这里）：保留房间成员身份，
+// 名次与成绩由服务端落库并在大厅榜单刷新。
 function returnToOnlineRoom() {
   if (mode !== "onlinerace") return;
   exitLocalNetRace();
@@ -956,52 +960,33 @@ function leaveOnlineSession() {
   hideOnlineUI();
 }
 
-// 在线比赛退出并判定为认输，回到在线大厅
+// 在线比赛退出并判定为认输：只退出本场比赛，保留房间成员身份回到房间，
+// 等本场结束后可继续和房友开局（真正离开房间走「离开房间」按钮）。
 function quitOnlineRaceWithSurrender() {
   forfeitNetRace();
-  stopNetRace();
-  leaveOnlineRoom();
-  exitToOnlineLobby();
-  showMsg("已退出比赛", "已认输并返回在线大厅", 2500);
-}
-
-// 退出并返回在线大厅界面（仍在在线模式下，可继续选房间）
-function exitToOnlineLobby() {
-  hideResults();
-  closeConfirmModal();
-  started = false;
-  resultsShown = false;
-  finishAt = 0;
-  winner = null;
-  mode = "online";
-  releaseFocusAutopilot(true);
-  try { location.hash = "#/online"; } catch (e) {}
-  resetSimClock(0);
-
-  showOnlineStep();
-  openStartModal();
-  isModalOpen = true;
-  showOnlineUI();
-  updateTopControls();
+  returnToOnlineRoom();
+  showMsg("已退出比赛", "已认输并返回房间", 2500);
 }
 
 function updateHelpText() {
   const help = document.getElementById("helpBody");
   if (!help) return;
   // 自动驾驶开启时给个明确提示（键盘操作不再作用于你的车）
-  const auto = isAutopilotOn() ? "<br>🤖 自动驾驶中：你的赛车由算法驾驶（Esc → 重选模式 可关闭）" : "";
+  const auto = isAutopilotOn() ? "<br>🤖 自动驾驶中：你的赛车由算法驾驶（可在顶栏或按 B 关闭）" : "";
   if (mode === "onlinerace") {
     // 在线：可以换视角，但换走时自己的车会临时交给算法；Esc 是"退出/认输"而不是重选模式
     const focusAuto = focusAutopilot
       ? "<br>🤖 正在看别人的视角：你的车已交给本地算法驾驶（切回自己的车即交还键盘）"
       : (isAutopilotOn() ? "<br>🤖 自动驾驶中：你的赛车由算法驾驶" : "");
     help.innerHTML = "在线竞速 · J 油门　K 轻刹　L 重刹 · 1-7 / Tab 换视角 · B 自动驾驶 · Esc 退出 (认输)" + focusAuto;
+  } else if (mode === "solo" && onlinePractice) {
+    help.innerHTML = "在线练习 · J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 换赛道 · R 重开 · Esc 退出到练习房" + auto;
   } else if (mode === "spectate") {
     help.innerHTML = "AI 锦标赛 · 点击顶部或按 T 选赛道 · 1-7 换视角 · + / - 倍速快进 · R 重开 · Esc 菜单";
   } else if (mode === "vs") {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 菜单" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到选车" + auto;
   } else {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 菜单" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到选车" + auto;
   }
 }
 
@@ -1013,9 +998,9 @@ function initStartFlow() {
     onBack: () => backToMainMenu(),   // ← 返回：任何一步都能回到主菜单（在线会先退房间/比赛）
   });
 
-  // 比赛中随时重选玩法模式与赛车
+  // 比赛中退出：回到当前模式的上一层（弹窗由各模式分支负责）
   const reopenBtn = document.getElementById("reopenStartBtn");
-  if (reopenBtn) reopenBtn.addEventListener("click", reopenStartFlow);
+  if (reopenBtn) reopenBtn.addEventListener("click", exitRaceFlow);
 
   // 自动驾驶开关（顶栏常驻）：点击或按 B 都走这一条路径
   const autoPill = document.getElementById("autopilotPill");
@@ -1063,6 +1048,7 @@ function initStartFlow() {
 
 // ================= 在线即时对战（服务器权威模拟） =================
 function startOnlineRace(msg) {
+  hideResults();   // 上一局的结算屏/倒计时不能带进新一局
   hideOnlineUI();
   closeStartModal();
   closeTrackModal();
@@ -1096,21 +1082,50 @@ function startOnlineRace(msg) {
   try { location.hash = "#/online/race"; } catch (e) {}
 }
 
-// 在线单人练习：复用 solo 流程，完赛成绩自动上传服务器排行榜
-function startOnlinePractice() {
+// 在线单人练习：练习房里已经选好赛道 / 圈数 / 赛车，直接发车；完赛成绩自动上传排行榜
+function startOnlinePractice(setup = {}) {
+  const trackId = TRACKS.some(t => t.id === setup.trackId) ? setup.trackId : currentTrackId;
+  const carId = AI_CONFIGS.some(c => c.id === setup.carId) ? setup.carId : AI_CONFIGS[0].id;
+  const laps = Number(setup.laps) || 0;
+
   hideOnlineUI();
+  closeStartModal();
+  closeTrackModal();
   onlinePractice = true;
   mode = "solo";
-  showCarStep("solo");
-  const title = document.getElementById("startTitle");
-  const desc = document.getElementById("startDesc");
-  if (title) title.textContent = "选择你的赛车 (ONLINE 练习)";
-  if (desc) desc.textContent = "独自刷圈，完赛成绩将自动上传服务器排行榜";
-  openStartModal();
-  isModalOpen = true;
+  setRaceLaps(laps);
+  if (trackId !== currentTrackId) {
+    switchTrack(trackId);
+    trackCanvas = buildTrackCanvas(currentTrackSS);
+    pendingTrackId = currentTrackId;
+    initMinimap();
+  }
+  playerCarId = carId;
+  startGame({ skipTrackModal: true });   // 开赛设置已在练习房完成
+  syncModalOpen();
 }
 
-// ================= 比赛中重选模式 / 赛车 =================
+// 在线单人练习结束 / 中途退出：回到练习房（上一层），保留服务器连接
+function returnToPracticeRoom() {
+  if (mode !== "solo" || !onlinePractice) return;
+  hideResults();
+  hideMsg(true);
+  started = false;
+  finishAt = 0;
+  winner = null;
+  releaseFocusAutopilot(true);
+  closeTrackModal();
+  resetSimClock(0);
+  onlinePractice = false;
+  mode = "online";
+  try { location.hash = "#/online"; } catch (e) {}
+  showOnlineStep();
+  openStartModal();
+  showOnlinePracticeRoom();
+  syncModalOpen();
+  updateTopControls();
+  updateHelpText();
+}
 
 // ================= 规范 Hash 路由调度器 =================
 function handleRoute() {
@@ -1142,16 +1157,64 @@ function handleRoute() {
 
 window.addEventListener("hashchange", handleRoute);
 
-// 比赛中「重选模式」= 放弃当前比赛回到主菜单
-function reopenStartFlow() {
+// 比赛中退出：按当前模式回到上一层，而不是直接跳回主菜单
+//  · 在线对战 → 认输确认 → 房间
+//  · 在线练习 → 练习房
+//  · 单机 / 对战 AI → 选车界面
+//  · 全 AI 观战 → 模式选择（观战没有更上一层的设置界面）
+function exitRaceFlow() {
   if (resultsShown) return;
-  backToMainMenu();
+  if (mode === "onlinerace") { openOnlineQuitConfirm(); return; }
+  if (onlinePractice) { returnToPracticeRoom(); return; }
+  if (mode === "spectate") { backToMainMenu(); return; }
+
+  hideResults();
+  hideMsg(true);
+  offTrackWarnEl?.classList.add("hidden");
+  releaseFocusAutopilot(true);
+  closeTrackModal();
+  resetSimClock(0);
+  finishAt = 0;
+  winner = null;
+  updateTopControls();
+  updateHelpText();
+  // 上一层的默认落点是「赛道 / 圈数」设置；取消则继续退到「选车」
+  startGame({ forceTrackSetup: true });
+  syncModalOpen();
 }
 
 // ================= 结算大屏 =================
+// 在线结算：先展示完整成绩，30 秒后自动回房间；也可随时手动返回，
+// 不立刻把人踢回房间，把退出时机交给玩家。
+const ONLINE_RESULTS_RETURN_MS = 30000;
+let onlineResultsTimer = 0;
+let onlineReturnAt = 0;
+
+function clearOnlineResultsTimer() {
+  if (onlineResultsTimer) { clearInterval(onlineResultsTimer); onlineResultsTimer = 0; }
+  onlineReturnAt = 0;
+}
+
+function startOnlineResultsTimer() {
+  clearOnlineResultsTimer();
+  const uploadEl = document.getElementById("resultsUpload");
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((onlineReturnAt - performance.now()) / 1000));
+    if (uploadEl) uploadEl.textContent = `⏱ ${left} 秒后自动返回房间 · 也可点击下方按钮立即返回`;
+    if (left <= 0) returnToOnlineRoom();
+  };
+  onlineReturnAt = performance.now() + ONLINE_RESULTS_RETURN_MS;
+  tick();
+  onlineResultsTimer = setInterval(tick, 250);
+}
+
 function hideResults() {
+  clearOnlineResultsTimer();
   const homeBtn = document.getElementById("resultsHomeBtn");
-  if (homeBtn) homeBtn.textContent = mode === "onlinerace" ? "🚪 返回在线大厅" : "🏠 回到主页面";
+  if (homeBtn) {
+    homeBtn.textContent = mode === "onlinerace" ? "🚪 返回房间"
+      : (mode === "solo" && onlinePractice) ? "🎯 返回练习房" : "🏠 回到主页面";
+  }
   const modal = document.getElementById("resultsModal");
   if (modal) modal.classList.remove("open");
   resultsShown = false;
@@ -1163,8 +1226,19 @@ function showResults() {
   if (!modal) return;
   // 比赛已结束，退出确认失去意义：关掉弹窗并归还临时自动驾驶
   if (onlineQuitConfirmOpen) closeConfirmModal();
+  clearOnlineResultsTimer();
   resultsShown = true;
   isModalOpen = true;   // 冻结比赛
+
+  const online = mode === "onlinerace";
+  const practice = mode === "solo" && onlinePractice;
+  const restartBtn = document.getElementById("resultsRestartBtn");
+  const homeBtn = document.getElementById("resultsHomeBtn");
+  if (restartBtn) restartBtn.classList.toggle("hidden", online);   // 在线不提供"再来一局"
+  if (homeBtn) {
+    homeBtn.textContent = online ? "🚪 返回房间" : practice ? "🎯 返回练习房" : "🏠 回到主页面";
+    homeBtn.classList.toggle("primary", online || practice);   // 在线/练习只剩一个主要动作
+  }
 
   const maxLaps = effectiveLaps(currentTrack?.laps);
   const trackName = `${currentTrack.flag} ${currentTrack.name}`;
@@ -1262,6 +1336,8 @@ function showResults() {
       uploadEl.textContent = "";
     }
   }
+
+  if (online) startOnlineResultsTimer();
 }
 
 // 提交在线练习成绩（REST）
@@ -1283,32 +1359,22 @@ async function uploadResult(car) {
   return !!(data.ok && data.validated);
 }
 
-// 结算大屏按钮：再来一局 / 回到主页面
+// 结算大屏按钮：非在线为再来一局；在线只保留"返回房间"
 function initResultsModal() {
   const restartBtn = document.getElementById("resultsRestartBtn");
   if (restartBtn) {
     restartBtn.addEventListener("click", () => {
+      if (mode === "onlinerace") { returnToOnlineRoom(); return; }
       hideResults();
-      if (mode === "onlinerace") {
-        // 房间还在：直接请求服务器重开（非房主/未就绪时服务端会拒绝并保持在房间）
-        stopNetRace();   // 清掉上一次比赛结果，避免结算屏立即复现
-        conn.send({ t: "room_start" });
-        showMsg("等待开赛", "房主可再次点击开始", 2000);
-        const startModal = document.getElementById("startModal");
-        if (startModal) startModal.classList.remove("open");
-      } else {
-        reset();
-      }
+      reset();
     });
   }
   const homeBtn = document.getElementById("resultsHomeBtn");
   if (homeBtn) {
     homeBtn.addEventListener("click", () => {
-      if (mode === "onlinerace") {
-        exitToOnlineLobby();
-      } else {
-        backToMainMenu();
-      }
+      if (mode === "onlinerace") returnToOnlineRoom();
+      else if (onlinePractice) returnToPracticeRoom();
+      else backToMainMenu();
     });
   }
 }
