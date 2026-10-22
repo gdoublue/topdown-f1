@@ -446,7 +446,7 @@ const res = sampleRemote(buf, entryPlayMs, Math.min(250, 30 + netAge));
 | `HISTORY_MS` 240ms → **700ms** | 采样点前移时落到 `buf[0]` 之前 → 车"倒退一段再冲回来" |
 | 位姿跳变护栏 + `__gp.net.jumps` 记账 | 一帧几十米的瞬移改为"快速滑动"，并留下现场 |
 | 计时塔 HUD：缓存 DOM 引用 + 脏检查 + **12.5Hz 降频** | 每帧 72 次 `querySelector` + 约 160 次 DOM 写 |
-| 画布 DPR 上限 2 → **1.5** | 4K/Retina 下像素面积翻 4 倍导致的填充开销 |
+| 画布 DPR 上限 2 → **1.5**（后续升级为自适应渲染，见 §5.1） | 4K/Retina 下像素面积翻 4 倍导致的填充开销 |
 | 远端幽灵碰撞软化（按穿透深度缩放、150ms 冷却、滞后残影只分离不扣速） | 贴车每帧连罚、撞"空气"丢速 |
 | 样条切线改用样本自带速度（时间参数化 Hermite，附弦长限幅） | 非均匀间隔（掉帧）下的几何过冲/画龙 |
 
@@ -467,10 +467,30 @@ const res = sampleRemote(buf, entryPlayMs, Math.min(250, 30 + netAge));
 | `HISTORY_MS` | 700 ms | 内存/遍历成本略增 | 采样点前移时会倒带 |
 | 补推钳制 | 250 ms/帧 | 卡死后恢复快，但会瞬移一大段 | 卡死后进度永久落后 |
 | `AI_HUD_INTERVAL_MS` | 80 ms（12.5Hz） | HUD 更跟手，但吃帧预算 | 计时数字更"跳" |
-| `RENDER_DPR_MAX` | 1.5 | 更清晰，填充开销随面积平方增长 | 高 DPI 屏上略糊，但帧时间下降明显 |
+| 画质预设 | 自动（默认） | 高/中/低为固定档位，见 §5.1 | 低档关闭背景模糊与扫描线 |
+| 自动画质像素上限 | 3.4M | 更清晰，填充开销↑ | 更糊，帧时间↓ |
+| 自动缩放下限 | 0.4（相对像素上限） | —— | 低于 0.4 画面过糊，收益有限 |
 | 幽灵碰撞动量冷却 | 150 ms | 轻微蹭碰更"实"，但贴车会连罚 | 连续贴车几乎无速度损失 |
 
 调参原则：**先保证"永远在插值"**（`lead` 为负），再谈延迟；延迟只能通过"上限 + 速率"调整，不能跳变。
+
+### 5.1 自适应渲染（画质）
+
+画布 backing store 分辨率 = CSS 尺寸 × DPR × 渲染缩放。此前只钳制了 DPR（1.5），4K 屏仍是 8.3M 像素，弱机填充率直接见底。现改为三档手动 + 自动动态分辨率：
+
+| 档位 | DPR 上限 | 像素上限 | 固定缩放 | 赛道纹理 SS | 低特效 |
+|---|---|---|---|---|---|
+| 自动 | 1.5 | 3.4M | 动态 0.4–1（相对上限） | 4（进入低特效后 2） | 自动 |
+| 高 | 1.5 | 无 | 1 | 4 | 否 |
+| 中 | 1.25 | 3.0M | 0.85 | 3 | 否 |
+| 低 | 1.0 | 1.5M | 0.65 | 2 | 是 |
+
+- **自动模式（DRS）**：4K 起步约 64% 缩放；近 700ms 帧时间 >28ms 或 EMA >19.5ms 时按 ×0.82 降档（单帧 >45ms 时 ×0.6），连续 4s 高于 66fps 才 +0.08 缓慢回升；滞回设计保证稳定 60Hz 不来回抖动。缩放变化只重设 backing store，CSS 尺寸不变，镜头视野不变。
+- **低特效回退**：自动缩放到 ≤0.6（或严重卡顿且 ≤0.85）时切到 `body.perf-lite`：关闭面板 `backdrop-filter`、减弱全屏扫描线，并把赛道纹理 SS 从 4 降到 2 以省内存与上传带宽。
+- **赛道纹理**：SS 可降档，最长边钳制在 32000px（此前 dragstrip SS=4 宽 44640px，超过浏览器画布上限直接失败）。Monza SS=4 约 194MB 显存，SS=2 约 49MB。
+- **绘制剔除**：只画相机视口内的车、胎痕和扬尘；相机完全位于世界内时不再整屏填充背景。
+- **配置持久化**：`localStorage["f1-render-quality"]`，默认自动。右上角"画质"下拉可即时切换，下方"渲染"行显示当前实际分辨率与缩放。
+- **HUD**：单人 HUD 降到 20Hz，多人计时塔维持 12.5Hz。
 
 ---
 
@@ -482,6 +502,7 @@ const res = sampleRemote(buf, entryPlayMs, Math.min(250, 30 + netAge));
 __gp.perf.frame   // { avgMs, maxMs, hitches, n }  最近 120 帧真实间隔
 __gp.perf.sim     // { gapMs, steps, visualMs }     物理推进 vs 画面推进
 __gp.perf.canvas  // { w, h, cssW, dpr, px(百万像素) } 画布实际分辨率
+__gp.perf.quality // { mode, label, lite, width, height, px, scale, dpr, autoScale, trackSS, emaMs } 当前画质与自动缩放
 __gp.net.stats    // { delayMs, offsetMs, starved, cars:[{ age, gap, extra, lead, extrap, ghost }] }
 __gp.net.jumps    // 远端车位姿跳变记账（d 米 / play 毫秒 / extrap / extra）
 __gp.conn.transport         // "udp" | "websocket"
@@ -526,7 +547,7 @@ console.log(__gp.perf.frame, __gp.perf.sim, __gp.conn.transport);
 | # | 边界 | 说明 | 候选方案 |
 |---|---|---|---|
 | 1 | 对端 6~10fps 时"流畅 + 实时"不可兼得 | 样本只有 6~10Hz，插值只能补形状 | 让对端别掉帧（下条） |
-| 2 | **客户端帧时间决定观感上限** | 实测 Chrome 6fps、卡死 14.5s | 已完成：HUD 缓存 + 12.5Hz 降频、DPR 上限 1.5；**待做**：在线模式改"定时器固定 60Hz 模拟 + rAF 只渲染" |
+| 2 | **客户端帧时间决定观感上限** | 实测 Chrome 6fps、卡死 14.5s | 已完成：HUD 缓存 + 12.5Hz 降频、自适应渲染（自动 DRS + 低特效回退，见 §5.1）；**待做**：在线模式改"定时器固定 60Hz 模拟 + rAF 只渲染" |
 | 3 | 秒级卡死恢复时会有一次瞬移 | 时间轴必然断层，只能"检测 → 重置" | 目前用跳变护栏表现为快速滑动；若要更平滑需做位置淡入 |
 | 4 | 补推钳制导致长时间卡死后进度永久落后真实时间 | 这是"不瞬移"的代价 | 若要求严格对齐，需在恢复时大步快进（视觉上是长距离瞬移） |
 | 5 | 对称 NAT / 企业网封 UDP | 已自动回落 WS | 需要时配 `RTC_TURN` |
@@ -565,7 +586,7 @@ console.log(__gp.perf.frame, __gp.perf.sim, __gp.conn.transport);
 | 审核项 | 结论 | 实施内容 |
 |---|---|---|
 | HUD 每帧 72 次 `querySelector` + 约 160 次 DOM 写 | **成立**，144Hz 下不可忽视 | 行内子节点一次缓存（`rowRefs`）、`setAttr/setStyle/setDisplay` 脏检查、整体降频到 **12.5Hz** |
-| 4K/Retina 画布像素面积过大 | **成立** | `RENDER_DPR_MAX = 1.5`；新增 `__gp.perf.canvas` 暴露实际像素数 |
+| 4K/Retina 画布像素面积过大 | **成立** | 升级为自适应渲染：自动模式 3.4M 像素上限 + 0.4–1 动态缩放，另有高/中/低固定档；`__gp.perf.canvas` / `__gp.perf.quality` 暴露实际像素与缩放比例 |
 | `peer_state` 每包即时转发导致 O(N²) 发包 | **成立** | 服务端改为 **16ms 合包广播** `peers_bundle`，8 人房发送 3360 次/秒 → ≈60 次/秒；客户端新增解析（旧 `peer_state` 保留兼容）。**已用 `remote-smoothness.mjs` 端到端验证**：144Hz 采样 702 帧，观战速度 60.4 m/s（真值 60），波动 4.5% |
 | 延迟残影 + 非对称硬碰撞（撞空气、贴车连罚） | **成立** | 动量损失按穿透深度缩放 + 150ms 冷却；对"明显滞后"的残影（`netAge>120ms` 或 `extra>120ms`）只做位移分离、不扣速度 |
 | 非均匀 Catmull-Rom 在掉帧间隔下过冲 | **部分成立**（现版本已做非均匀缩放，但仍用邻点差分求切线） | 切线改为**样本自带速度向量**（时间参数化 Hermite，`m = (cos a, sin a)·v·span`），并加弦长 2.2 倍限幅；静止/缺 `v` 时回退邻点差分 |
@@ -589,7 +610,7 @@ console.log(__gp.perf.frame, __gp.perf.sim, __gp.conn.transport);
 
 三者一致，说明自车物理与镜头**始终同源**。远端车同理：`interpolateRemoteCars(dt)` 就在同一次 `update()` 里逐帧执行，144Hz 下每帧都会在服务器 30Hz 的两个关键帧之间插值，"远端车被绑死在 30Hz"不成立。
 
-因此"单人 144Hz、双人 30Hz"的差异只能来自**真实帧耗时**（8 车绘制 + 计时塔 DOM + 大画布 + 粒子），本轮按 9.1 的三项（HUD / DPR / 合包）先行压下；若仍未回到满帧，下一步是把在线模式改为"定时器固定 60Hz 模拟 + rAF 只渲染"。
+因此"单人 144Hz、双人 30Hz"的差异只能来自**真实帧耗时**（8 车绘制 + 计时塔 DOM + 大画布 + 粒子），本轮按 9.1 的三项（HUD / 自适应渲染 / 合包）先行压下；若仍未回到满帧，下一步是把在线模式改为"定时器固定 60Hz 模拟 + rAF 只渲染"。
 
 ### 9.3 已知取舍（不打算做）
 
@@ -609,6 +630,17 @@ console.log(__gp.perf.frame, __gp.perf.sim, __gp.conn.transport);
 | `server/core/sim.js` | +14 | 合理性窗口改用发送端 `st` 差 |
 | `server/net/gateway.js` | +35 | 位姿下行合包广播（`peers_bundle`，16ms 一次） |
 | `server/net/rtc.js` | +2 | 只接受第一条 answer（消除重复 answer 的协商报错） |
+
+## 附录 A.2：渲染适配改动清单
+
+| 文件 | 类型 | 内容 |
+|---|---|---|
+| `src/game/renderQuality.js` | 新增 | 画质预设、自动 DRS（迟滞升降档）、低特效判定、配置持久化 |
+| `src/main.js` | 修改 | 画质接入与重建、视口剔除、单人 HUD 20Hz、`__gp.perf.quality` |
+| `src/track/render.js` | 修改 | 赛道纹理 SS 参数化 + 32000px 长边钳制 |
+| `src/game/camera.js` | 修改 | 相机完全在世界内时不再整屏填充背景 |
+| `src/game/effects.js` | 修改 | 胎痕 / 扬尘按视口 AABB 剔除 |
+| `index.html`、`src/styles/base.css` | 修改 | 画质下拉与渲染信息行、`body.perf-lite` 低特效样式 |
 
 ## 附录 B：部署
 

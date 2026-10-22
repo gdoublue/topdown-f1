@@ -26,6 +26,19 @@
         <span>VIEW</span>
         <small>视图工具</small>
       </div>
+      <div class="vt-row" id="qualityRow">
+        <span class="vt-name">画质</span>
+        <select id="qualitySelect" class="vt-select" title="自动：按帧率动态调整渲染分辨率；低档位会关闭背景模糊与扫描线">
+          <option value="auto">自动</option>
+          <option value="high">高</option>
+          <option value="medium">中</option>
+          <option value="low">低</option>
+        </select>
+      </div>
+      <div class="vt-row vt-val" id="qualityInfoRow">
+        <span class="vt-name">渲染</span>
+        <span id="qualityInfo">自动 · 测量中</span>
+      </div>
       <div class="vt-row" id="aiLineRow">
         <span class="vt-name">AI 探测线</span>
         <button id="aiLineToggle" class="vt-switch" aria-pressed="false" title="显示 / 隐藏 AI 前瞻目标点与引线（默认关闭）"><i></i></button>

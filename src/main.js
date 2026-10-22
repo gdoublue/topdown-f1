@@ -5,7 +5,7 @@ import { WORLD, pts, N, switchTrack, currentTrack, currentTrackId } from "./trac
 import { buildTrackCanvas } from "./track/render.js";
 import { createCar, stepCar, resolveCarCollisions, finishedCarInput } from "./car/physics.js";
 import { drawCar, getRandomLivery } from "./car/render.js";
-import { resetCamera, updateCamera, applyCamera, setZoomScale } from "./game/camera.js";
+import { resetCamera, updateCamera, applyCamera, setZoomScale, cam } from "./game/camera.js";
 import { initInput, input, NO_INPUT } from "./game/input.js";
 import * as fx from "./game/effects.js";
 import { race, resetRace, tickCountdown, initCarRaceState, updateCarLap, simClock, advanceSimClock, resetSimClock } from "./game/race.js";
@@ -28,6 +28,10 @@ import { initOnlineUI, showOnline as showOnlineUI, hideOnline as hideOnlineUI, l
 import { getFingerprint } from "./net/fingerprint.js";
 import { startNetRace, stopNetRace, updateNetRace, bindNetRaceHandlers, netrace, forfeitNetRace, setNetAutopilot } from "./net/netrace.js";
 import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "./ui/labels.js";
+import {
+  onQualityChange, setQualityMode, getQualityMode, getTrackSS,
+  computeBackingSize, noteViewport, sampleFrameQuality, getQualityStats, getQualityInfo
+} from "./game/renderQuality.js";
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
@@ -49,7 +53,10 @@ let fpsFrames = 0;
 let fpsWindowStart = 0;
 // alpha:false → 不透明画布，避免移动端内核（夸克/UC 等）逐帧透明合成的闪烁
 const ctx = canvas.getContext("2d", { alpha: false });
-let trackCanvas = buildTrackCanvas();
+// 赛道贴图的超采样倍率随画质档位变化（高·自动=4 / 中=3 / 低·自动低特效=2）
+let currentTrackSS = getTrackSS();
+let trackCanvas = buildTrackCanvas(currentTrackSS);
+let qualityInfoEl = null;
 
 initMinimap();
 
@@ -81,7 +88,9 @@ let speedMult = 1;      // 比赛倍速（观战/单人/对战 AI 快进；在�
 const SPEED_STEPS = [1, 2, 4, 8, 16];
 const MAX_SUBSTEP_DT = 1 / 30;   // 倍速后切成 ≤1/30s 的固定物理子步，保证模拟稳定
 const AI_HUD_INTERVAL_MS = 80;   // 计时塔刷新间隔（12.5Hz）：低频信息，不必跟满帧率
+const SOLO_HUD_INTERVAL_MS = 50; // 单人遥测 20Hz：数字够跟手，同时省掉 144Hz 下的逐帧 DOM 写
 let lastAiHudAt = 0;
+let lastSoloHudAt = 0;
 
 // 洗牌算法：用于每局发车位随机排位
 function shuffle(array) {
@@ -220,25 +229,46 @@ function reset() {
   winner = null;
 }
 
-// 画布像素上限：4K/Retina 屏上 DPR=2 会让像素面积翻 4 倍（例如 3000×1700 → 6M 像素），
-// Canvas 2D 的填充成本与像素面积成正比。1.5 在视觉上几乎不可辨，但能省掉大半填充带宽。
-const RENDER_DPR_MAX = 1.5;
+// 画布后备分辨率由画质档位/动态缩放决定，CSS 尺寸始终铺满窗口：
+// 降的是渲染像素，UI 仍是原生分辨率。镜头按 canvas.height 推导，世界视野不变。
+function updateQualityInfo() {
+  if (!qualityInfoEl) qualityInfoEl = document.getElementById("qualityInfo");
+  if (qualityInfoEl) qualityInfoEl.textContent = getQualityInfo();
+}
 
 function resize() {
   const r = canvas.getBoundingClientRect();
-  const dpr = Math.min(window.devicePixelRatio || 1, RENDER_DPR_MAX);
-  const w = Math.max(1, Math.round(r.width * dpr));
-  const h = Math.max(1, Math.round(r.height * dpr));
+  noteViewport(r.width, r.height);
+  // 视口变化可能让自动模式退出低特效，赛道贴图档位随之恢复
+  applyTrackQuality();
+  const { w, h } = computeBackingSize(r.width, r.height, window.devicePixelRatio || 1);
   // 尺寸没变就不重置画布：移动端地址栏收起/展开会触发 resize，
   // 无条件重设 canvas.width 会清屏，造成"一闪一闪"
-  if (canvas.width === w && canvas.height === h) return;
+  if (canvas.width === w && canvas.height === h) {
+    updateQualityInfo();
+    return;
+  }
   canvas.width = w;
   canvas.height = h;
   // alpha:false 画布不透底：开局菜单阶段先铺一层深色底（贴近页面渐变背景）
   ctx.fillStyle = "#0b111c";
   ctx.fillRect(0, 0, w, h);
+  updateQualityInfo();
 }
 window.addEventListener("resize", resize);
+
+function applyTrackQuality() {
+  const ss = getTrackSS();
+  if (ss === currentTrackSS) return;
+  currentTrackSS = ss;
+  trackCanvas = buildTrackCanvas(ss);
+}
+
+onQualityChange(() => {
+  applyTrackQuality();
+  resize();
+  updateQualityInfo();
+});
 
 let isModalOpen = false;
 // 在线退出确认：比赛不冻结，自车临时交给自动驾驶（取消后归还键盘）
@@ -381,7 +411,7 @@ export function applyTrack(trackId) {
   trackModalFromStart = false;
   switchTrack(trackId || currentTrackId);
   pendingTrackId = currentTrackId;
-  trackCanvas = buildTrackCanvas();
+  trackCanvas = buildTrackCanvas(currentTrackSS);
 
   updateTrackUI();
   initMinimap();
@@ -675,11 +705,21 @@ function drawCarWithGhostAlpha(car) {
   ctx.globalAlpha = prev;
 }
 
+// 8 车分散在赛道上时，大部分车都在镜头外；车体绘制有几十条路径和渐变，
+// 屏幕外的不画，和屏幕内完全等价（小地图仍显示全部车）。
+const CAR_CULL_MARGIN = 12;
+function isCarVisible(car) {
+  if (!car) return false;
+  const v = cam.view;
+  return car.x > v.x - CAR_CULL_MARGIN && car.x < v.x + v.w + CAR_CULL_MARGIN &&
+         car.y > v.y - CAR_CULL_MARGIN && car.y < v.y + v.h + CAR_CULL_MARGIN;
+}
+
 function draw() {
   const activeCar = cars[focusIndex] || cars[0];
   applyCamera(ctx, canvas, activeCar.shake);
   ctx.drawImage(trackCanvas, 0, 0, WORLD.w, WORLD.h);
-  fx.drawEffects(ctx);
+  fx.drawEffects(ctx, cam.view);
 
   // 绘制当前焦点赛车的前瞻目标点与引线（视图面板可随时关闭）
   if (showAILine && mode !== "solo" && aiInputs[focusIndex]?.targetX) {
@@ -706,9 +746,9 @@ function draw() {
   // retired = 已退出房间的车友：直接消失，不在赛道上留下幽灵车
   // ghostHidden / ghostAlpha = 在线对战的失联分档：半透明 → 彻底隐藏
   for (let i = 0; i < cars.length; i++) {
-    if (i !== focusIndex) drawCarWithGhostAlpha(cars[i]);
+    if (i !== focusIndex && isCarVisible(cars[i])) drawCarWithGhostAlpha(cars[i]);
   }
-  if (cars[focusIndex]) drawCarWithGhostAlpha(cars[focusIndex]);
+  if (isCarVisible(cars[focusIndex])) drawCarWithGhostAlpha(cars[focusIndex]);
 
   // 小地图
   drawMinimap(cars, focusIndex);
@@ -1275,6 +1315,14 @@ function backToMainMenu() {
 
 // ================= 视图工具：AI 探测线开关 + 视野缩放系数 =================
 function initViewTools() {
+  // 画质：自动按帧率调整渲染分辨率；高/中/低为固定档位（会重建赛道贴图）
+  const qualitySelect = document.getElementById("qualitySelect");
+  if (qualitySelect) {
+    qualitySelect.value = getQualityMode();
+    qualitySelect.addEventListener("change", () => setQualityMode(qualitySelect.value));
+  }
+  updateQualityInfo();
+
   // 比赛倍速 chips
   const speedWrap = document.getElementById("speedChips");
   if (speedWrap) {
@@ -1432,6 +1480,11 @@ function frame(ts) {
   const rawDt = (ts - prevTs) / 1000;
   prevTs = ts;
   if (started) recordFrameGap(rawDt * 1000);
+  // 自动画质：只在真正跑比赛、无弹窗、页面可见时采样真实帧间隔。
+  // 降档会立刻重建后备画布；升档有长冷却，避免在 60Hz 边界来回抖。
+  if (started && !isModalOpen && document.visibilityState === "visible") {
+    if (sampleFrameQuality(rawDt * 1000, now)) resize();
+  }
   let dt = rawDt;
   if (dt > 0.05) dt = 0.05;
 
@@ -1508,7 +1561,8 @@ function frame(ts) {
       lastAiHudAt = now;
       updateAIHUD(cars, focusIndex, switchFocusCar);
     }
-  } else {
+  } else if (now - lastSoloHudAt >= SOLO_HUD_INTERVAL_MS) {
+    lastSoloHudAt = now;
     updateHUD(activeCar);
   }
 }
@@ -1559,6 +1613,8 @@ window.__gp = {
     get sim() {
       return { gapMs: +lastNetGapMs.toFixed(1), steps: lastNetSteps, visualMs: +(lastVisualDt * 1000).toFixed(1) };
     },
+    // 当前渲染档位 / 动态分辨率 / 实际后备像素 / 赛道贴图超采样倍率
+    get quality() { return getQualityStats(); },
     // 画布实际像素：填充成本与像素面积成正比，4K/Retina 上这是最容易失控的一项
     get canvas() {
       return {

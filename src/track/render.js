@@ -3,14 +3,19 @@ import { WORLD, isLinear } from "./geometry.js";
 import { makeRandom } from "../utils.js";
 import { pts, N, tan, nor, curvS, kerbFlag, hw, cumDist, LAP_LENGTH, addLoop, ringPath, centerPath } from "./geometry.js";
 
-const SS = 4;   // 超采样倍率（赛道画质核心，不做任何降级）
+// 单向画布上限：部分浏览器内核在 32767px 处截断/拒绝创建。
+// dragstrip 的世界宽度有 11160m，SS=4 会到 44640px，必须先按世界长边限幅。
+const MAX_CANVAS_DIM = 32000;
 
-export function buildTrackCanvas() {
+// ssWanted 由画质档位决定：高·自动=4 / 中=3 / 低·自动低特效=2。
+// 赛道贴图是弱机显存与采样带宽的大头（Monza SS=4 约 194MB），需要参与降级。
+export function buildTrackCanvas(ssWanted = 4) {
+  const ss = Math.max(1, Math.min(ssWanted, MAX_CANVAS_DIM / Math.max(WORLD.w, WORLD.h)));
   const cv = document.createElement("canvas");
-  cv.width = WORLD.w * SS;
-  cv.height = WORLD.h * SS;
+  cv.width = Math.round(WORLD.w * ss);
+  cv.height = Math.round(WORLD.h * ss);
   const g = cv.getContext("2d");
-  g.scale(SS, SS);
+  g.scale(ss, ss);
   g.lineJoin = "round";
   g.lineCap = "round";
 
@@ -225,5 +230,3 @@ export function buildTrackCanvas() {
 
   return cv;
 }
-
-export { SS };

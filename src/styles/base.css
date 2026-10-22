@@ -32,6 +32,20 @@ html, body { height: 100%; }
   }
 }
 
+/* 低画质/弱机：backdrop-filter 会每帧对动态画布做一次模糊采样，
+   面板越多越贵；扫描线也是一层全屏逐像素合成。关掉它们比降分辨率更直接。 */
+body.perf-lite .panel,
+body.perf-lite .track-modal-overlay,
+body.perf-lite .track-modal-card,
+body.perf-lite .tune-panel,
+body.perf-lite .track-modal-footer {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.perf-lite #vignette {
+  background: radial-gradient(ellipse at 50% 45%, rgba(0, 0, 0, 0) 55%, rgba(0, 0, 0, .32) 100%);
+}
+
 body {
   margin: 0;
   background:
@@ -198,6 +212,31 @@ canvas#cv {
   left: 20px;
   background: #fff;
   box-shadow: 0 0 8px rgba(255, 255, 255, 0.45);
+}
+.vt-select {
+  min-width: 62px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+  color: #dbe5ef;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  padding: 2px 4px;
+  outline: none;
+  cursor: pointer;
+}
+.vt-select option { background: #0b111c; color: #eef3f8; }
+#qualityInfo {
+  flex: 1;
+  min-width: 0;
+  color: var(--gold);
+  font-family: var(--font-num);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 #zoomRange {
   width: 92px;

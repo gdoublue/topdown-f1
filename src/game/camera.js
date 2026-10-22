@@ -37,8 +37,6 @@ export function updateCamera(car, dt) {
 // 设置画布变换并返回视野信息
 export function applyCamera(ctx, canvas, shake) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#173a22";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   // 统一各赛道物理视野比例：基于标准参考高度解算物理米/像素，杜绝大世界赛道车辆缩成小点
   const REFERENCE_VIEW_H = 760;
@@ -54,6 +52,14 @@ export function applyCamera(ctx, canvas, shake) {
   cam.view.y = cy - viewH / 2;
   cam.view.w = viewW;
   cam.view.h = viewH;
+
+  // 赛道整图覆盖整个世界：镜头完全在世界内时它会把画布铺满，
+  // 不必每帧再先做一次全屏底色填充（4K 下这一笔就是 830 万像素）。
+  if (cam.view.x < 0 || cam.view.y < 0 ||
+      cam.view.x + viewW > WORLD.w || cam.view.y + viewH > WORLD.h) {
+    ctx.fillStyle = "#173a22";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   ctx.setTransform(k, 0, 0, k, canvas.width / 2 - cx * k, canvas.height / 2 - cy * k);
 }

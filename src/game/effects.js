@@ -46,7 +46,15 @@ export function updateEffects(dt) {
   }
 }
 
-export function drawEffects(ctx) {
+export function drawEffects(ctx, view) {
+  // 视野剔除：刹车印会累积到数千段，但镜头一次只看得到几十米。
+  // 原来每帧把全部段都拼进路径（即使远在赛道另一头），长局越跑越卡；
+  // 这里先用 AABB 过滤，只有可见段才参与建路径，画面完全等价。
+  const vx0 = view ? view.x - 2 : -Infinity;
+  const vy0 = view ? view.y - 2 : -Infinity;
+  const vx1 = view ? view.x + view.w + 2 : Infinity;
+  const vy1 = view ? view.y + view.h + 2 : Infinity;
+
   // 高性能分桶批量绘制：将多达数千段前后轮刹车印按深浅聚合为 8 次批处理绘制，杜绝掉帧卡顿。
   // 每段用四边形填充而不是统一 lineWidth 描边 —— 这样前轮 0.34m / 后轮 0.44m 的真实胎宽才能体现，
   // 四条痕迹（左前/右前/左后/右后）宽度各不相同、互不粘连。
@@ -56,6 +64,14 @@ export function drawEffects(ctx) {
 
     for (let i = 0; i < skids.length; i++) {
       const s = skids[i];
+      const hw = Math.max(0.05, (s.width || 0.38) * 0.5);
+      if (vx0 !== -Infinity) {
+        const minX = (s.a.x < s.b.x ? s.a.x : s.b.x) - hw;
+        const maxX = (s.a.x > s.b.x ? s.a.x : s.b.x) + hw;
+        const minY = (s.a.y < s.b.y ? s.a.y : s.b.y) - hw;
+        const maxY = (s.a.y > s.b.y ? s.a.y : s.b.y) + hw;
+        if (maxX < vx0 || minX > vx1 || maxY < vy0 || minY > vy1) continue;
+      }
       const inten = s.intensity || 0.5;
       const alpha = (0.16 + inten * 0.68) * s.life;
       const bIdx = Math.min(BUCKET_COUNT - 1, Math.max(0, Math.floor(alpha * BUCKET_COUNT)));
@@ -94,6 +110,7 @@ export function drawEffects(ctx) {
 
   for (let i = 0; i < dust.length; i++) {
     const p = dust[i];
+    if (p.x < vx0 || p.x > vx1 || p.y < vy0 || p.y > vy1) continue;
     ctx.fillStyle = "rgba(" + p.col + "," + (0.5 * Math.max(0, p.life / p.max)) + ")";
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
