@@ -10,6 +10,7 @@ export const SERVER_CONFIG = {
 
   // 房间限制
   maxPlayersPerRoom: 8,
+  maxSpectatorsPerRoom: 8,   // 观赛位上限定：观赛不占发车位，8 人满房也能进来看
   maxRooms: 64,
 
   // 心跳与超时（毫秒）

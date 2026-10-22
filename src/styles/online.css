@@ -241,6 +241,10 @@
   border-left-color: rgba(0, 229, 255, 0.55);
   background: rgba(0, 229, 255, 0.045);
 }
+/* 观赛者行：与参赛车手区分开（不占发车位） */
+.room-player.is-viewer { opacity: 0.82; border-left-color: rgba(125, 211, 252, 0.5); }
+.room-player.is-viewer .ol-rank { font-size: 11px; }
+.viewer-hint { border-color: rgba(125, 211, 252, 0.4); color: #9ad7f7; background: rgba(125, 211, 252, 0.07); }
 .ol-name {
   flex: 1.1;
   min-width: 0;

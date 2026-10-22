@@ -88,6 +88,10 @@ function raceHardLimitMs() {
 let winner = null;      // 全场首位冲线车辆（与观察视角无关）
 let resultsShown = false;   // 结算大屏是否已展示
 let onlinePractice = false; // 在线单人练习：成绩自动上传服务器排行榜
+// 在线观赛：比赛进行中进房（或中途切换观赛）的玩家没有自己的车，
+// 只渲染插值出来的实时画面，可以任意切换观看的赛车，不参与排名/碰撞。
+let netSpectating = false;
+function isSpectating() { return mode === "onlinerace" && netSpectating; }
 let showAILine = false; // 是否绘制焦点赛车的 AI 前瞻目标点与引线（默认关闭，可在视图面板开启）
 let speedMult = 1;      // 比赛倍速（观战/单人/对战 AI 快进；在线对战为服务器实时，不生效）
 const SPEED_STEPS = [1, 2, 4, 8, 16];
@@ -192,6 +196,12 @@ function switchFocusCar(idx) {
   resetCamera(target);
   audio.syncCarAudio(target);
 
+  // 在线观赛：没有"自己的车"，切视角只是换一台车看实时画面
+  if (isSpectating()) {
+    showMsg("👀 观战中 · " + driverLabel(target), "1-7 / Tab 或点击计时塔切换观看的赛车", 1400);
+    return;
+  }
+
   // 在线对战允许换视角，但你的车不能没人开：
   //  · 换到别人视角时若自动驾驶没开 → 用【玩家本地算法】临时接管（不写偏好设置）
   //  · 切回自己的车 → 若这次接管是换视角引起的，就把键盘交还
@@ -211,6 +221,7 @@ function switchFocusCar(idx) {
 // 页面上的自动驾驶开关：顶栏胶囊点击 / 快捷键 B 都走这里，开不开由玩家决定
 function toggleAutopilotQuick() {
   if (mode === "spectate") return;   // 全 AI 观战没有"自己的车"可交出去
+  if (isSpectating()) return;        // 在线观赛同理：没有自己的车要驾驶
   const next = !isAutopilotOn();
   focusAutopilot = false;            // 手动开关之后就不再算"换视角临时接管"
   toggleAutopilot(next);
@@ -315,13 +326,13 @@ function updateTrackUI() {
   if (pillName) pillName.textContent = currentTrack.name;
   if (pillLen) pillLen.textContent = (currentTrack.length / 1000).toFixed(2) + "km";
   if (pillSession) {
-    pillSession.textContent = mode === "onlinerace" ? "ONLINE"
+    pillSession.textContent = mode === "onlinerace" ? (netSpectating ? "WATCH" : "ONLINE")
       : mode === "spectate" ? "AI GP"
         : mode === "vs" ? "GRAND PRIX"
           : mode === "solo" ? "TIME ATTACK" : "PRACTICE";
   }
 
-  const label = mode === "onlinerace" ? "在线对战 · "
+  const label = mode === "onlinerace" ? (netSpectating ? "观战 · " : "在线对战 · ")
     : mode === "spectate" ? "AI 锦标赛 · " : mode === "vs" ? "对战 AI · " : "俯视 F1 · ";
   document.title = label + currentTrack.name;
 }
@@ -584,7 +595,8 @@ window.addEventListener("keydown", (e) => {
     }
     if (mode === "onlinerace") {
       e.preventDefault();
-      openOnlineQuitConfirm();
+      if (isSpectating()) stopSpectating();   // 观赛：直接退出观赛，不涉及认输
+      else openOnlineQuitConfirm();
       return;
     }
     if (started) {
@@ -676,11 +688,11 @@ function update(dt, finalStep = true, simNowMs = 0) {
   if (mode === "onlinerace") {
     // 发车灯：灯数来自服务端快照（与单机同一套 F1 灯灭规则）。
     // 必须"先跑 updateNetRace 再渲染"：状态翻转就发生在它内部的快照处理里。
+    // 灯灭就是发车信号：不再弹 "GO!" 文字，只留一声提示音（画面不打断）
     const wasCountdown = race.state === "countdown";
     const ev = updateNetRace(dt, input, simNowMs || performance.now(), fx, finalStep);
     updateStartLights();
     if (wasCountdown && race.state !== "countdown") {
-      showMsg("GO!", "", 900);
       audio.beep(1200, 0.35, 0.2);
     }
     if (ev === "lap") {
@@ -704,7 +716,7 @@ function update(dt, finalStep = true, simNowMs = 0) {
     const r = tickCountdown(dt);
     updateStartLights();   // 灯架渲染 + 每组一声 + 灯灭（tickCountdown 已把 lights 清零）
     if (r === "go") {
-      showMsg("GO!", "", 900);
+      // 灯灭即发车：只给声音提示，不弹 "GO!" 字样
       audio.beep(1200, 0.35, 0.2);
       audio.startSound();
       // 圈速与总时从灯灭起算：否则第 1 圈会把发车灯时间计入（服务端同理）
@@ -969,7 +981,17 @@ function updateTopControls() {
 
   if (online) {
     if (reopenBtn) reopenBtn.classList.add("hidden");
-    if (quitOnlineBtn) quitOnlineBtn.classList.remove("hidden");
+    if (quitOnlineBtn) {
+      quitOnlineBtn.classList.remove("hidden");
+      // 观赛没有"认输"这回事：同一个按钮直接退出观赛
+      if (isSpectating()) {
+        quitOnlineBtn.textContent = "👀 退出观赛";
+        quitOnlineBtn.title = "离开观赛画面返回房间（房间成员身份保留，可参加下一局）";
+      } else {
+        quitOnlineBtn.textContent = "🏳️ 退出比赛";
+        quitOnlineBtn.title = "退出在线比赛（多人对战将判定为认输，返回房间）";
+      }
+    }
   } else {
     if (reopenBtn) {
       reopenBtn.classList.remove("hidden");
@@ -987,8 +1009,8 @@ function updateTopControls() {
     document.getElementById(id)?.classList.toggle("hidden", online);
   }
 
-  // 全 AI 观战模式没有"自己的车可交给算法"，这个开关没有意义
-  document.getElementById("autopilotPill")?.classList.toggle("hidden", mode === "spectate");
+  // 全 AI 观战 / 在线观赛都没有"自己的车可交给算法"，这个开关没有意义
+  document.getElementById("autopilotPill")?.classList.toggle("hidden", mode === "spectate" || isSpectating());
 }
 
 function openConfirmModal(title, desc, onConfirm) {
@@ -1155,6 +1177,7 @@ function exitLocalNetRace() {
   hideMsg(true);
   resetSimClock(0);
   mode = "online";
+  netSpectating = false;
   releaseFocusAutopilot(true);
   started = false;
   resultsShown = false;
@@ -1162,6 +1185,15 @@ function exitLocalNetRace() {
   winner = null;
   showChat(true);
   updateTopControls();
+}
+
+// 退出观赛画面：通知房间（会播一条"谁离开观赛"），回到房间界面。
+// 房间成员身份保留 —— 可以立刻选车 + 就绪，参加下一局。
+function stopSpectating() {
+  if (!isSpectating()) return;
+  if (conn.isOpen()) conn.send({ t: "room_spectate", on: false });
+  returnToOnlineRoom();
+  showMsg("已退出观赛", "选好赛车并准备就绪，即可参加下一局", 2400);
 }
 
 // 回到当前在线房间（比赛结束或主动认输都走这里）：保留房间成员身份，
@@ -1199,7 +1231,9 @@ function updateHelpText() {
   if (!help) return;
   // 自动驾驶开启时给个明确提示（键盘操作不再作用于你的车）
   const auto = isAutopilotOn() ? "<br>🤖 自动驾驶中：你的赛车由算法驾驶（可在顶栏或按 B 关闭）" : "";
-  if (mode === "onlinerace") {
+  if (isSpectating()) {
+    help.innerHTML = "👀 观赛模式 · 实时画面 · 1-7 / Tab 或点击计时塔切换观看的赛车 · Esc 退出观赛";
+  } else if (mode === "onlinerace") {
     // 在线：可以换视角，但换走时自己的车会临时交给算法；Esc 是"退出/认输"而不是重选模式
     const focusAuto = focusAutopilot
       ? "<br>🤖 正在看别人的视角：你的车已交给本地算法驾驶（切回自己的车即交还键盘）"
@@ -1235,7 +1269,10 @@ function initStartFlow() {
   // 在线模式退出/认输按钮
   const quitBtn = document.getElementById("quitOnlineBtn");
   if (quitBtn) {
-    quitBtn.addEventListener("click", openOnlineQuitConfirm);
+    quitBtn.addEventListener("click", () => {
+      if (isSpectating()) stopSpectating();
+      else openOnlineQuitConfirm();
+    });
   }
 
   // 确认弹窗关闭与取消
@@ -1328,10 +1365,14 @@ function startOnlineRace(msg) {
   // 在线对战的玩家车在本地模拟：自动驾驶算法交给 netrace 驱动
   setNetAutopilot(isAutopilotOn(), getAutopilotDriver());
   cars = startNetRace(msg, conn.session?.sid);
+  // 参赛名单里没有自己的车 = 观赛（比赛中进房 / 中途转观赛）：只渲染实时画面，不模拟自车
+  netSpectating = msg.spectate === true || !cars.some(c => c.isPlayer);
   // startNetRace 内部按服务端下发的 trackId 切了赛道上下文（房间里换赛道后可能和上一局不同）：
   // 贴图与小地图必须同步重建，否则这一局画面还停在旧赛道
   rebuildTrackVisuals();
-  focusIndex = Math.max(0, cars.findIndex(c => c.isPlayer));
+  focusIndex = netSpectating
+    ? Math.max(0, cars.findIndex(c => !c.finished))   // 观赛默认看领先/第一台车
+    : Math.max(0, cars.findIndex(c => c.isPlayer));
   releaseFocusAutopilot(true);   // 上一局残留的"换视角接管"不能带进新一局
   switchFocusCar(focusIndex);
   fx.clearEffects();
@@ -1340,7 +1381,8 @@ function startOnlineRace(msg) {
   winner = null;
   updateTrackUI();
   updateHelpText();
-  showMsg("在线对战", "QQ飞车即时碰撞 · 等待发车", 1500);
+  if (netSpectating) showMsg("👀 观赛模式", "实时画面 · 按 1-7 / Tab 切换任意赛车观看", 2600);
+  else showMsg("在线对战", "QQ飞车即时碰撞 · 等待发车", 1500);
   updateTopControls();
   try { location.hash = "#/online/race"; } catch (e) {}
 }
@@ -1434,6 +1476,7 @@ window.addEventListener("hashchange", handleRoute);
 //  · 全 AI 观战 → 模式选择（观战没有更上一层的设置界面）
 function exitRaceFlow() {
   if (resultsShown) return;
+  if (isSpectating()) { stopSpectating(); return; }
   if (mode === "onlinerace") { openOnlineQuitConfirm(); return; }
   if (onlinePractice) { returnToPracticeRoom(); return; }
   if (mode === "spectate") { backToMainMenu(); return; }
@@ -1503,6 +1546,7 @@ function showResults() {
   isModalOpen = true;   // 冻结比赛
 
   const online = mode === "onlinerace";
+  const spectating = online && netSpectating;
   const practice = mode === "solo" && onlinePractice;
   const restartBtn = document.getElementById("resultsRestartBtn");
   const homeBtn = document.getElementById("resultsHomeBtn");
@@ -1605,6 +1649,9 @@ function showResults() {
       });
     } else if (mode === "solo" && onlinePractice) {
       uploadEl.textContent = "⚠️ 未连接服务器，成绩未上传";
+    } else if (spectating) {
+      // 观赛：没有参赛成绩可入榜，只说明这是观赛画面
+      uploadEl.textContent = "👀 观赛模式 · 本局成绩由参赛车手产生，不计入你的成绩";
     } else if (online) {
       // 房间对战：成绩由服务器在 race_end 之前就写库（无需客户端上传），这里只回报结果
       const mySid = conn.session?.sid;

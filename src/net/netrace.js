@@ -110,6 +110,68 @@ const jumps = [];
 const JUMP_LOG_MAX = 24;
 let netStarved = false;                 // 上一帧是否有"健康对端"的缓冲被掏空（自适应延迟输入）
 let serverState = "countdown";
+// ================= 发车时钟（让所有客户端在同一个绝对时刻起步） =================
+// 旧做法：等自己收到 "state=racing" 的快照才开始踩油门。每个客户端收到那一刻都比
+// 发车时刻晚一个【单程时延】，而且互不相同 —— 房主通常离服务器最近（甚至本机），
+// 于是看起来"房主先窜出去一点点"。这是时延差，不是谁抢跑。
+//
+// 现在：服务端在快照里给出这局的绝对发车时刻（goAt，sim 时钟）和该包发出的服务器时钟（wall），
+// 客户端用 ping/pong 的最小 RTT 样本估计"服务器 perf → 本机 perf"偏移（RTT/2 去掉单程时延），
+// 把 goAt 换算成本机 perf 时刻 → 到点就地发车：灯灭那一帧四个轮子一起动，
+// 各端出发时刻的差异只剩链路不对称带来的几毫秒。
+const startSync = {
+  // 本机 perf − 服务器 perf（用最小 RTT 样本估计）：把服务器时刻换算成本机时刻用
+  // local = serverTime + offPerf，符号方向与 remoteSync 的 srvOff 保持一致。
+  offPerf: null,
+  rtt: Infinity,     // 参与估计的那次往返时延
+  at: 0,             // 该样本的本机时刻（过期就允许重新估计）
+  goAtLocal: 0,      // 本机 perf 时钟上的发车时刻（0 = 未知 / 已发车）
+};
+let pingTimer = 0;
+
+function startPingLoop() {
+  if (pingTimer) return;
+  pingTimer = setInterval(() => {
+    if (!conn.isOpen()) return;
+    conn.send({ t: "ping", ts: performance.now() });
+  }, 700);
+  pingTimer.unref?.();
+}
+
+// RTT 越小越接近"上下行对称"的假设；主线程卡顿/网络抖动只会把 RTT 抬高，直接丢弃。
+// 15 秒没有更优样本就允许重估一次，吸收两端时钟的微小漂移。
+function onPong(msg) {
+  const now = performance.now();
+  const st = Number(msg.ts);
+  const perf = Number(msg.perf);
+  if (!Number.isFinite(st) || !Number.isFinite(perf)) return;
+  const rtt = now - st;
+  if (rtt < 0 || rtt > 3000) return;
+  if (startSync.offPerf == null || rtt <= startSync.rtt || now - startSync.at > 15000) {
+    startSync.rtt = rtt;
+    startSync.at = now;
+    // 服务器发回这个 pong 的时刻 ≈ 本机 (st + rtt/2)（上下行对称假设）→ 偏移取本机 − 服务器
+    startSync.offPerf = (st + rtt / 2) - perf;
+  }
+}
+
+// 到点就地发车：与 updateStartLights 的"灯灭"是同一帧，所以灯一灭就能踩油门。
+function enterLocalRacing() {
+  startSync.goAtLocal = 0;
+  if (serverState !== "countdown") return;
+  serverState = "racing";
+  globalRace.state = "racing";
+  globalRace.countdown = 0;
+  globalRace.lights = 0;
+  globalRace.raceStart = simClock;
+  globalRace.lapStart = simClock;
+  for (const e of entries) {
+    if (!e.isMe) continue;
+    e.car.raceStart = simClock;
+    e.car.lapStart = simClock;
+  }
+}
+
 let finishReported = false;
 let finishResults = null;
 let lastBumpSoundTime = 0;
@@ -132,6 +194,10 @@ export const netrace = {
       delayMs: Math.round(clock.delayMs),
       offsetMs: Math.round(clock.offsetMs),
       starved: netStarved,
+      // 发车时钟：时钟同步用的 RTT（越小越可信）/ 距发车还有多少毫秒（<0 = 已发车）
+      clockRttMs: Number.isFinite(startSync.rtt) ? Math.round(startSync.rtt) : null,
+      clockSynced: startSync.offPerf != null,
+      goInMs: startSync.goAtLocal > 0 ? Math.round(startSync.goAtLocal - performance.now()) : null,
       cars: entries.filter(e => !e.isMe).map(e => ({
         id: e.netId,
         age: Math.round(e.car.netAge || 0),
@@ -167,6 +233,7 @@ export function startNetRace(msg, mySessionId) {
   jumps.length = 0;
   lastBumpSoundTime = 0;
   serverState = "countdown";
+  startSync.goAtLocal = 0;
   globalRace.state = "countdown";
   // 发车灯先清空：灯数/倒计时随后由服务端快照下发（与单机同一套 F1 灯灭规则）
   globalRace.countdown = 0;
@@ -414,6 +481,18 @@ function onSnapshot(msg) {
     }
     lastSrvOff = srvOff;
     clock.noteRef(msg.ts + srvOff);
+
+    // ---- 发车时刻：ts ↔ wall 是同一时刻的两个时钟，直接把 goAt 换算到本机 perf ----
+    // goWall = wall + (goAt - ts)：这局在服务器 perf 时钟上的发车时刻。
+    // 再用 ping/pong 估出来的偏移换成"本机到点就走"的绝对时刻，
+    // 与包何时到达无关 —— 谁的网络抖一下都不影响出发时机。
+    const goAt = Number(msg.goAt);
+    if (msg.state === "countdown" && startSync.offPerf != null && goAt > 0) {
+      const goWall = msg.wall + (goAt - Number(msg.ts));
+      const local = goWall + startSync.offPerf;
+      // 只接受"还没到 / 刚过一点点"的时刻：估计明显过期就交给 racing 快照兜底
+      if (local > recvAt - 200 && local < recvAt + 30000) startSync.goAtLocal = local;
+    }
   }
   let legacyRef = -1;   // 老服务端（快照无 ts）的退化参考
 
@@ -910,6 +989,14 @@ function resolveClientCarCollisions(meCar, fx, dt) {
 export function updateNetRace(dt, localInput, now, fx, finalStep = true) {
   if (!active) return null;
   let event = null;
+
+  // 到点就地发车（灯灭那一帧就能跑）：不再等自己收到 racing 快照，
+  // 各端都在同一个绝对时刻起步，出发时间差只剩链路不对称的几毫秒。
+  if (serverState === "countdown" && startSync.goAtLocal > 0) {
+    const nowMs = Number(now) || performance.now();
+    if (nowMs >= startSync.goAtLocal) enterLocalRacing();
+  }
+
   const me = entries.find(e => e.isMe);
 
   // ---- 1. 自车：本地完整模拟（与单机同路径，0 延迟） ----
@@ -1036,6 +1123,18 @@ export function bindNetRaceHandlers() {
   conn.on("peers_bundle", onPeersBundle);  // 新：16ms 合包广播
   conn.on("race_end", onRaceEnd);
   conn.on("player_forfeit", onPlayerForfeit);
+  conn.on("pong", onPong);                 // 发车时钟：RTT/2 估服务器↔本机的时钟偏移
+  // 换连接（重连 / 服务器重启）：旧偏移直接作废 —— 新进程的 performance.now() 从零开始，
+  // 拿旧偏移去排发车时刻会排到几十秒以外。
+  const resetClockSync = () => {
+    startSync.offPerf = null;
+    startSync.rtt = Infinity;
+    startSync.at = 0;
+    startSync.goAtLocal = 0;
+  };
+  conn.on("_closed", resetClockSync);
+  conn.on("welcome", resetClockSync);
+  startPingLoop();
 }
 
 export function forfeitNetRace() {

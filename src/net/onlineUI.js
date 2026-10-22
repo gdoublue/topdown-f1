@@ -22,6 +22,7 @@ let reconnectTries = 0;
 let lastLobbyInteract = 0;         // 上次在大厅列表里的操作时间（避免刷新打断点击）
 let lobbyRefreshTimer = 0;
 let autoCarRoomId = null;          // 已为哪个房间自动同步过默认车（避免重复发送）
+let mySpectating = false;          // 自己当前在房间里是否观赛身份（观赛不占发车位、不参与就绪）
 let pendingJoinRoomId = null;      // 邀请链接要加入的房间（等 welcome 后自动发 room_join）
 let roomError = "";                // 服务端拒绝原因（not_all_ready 等），展示 4 秒
 let roomErrorTimer = 0;
@@ -218,7 +219,14 @@ export function initOnlineUI(callbacks = {}) {
     // 同步自己在房间内的选车/就绪状态
     const mySid = conn.session?.sid || conn.session?.playerId;
     const me = room.players.find(p => p.id === mySid);
-    if (me) { myCarId = me.carId; myReady = me.ready; }
+    if (me) {
+      myCarId = me.carId;
+      myReady = me.ready;
+      // 观赛身份切换（观赛 → 普通成员）时选车位被服务端清空了：
+      // 必须允许重新自动同步一次，否则会一直显示"未选车"而无法就绪
+      if (mySpectating && !me.spectating) autoCarRoomId = null;
+      mySpectating = !!me.spectating;
+    }
     // 页面上的"选择赛车"下拉默认就显示了一台车 → 同步给服务器，
     // 否则别人看到的是"未选车"（房主也就永远开不了赛）
     syncRoomSelfState(me);
@@ -260,6 +268,8 @@ export function initOnlineUI(callbacks = {}) {
   conn.on("room_leave_ok", () => {
     room = null;
     myReady = false;
+    myCarId = null;
+    mySpectating = false;
     lastRoomId = null;
     autoCarRoomId = null;
     cb.onRoomState?.(false);
@@ -414,6 +424,8 @@ export function leaveOnlineRoom() {
   if (conn.isOpen()) conn.send({ t: "room_leave" });
   room = null;
   myReady = false;
+  myCarId = null;
+  mySpectating = false;
   lastRoomId = null;          // 断线重连后不要自动回到已退出的房间
   autoCarRoomId = null;       // 下次进房重新同步默认选车
   cb.onRoomState?.(false);
@@ -590,10 +602,11 @@ function roomsHtml() {
           <b class="ol-rank">👑</b>
           <span class="ol-color" style="background:${carColor(host?.carId)}"></span>
           <span class="ol-name">${escapeHtml(hostName)}<small class="ol-sub">${r.id}</small></span>
-          <span class="ol-car">${escapeHtml(trackLabel(r.trackId))} · ${r.laps ? r.laps + " 圈" : "默认圈数"} · ${r.playerCount}/${r.maxPlayers} 人${r.fillAI === false ? " · 纯玩家" : " · 含 AI"}</span>
+          <span class="ol-car">${escapeHtml(trackLabel(r.trackId))} · ${r.laps ? r.laps + " 圈" : "默认圈数"} · ${r.playerCount}/${r.maxPlayers} 人${r.spectatorCount ? ` · 👀 ${r.spectatorCount} 观战` : ""}${r.fillAI === false ? " · 纯玩家" : " · 含 AI"}</span>
           <span class="ol-sub ol-players">${escapeHtml(others.length ? "车内：" + others.join("、") : "车内只有房主")}</span>
           <span class="ol-src ${r.state === "racing" ? "live" : ""}">${r.state === "racing" ? "● 比赛中" : "等待中"}</span>
-          <button class="vt-mini" data-join-room="${r.id}">加入</button>
+          <button class="vt-mini" data-join-room="${r.id}"
+            title="${r.state === "racing" ? "比赛进行中：以观赛身份进入，可切换任意赛车观看实时画面" : "加入房间，和房主同场竞速"}">${r.state === "racing" ? "👀 观赛" : "加入"}</button>
         </div>`;
     }).join("")
     : `<div class="online-empty">暂无房间，创建一个吧</div>`;
@@ -638,6 +651,8 @@ function errorText(msg) {
     already_racing: "比赛已经在进行中",
     not_host: "只有房主可以开赛",
     room_full: "房间已满员",
+    spectator_full: "观赛人数已满，稍后再试",
+    not_racing: "当前没有正在进行的比赛，无需观战",
     room_not_found: "房间已解散",
     not_in_room: "你已不在房间里，请重新进入",
     not_authed: "连接尚未完成认证，请重新连接",
@@ -655,6 +670,8 @@ function errorText(msg) {
 //     房主永远不会因为"没就绪"卡住开赛。
 function syncRoomSelfState(me) {
   if (!room) return;
+  // 观赛身份不占发车位：不要自动帮他选车/就绪（否则会挤掉真正参赛的人的可选车型）
+  if (me?.spectating) return;
   const mySid = conn.session?.sid || conn.session?.playerId;
   const isHost = room.hostId === mySid;
   const needCar = !me?.carId && autoCarRoomId !== room.id;
@@ -680,7 +697,11 @@ function renderRoom() {
   const mySid = conn.session?.sid || conn.session?.playerId;
   const isHost = room.hostId === mySid;
   const me = room.players.find(p => p.id === mySid);
-  const players = room.players.map(p => {
+  const iAmSpectating = !!me?.spectating;
+  // 参赛车手 / 观赛者分开渲染：观赛不占发车位，也不参与开赛校验
+  const racers = room.players.filter(p => !p.spectating);
+  const viewers = room.players.filter(p => p.spectating);
+  const players = racers.map(p => {
     const isHostRow = p.id === room.hostId;
     const isMe = p.id === mySid;
     const num = p.carId ? carNumber(p.carId) : "";
@@ -692,6 +713,16 @@ function renderRoom() {
       <span class="ol-car">${p.carId ? escapeHtml(carLabel(p.carId)) + `<small class="ol-num">${num}</small>` : '<span class="ol-none">未选车</span>'}</span>
       <span class="ol-src ${!isHostRow && p.ready ? "ready" : ""}">${isHostRow ? "房主 · HOST" : (p.ready ? "✔ READY" : "等待就绪")}</span>
     </div>`;
+  }).join("") + viewers.map(p => {
+    const isMe = p.id === mySid;
+    return `
+    <div class="online-row room-player is-viewer${isMe ? " is-me" : ""}">
+      <b class="ol-rank">👀</b>
+      <span class="ol-color" style="background:rgba(255,255,255,.14)"></span>
+      <span class="ol-name">${escapeHtml(p.nickname || "车手")}${isMe ? '<small class="ol-you">YOU</small>' : ""}</span>
+      <span class="ol-car"><span class="ol-none">观赛中 · 不占发车位</span></span>
+      <span class="ol-src live">👀 观战</span>
+    </div>`;
   }).join("");
 
   const track = TRACKS.find(t => t.id === room.trackId);
@@ -701,11 +732,11 @@ function renderRoom() {
     `<option value="${c.id}" ${c.id === myCarId ? "selected" : ""}>${c.team} · ${c.model} (#${c.number})</option>`).join("");
   // 认输后回到房间时本场可能仍在进行：此时不能开下一局，只展示等待提示
   const inRace = room.state === "racing" || room.state === "countdown";
-  // 房主不需要准备就绪：只要自己选好车、其他玩家全部"选车 + 就绪"即可开赛
-  const othersReady = room.players.filter(p => p.id !== room.hostId).every(p => p.carId && p.ready);
-  const canStart = !inRace && isHost && room.players.length > 0 && !!myCarId && othersReady;
+  // 房主不需要准备就绪：只要自己选好车、其他车手全部"选车 + 就绪"即可开赛
+  const othersReady = racers.filter(p => p.id !== room.hostId).every(p => p.carId && p.ready);
+  const canStart = !inRace && isHost && racers.length > 0 && !!myCarId && othersReady;
   // 禁用时把原因直接写在按钮上，避免"看着能点、点了没反应"
-  const waitingNames = room.players
+  const waitingNames = racers
     .filter(p => p.id !== room.hostId && (!p.carId || !p.ready))
     .map(p => p.nickname || "车手");
   const startReason = inRace
@@ -713,12 +744,12 @@ function renderRoom() {
     : !myCarId
       ? "先选择你的赛车"
       : (waitingNames.length ? `等待 ${waitingNames.join("、")} 就绪` : "全员就绪，开赛！");
-  // AI 补位数量与服务器一致：maxPlayers - 真人数量（最多 7 台，AI_CONFIGS 只有 7 套配置）
+  // AI 补位数量与服务器一致：maxPlayers - 真人车手数量（最多 7 台，AI_CONFIGS 只有 7 套配置）
   const aiCount = room.fillAI
-    ? Math.max(0, Math.min(AI_CONFIGS.length, (room.maxPlayers || 8) - room.players.length))
+    ? Math.max(0, Math.min(AI_CONFIGS.length, (room.maxPlayers || 8) - racers.length))
     : 0;
   const fieldText = room.fillAI
-    ? `🤖 AI 补位 ${aiCount} 台 · 共 ${room.players.length + aiCount} 车`
+    ? `🤖 AI 补位 ${aiCount} 台 · 共 ${racers.length + aiCount} 车`
     : "👥 纯玩家对战 · 无 AI";
   const lapsOpts = [0, 1, 2, 3, 5, 8, 10, 15, 20].map(n =>
     `<option value="${n}" ${roomLaps === n ? "selected" : ""}>${n === 0 ? "赛道默认圈数" : n + " 圈"}</option>`).join("");
@@ -739,29 +770,59 @@ function renderRoom() {
         <span class="ol-sub">由房主决定</span>
       </div>`;
 
+  const viewerText = viewers.length ? ` · 👀 ${viewers.length} 人观战` : "";
+  // 全员已就绪 → 服务端 5 秒后自动开赛（房主不点也照样开）；房主按钮上直接标出来
+  const autoStartMs = Number(room.autoStartInMs) || 0;
+  const autoStartText = autoStartMs > 0 ? ` · ${Math.ceil(autoStartMs / 1000)} 秒后自动开始` : "";
+  // 提示条：观赛身份 / 比赛进行中 / 全员就绪即将自动开赛
+  const hintHtml = iAmSpectating
+    ? `<p class="online-error viewer-hint">👀 你当前是观赛身份：比赛进行中可切换任意赛车观看实时画面；点「加入下一局」回到参赛名单</p>`
+    : inRace
+      ? `<p class="online-error">⏳ 本场比赛仍在进行中，结束后即可开始下一局（也可以点「观战本场比赛」）</p>`
+      : autoStartMs > 0
+        ? `<p class="online-error viewer-hint">⏱ 全员已就绪 · ${Math.ceil(autoStartMs / 1000)} 秒后自动开始（房主也可立即开赛）</p>`
+        : "";
+  // 观赛身份没有发车位：隐藏选车 / 就绪，改成"加入下一局"
+  const selfHtml = iAmSpectating
+    ? `<div class="online-create">
+        <span class="ol-sub">观赛中：不占发车位、不参与本局排名</span>
+      </div>`
+    : `<div class="online-create">
+        <label>选择赛车 <select id="roomCarSel">${carOpts}</select></label>
+        ${isHost
+      ? `<span class="ol-sub">房主无需准备，选好车即可开赛${autoStartText}</span>`
+      : `<button class="results-btn online-btn" id="roomReadyBtn" ${myReady ? "" : 'title="15 秒内未准备会自动就绪"'}
+          >${myReady ? "取消就绪" : "✔ 准备就绪"}</button>`}
+      </div>`;
+
   el.roomView.innerHTML = `
     <p class="track-modal-desc">
       房间 <b>${room.id}</b> · ${track ? track.flag + " " + track.name : room.trackId}
       · ${fieldText}
       · 即时网络碰撞 · 0 延迟阻挡 · 动量防穿模
-      · ${room.playerCount}/${room.maxPlayers} 人
+      · ${racers.length}/${room.maxPlayers} 人${viewerText}
     </p>
-    ${inRace ? `<p class="online-error">⏳ 本场比赛仍在进行中，结束后即可开始下一局</p>` : ""}
+    ${hintHtml}
     <div class="online-list">${players}</div>
     ${roomError ? `<p class="online-error">⚠️ ${escapeHtml(roomError)}</p>` : ""}
     ${rulesHtml}
-      <div class="online-create">
-        <label>选择赛车 <select id="roomCarSel">${carOpts}</select></label>
-        ${isHost
-      ? `<span class="ol-sub">房主无需准备，选好车即可开赛</span>`
-      : `<button class="results-btn online-btn" id="roomReadyBtn">${myReady ? "取消就绪" : "✔ 准备就绪"}</button>`}
-      </div>
+    ${selfHtml}
     <div class="online-room-actions">
-      ${isHost ? `
+      ${iAmSpectating
+      ? `<button class="results-btn primary online-btn" id="roomJoinNextBtn"
+          title="回到参赛名单：可以选车、就绪，参加下一局">🏁 加入下一局</button>`
+      : ""}
+      ${inRace && !iAmSpectating
+      ? `<button class="results-btn primary online-btn" id="roomSpectateBtn"
+          title="以观赛身份进入本场比赛：可以切换任意赛车观看实时画面，不影响比赛结果">👀 观战本场比赛</button>`
+      : ""}
+      ${isHost && !iAmSpectating ? `
       <button class="results-btn primary online-btn" id="roomStartBtn" ${canStart ? "" : "disabled"}
-        title="${startReason}（房主无需准备）">${canStart ? "🏁 开始比赛" : "⏳ " + startReason}</button>` : ""}
-      <button class="results-btn online-btn ${isAutopilotOn() ? "on" : ""}" id="roomAutopilotBtn"
-        title="开启后由算法驾驶你的赛车（本地运行，支持自定义算法）">🤖 自动驾驶：${isAutopilotOn() ? "开" : "关"}</button>
+        title="${startReason}（房主无需准备 · 全员就绪 5 秒后自动开始）">${canStart
+      ? `🏁 开始比赛${autoStartText}`
+      : "⏳ " + startReason}</button>` : ""}
+      ${iAmSpectating ? "" : `<button class="results-btn online-btn ${isAutopilotOn() ? "on" : ""}" id="roomAutopilotBtn"
+        title="开启后由算法驾驶你的赛车（本地运行，支持自定义算法）">🤖 自动驾驶：${isAutopilotOn() ? "开" : "关"}</button>`}
       <button class="results-btn online-btn" id="roomShareBtn"
         title="生成邀请链接：好友点开自动连接本服务器并加入这个房间">🔗 分享房间</button>
       <button class="results-btn online-btn" id="roomLeaveBtn">← 离开房间</button>
@@ -771,6 +832,16 @@ function renderRoom() {
 function onRoomClick(e) {
   if (e.target.closest("#roomStartBtn")) {
     conn.send({ t: "room_start", laps: roomLaps || undefined });
+    return;
+  }
+  // 观赛：服务端确认后会补发本局参赛名单（race_start），主流程自动切到观赛画面
+  if (e.target.closest("#roomSpectateBtn")) {
+    conn.send({ t: "room_spectate", on: true });
+    return;
+  }
+  // 结束观赛身份，回到参赛名单（可选车 / 就绪，参加下一局）
+  if (e.target.closest("#roomJoinNextBtn")) {
+    conn.send({ t: "room_spectate", on: false });
     return;
   }
   if (e.target.closest("#roomAutopilotBtn")) {

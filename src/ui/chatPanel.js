@@ -111,6 +111,16 @@ function mySid() {
 }
 
 function toEntry(m, fallbackScope) {
+  // 服务端公告（谁加入/离开观赛等）：不按普通聊天渲染，用系统行样式更醒目。
+  // 带上 scope：补发历史时同一频道的旧行会被整体替换，不会重复显示。
+  if (m.sys) {
+    return {
+      kind: "sys",
+      scope: (m.scope || fallbackScope) === "room" ? "room" : "global",
+      text: String(m.text || ""),
+      ts: Number(m.ts) || Date.now(),
+    };
+  }
   return {
     kind: "msg",
     scope: (m.scope || fallbackScope) === "room" ? "room" : "global",
@@ -133,7 +143,9 @@ function onChatHistory(m) {
   const hist = items
     .map(it => toEntry(it, scope))
     .filter(e => e.text);
-  entries = entries.filter(e => e.kind === "sys" || e.scope !== scope);
+  // 保留：其它频道的消息 + 本地系统提示（没有 scope 的那类）。
+  // 服务端公告已经进了历史，同频道的本地副本要一起去掉，避免重复。
+  entries = entries.filter(e => e.scope !== scope || (e.kind === "sys" && !e.scope));
   entries = [...hist, ...entries].sort((a, b) => (a.ts || 0) - (b.ts || 0));
   trim();
   renderLog();

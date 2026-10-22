@@ -57,6 +57,161 @@ function sendRoomHistory(ws, room) {
   send(ws, { t: "chat_history", scope: "room", items: room.chatHistory || [] });
 }
 
+// ================= 观赛（比赛中进房的玩家） =================
+// 观赛者不占发车位、不参加本场比赛，但和普通成员一样收房间视图 / 聊天 / 快照，
+// 因此直接留在 room.members 里带 spectating 标记（见 core/room.js）。
+
+// 房间内的系统提示：谁加入观赛 / 谁离开观赛（走聊天频道，客户端按 sys 样式渲染）
+function announceWatch(room, session, joined) {
+  const nickname = session?.player?.nickname || "车手";
+  const left = room.spectatorCount();
+  const text = joined
+    ? `👀 ${nickname} 加入观赛（当前 ${left} 人观战）`
+    : `🚪 ${nickname} 离开观赛${left > 0 ? `（剩余 ${left} 人观战）` : ""}`;
+  const entry = {
+    scope: "room",
+    sys: true,
+    from: { sid: "system", nickname: "观赛" },
+    text,
+    ts: Date.now(),
+  };
+  rememberChat(room.chatHistory, entry);
+  broadcastRoom(room, "chat", entry);
+}
+
+// 参赛名单（= race_start 载荷）：开赛时广播给全员，比赛中进房的观赛者也要补发一份，
+// 否则客户端拿不到车辆列表，画面上什么都没有。
+function raceStartPayload(room, spectate = false) {
+  const sim = room.sim;
+  const rows = [];
+  for (const g of sim.ghosts.values()) {
+    if (g.gone) continue;
+    const cfg = AI_CONFIGS.find(c => c.id === g.carId) || AI_CONFIGS[0];
+    rows.push({ id: g.sid, nickname: g.nickname, shortName: cfg.shortName, color: cfg.color, number: cfg.number });
+  }
+  for (const e of sim.aiEntries) {
+    rows.push({
+      id: "ai:" + e.car.algorithm,
+      nickname: e.car.nickname,
+      shortName: e.car.shortName,
+      color: e.car.color,
+      number: e.car.number,
+    });
+  }
+  return {
+    trackId: room.trackId,
+    laps: sim.maxLaps,
+    sameCar: room.sameCar,
+    spectate: !!spectate,
+    cars: rows,
+  };
+}
+
+// ================= 开赛核心（房主手动开赛 / AFK 自动开赛共用） =================
+// 返回 { ok } 或 { ok:false, code, msg }，由调用方决定是回 error 还是只记日志。
+function startRaceCore(room, lapsOpt) {
+  if (room.state === "racing" || room.state === "countdown") return { ok: false, code: "already_racing" };
+  // 校验：观赛者不参与（不在参赛名单里，也不该挡住开赛）；
+  //      参赛车手必须已选车，除房主外都必须"准备就绪"（房主随时可开赛）
+  const members = room.racers();
+  if (!members.length) return { ok: false, code: "not_all_ready", msg: "房间里还没有参赛车手" };
+  // 自愈：房主的就绪位可能被旧客户端/异常状态弄脏，开赛前无条件纠正
+  const hostMember = room.members.get(room.hostId);
+  if (hostMember && !hostMember.spectating && !hostMember.ready) hostMember.ready = true;
+  if (!members.every(m => m.carId && (m.ready || m.session.id === room.hostId))) {
+    const stuck = members
+      .filter(m => !(m.carId && (m.ready || m.session.id === room.hostId)))
+      .map(m => m.session.player?.nickname || "车手");
+    return { ok: false, code: "not_all_ready", msg: stuck.join("、") + " 未选车/未就绪" };
+  }
+  try {
+    // 圈数：客户端显式传了就用它，否则沿用房间设置（0 → 赛道默认）
+    room.laps = clampLaps(lapsOpt !== undefined ? lapsOpt : room.laps);
+    const humans = members.map(m => ({
+      sid: m.session.id,
+      nickname: m.session.player?.nickname || "Pilot",
+      carId: m.carId,
+    }));
+    room.sim = new RaceSim(room, humans);
+    room.state = "countdown";
+    room.autoStartAt = 0;          // 已经开了：自动开赛倒计时作废
+    ensureSimLoop();
+    // 参赛名单顺序 = 客户端发车格顺序（人类在前、AI 补位在后）
+    broadcastRoom(room, "race_start", raceStartPayload(room, false));
+    broadcastLobby();   // 房间状态变为比赛中 → 大厅列表即时刷新
+    return { ok: true };
+  } catch (e) {
+    room.sim = null;
+    room.state = "lobby";
+    return { ok: false, code: "start_failed", msg: e.message };
+  }
+}
+
+// ================= 房间自动化（AFK 兜底） =================
+//  · 非房主 15 秒不准备 → 自动就绪（并且自动补一台空闲车，否则照样挡住开赛）
+//  · 全员就绪 5 秒房主还没点"开始" → 自动开赛
+// 用统一的 1s 维护节拍判定，而不是给每个成员各挂一个定时器：
+// 成员离开 / 房间销毁时不会有悬空定时器，重复广播也不会出现。
+const AUTO_READY_MS = 15000;
+const AUTO_START_MS = 5000;
+// 一场比赛刚结束时先静默一段（客户端结算大屏 30s 后自动回房间）：
+// 否则玩家还在看成绩，下一局就被自动开起来。
+const AUTO_HOLD_AFTER_RACE_MS = 30000;
+let roomLoopStarted = false;
+
+function ensureRoomLoop() {
+  if (roomLoopStarted) return;
+  roomLoopStarted = true;
+  const timer = setInterval(maintainRooms, 1000);
+  timer.unref?.();
+}
+
+// 自动就绪时给一台还没人用的车（服务端不知道客户端下拉默认选了哪台）
+function pickIdleCar(room) {
+  const used = new Set(room.racers().map(m => m.carId).filter(Boolean));
+  return (AI_CONFIGS.find(c => !used.has(c.id)) || AI_CONFIGS[0]).id;
+}
+
+function autoReadyMember(room, member) {
+  if (!member.carId) member.carId = pickIdleCar(room);
+  member.ready = true;
+  member.notReadySince = 0;
+  broadcastRoom(room, "room_update", { room: room.view() });
+  broadcastLobby();
+  console.log(`[room] ${room.id} 15 秒未准备 → 自动就绪：${member.session.player?.nickname || "车手"}`);
+}
+
+function maintainRooms() {
+  const now = Date.now();
+  for (const room of _rooms.values()) {
+    if (room.state !== "lobby") continue;
+    if (now < (room.autoHoldUntil || 0)) continue;   // 结算静默期
+    // 1) 非房主车手 15 秒不准备 → 自动就绪
+    for (const m of room.members.values()) {
+      if (m.ready || m.spectating || m.session.id === room.hostId) { m.notReadySince = 0; continue; }
+      if (!m.notReadySince) m.notReadySince = now;
+      else if (now - m.notReadySince >= AUTO_READY_MS) autoReadyMember(room, m);
+    }
+    // 2) 全员就绪 5 秒 → 房主还没点就开始
+    if (room.isEveryoneReady()) {
+      if (!room.autoStartAt) {
+        room.autoStartAt = now + AUTO_START_MS;
+        broadcastRoom(room, "room_update", { room: room.view() });   // 客户端显示"5 秒后自动开始"
+      } else if (now >= room.autoStartAt) {
+        room.autoStartAt = 0;
+        const res = startRaceCore(room);
+        if (!res.ok) {
+          console.warn("[room] 自动开赛失败:", res.code, res.msg || "");
+          room.autoStartAt = now + AUTO_START_MS;   // 5 秒后重试，不刷屏
+        }
+      }
+    } else if (room.autoStartAt) {
+      room.autoStartAt = 0;   // 有人取消了就绪：倒计时作废
+      broadcastRoom(room, "room_update", { room: room.view() });
+    }
+  }
+}
+
 // ================= 大厅推送：房间列表 / 在线人数 / 排行榜 =================
 // 任何房间或成绩变化都把最新视图推给所有在线会话，客户端大厅无需重连即可即时刷新。
 // 用 120ms 防抖合并同一批操作（例：开赛瞬间多名成员同时就绪）。
@@ -172,7 +327,8 @@ function simLoop() {
         if (sim.race.state === "racing" && room.state !== "racing") room.state = "racing";
         // 不足 2 名真人的比赛：真人全部冲线后，剩下的 AI 直接无渲染快进到终局，
         // 立刻广播结算，玩家不用再等 AI 跑完剩余圈数。
-        if (!sim.ended && sim.race.state === "racing" && room.members.size < 2 && sim.humansAllDone()) {
+        // 用 racerCount 而不是 members.size：观赛者不是参赛车，不能把"单人局"算成双人局。
+        if (!sim.ended && sim.race.state === "racing" && room.racerCount() < 2 && sim.humansAllDone()) {
           sim.fastForwardToEnd(now);
         }
         checkRaceEnd(room);
@@ -181,7 +337,7 @@ function simLoop() {
         // 所有人收到的是同一份内容，只序列化一次：
         // 原来每个成员都 JSON.stringify 一遍（8 人房 = 每秒 240 次大对象序列化），
         // 而客户端从未读取过 `you` 字段（自车 id 来自 welcome 的 sid），直接省掉。
-        const payload = JSON.stringify(sim.snapshot());
+        const payload = JSON.stringify(sim.snapshot(now));
         for (const m of room.members.values()) {
           if (m.session.ws.readyState !== 1) continue;
           sendSession(m.session, payload);
@@ -239,6 +395,15 @@ function checkRaceEnd(room) {
   // 终局收尾：房间回到"等待中"（可再次开赛），释放模拟器，刷新所有人的大厅视图
   room.state = "lobby";
   room.sim = null;
+  // 下一局重新确认就绪：否则"全员就绪 + 5s 自动开赛"会在结算大屏期间直接开下一局。
+  // 房主照旧免就绪，并给结算大屏留出静默期（客户端的 30s 自动返回房间）。
+  room.autoStartAt = 0;
+  room.autoHoldUntil = Date.now() + AUTO_HOLD_AFTER_RACE_MS;
+  for (const m of room.members.values()) {
+    m.ready = m.session.id === room.hostId && !m.spectating;
+    m.notReadySince = 0;
+  }
+  broadcastRoom(room, "room_update", { room: room.view() });
   broadcastBoards(room.trackId);
   broadcastLobby();
 }
@@ -256,17 +421,22 @@ function onClosed(session) {
   session.rtc = null;
   const res = handleDisconnect(session, broadcastRoom);
   sessions.delete(session.ws);
+  // 观赛者掉线：房间里的"离开观赛"提示同样要发（他没有车，不需要判负）
+  if (res && !res.destroyed && res.wasSpectating) announceWatch(res.room, session, false);
   // 比赛中掉线/退出：只把这台车移出比赛（判负），其余车手照常完赛
   if (res && !res.destroyed && res.room.sim && !res.room.sim.ended) {
-    const alreadyOut = res.room.sim.hasForfeited(session.id);
-    res.room.sim.retirePlayer(session.id);
-    if (!alreadyOut) {
-      broadcastRoom(res.room, "player_forfeit", {
-        sid: session.id,
-        nickname: session.player?.nickname || "Player",
-      });
+    const ghost = res.room.sim.ghosts.get(session.id);
+    if (ghost && !ghost.gone) {
+      const alreadyOut = res.room.sim.hasForfeited(session.id);
+      res.room.sim.retirePlayer(session.id);
+      if (!alreadyOut) {
+        broadcastRoom(res.room, "player_forfeit", {
+          sid: session.id,
+          nickname: session.player?.nickname || "Player",
+        });
+      }
+      checkRaceEnd(res.room);
     }
-    checkRaceEnd(res.room);
   }
   broadcastLobby();
 }
@@ -294,6 +464,7 @@ export function attachGateway(httpServer) {
   });
 
   attachHeartbeat(wss);
+  ensureRoomLoop();   // 房间自动化：15s 自动就绪 / 全员就绪 5s 自动开赛
   return wss;
 }
 
@@ -345,10 +516,65 @@ function route(session, msg) {
 
     case "room_join": {
       if (!session.player) return send(ws, { t: "error", code: "not_authed" });
-      const res = joinRoom(session, msg.roomId);
+      const res = joinRoom(session, msg.roomId, { spectate: msg.spectate === true });
       if (!res.ok) return send(ws, { t: "error", code: res.reason });
       broadcastRoom(res.room, "room_update", { room: res.room.view() });
       sendRoomHistory(ws, res.room);   // 刚进房：补发房间最近聊天
+      if (res.spectating) {
+        // 比赛进行中进房 = 观赛：通知房间"谁进来看了"，
+        // 并把本局的参赛名单补发给这个客户端（它错过了 race_start），才能立刻渲染实时画面
+        announceWatch(res.room, session, true);
+        if (res.room.sim && !res.room.sim.destroyed) {
+          send(ws, { t: "race_start", ...raceStartPayload(res.room, true) });
+        }
+      }
+      broadcastLobby();
+      break;
+    }
+
+    // 进入 / 退出观赛（比赛进行中才有效）：
+    //   on=true  → 观测视角（不占发车位，不参加本场比赛）
+    //   on=false → 回到普通成员身份，可以选车准备下一局
+    case "room_spectate": {
+      if (!session.player) return send(ws, { t: "error", code: "not_authed" });
+      const room = findRoomOf(session.id);
+      if (!room) return send(ws, { t: "error", code: "not_in_room" });
+      const member = room.members.get(session.id);
+      if (!member) return send(ws, { t: "error", code: "not_in_room" });
+      if (msg.on !== false) {
+        if (!member.spectating && !room.isRacing()) {
+          return send(ws, { t: "error", code: "not_racing" });
+        }
+        if (!member.spectating) {
+          // 正在跑的车手转观赛 = 放弃本场比赛（判负），房间成员身份保留
+          const ghost = room.sim?.ghosts.get(session.id);
+          if (room.sim && !room.sim.ended && ghost && !ghost.gone) {
+            const humanCount = room.racerCount();
+            const alreadyOut = room.sim.hasForfeited(session.id);
+            room.sim.retirePlayer(session.id);
+            if (humanCount > 1 && !alreadyOut) {
+              broadcastRoom(room, "player_forfeit", {
+                sid: session.id,
+                nickname: session.player?.nickname || "Player",
+              });
+            }
+            checkRaceEnd(room);
+          }
+          room.setSpectating(session.id, true);
+          broadcastRoom(room, "room_update", { room: room.view() });
+          announceWatch(room, session, true);
+        }
+        // 已经在观赛：只补发名单（重连 / 重新进入观赛画面都走这里）
+        if (room.sim && !room.sim.destroyed) {
+          send(ws, { t: "race_start", ...raceStartPayload(room, true) });
+        }
+        broadcastLobby();
+        break;
+      }
+      if (!member.spectating) return send(ws, { t: "room_update", room: room.view() });
+      room.setSpectating(session.id, false);
+      broadcastRoom(room, "room_update", { room: room.view() });
+      announceWatch(room, session, false);
       broadcastLobby();
       break;
     }
@@ -359,8 +585,10 @@ function route(session, msg) {
       if (!session.player) return;
       const room = findRoomOf(session.id);
       if (!room) return;
-      if (room.sim && !room.sim.ended) {
-        const humanCount = room.members.size;
+      // 观赛者不在参赛名单里：认输消息不能为一个"不存在的车"广播出去
+      const ghost = room.sim?.ghosts.get(session.id);
+      if (room.sim && !room.sim.ended && ghost && !ghost.gone) {
+        const humanCount = room.racerCount();
         const alreadyOut = room.sim.hasForfeited(session.id);
         room.sim.retirePlayer(session.id);
         if (humanCount > 1 && !alreadyOut) {
@@ -384,10 +612,12 @@ function route(session, msg) {
       if (!session.player) return;
       const room = findRoomOf(session.id);
       if (room) {
-        if (room.sim && !room.sim.ended) {
+        const ghost = room.sim?.ghosts.get(session.id);
+        if (room.sim && !room.sim.ended && ghost && !ghost.gone) {
           // 比赛进行中离开房间：只把这台车移出比赛（判负），其他人的比赛完全不受影响。
           // 已认输过的车不再重复广播，避免其他玩家收到两次"认输"提示。
-          const humanCount = room.members.size;
+          // 观赛者没有车在赛道上 → 整段跳过（不产生假认输提示）。
+          const humanCount = room.racerCount();
           const alreadyOut = room.sim.hasForfeited(session.id);
           room.sim.retirePlayer(session.id);
           if (humanCount > 1 && !alreadyOut) {
@@ -400,7 +630,10 @@ function route(session, msg) {
         }
         const res = leaveRoom(session, room.id);
         send(ws, { t: "room_leave_ok" });
-        if (res.ok && !res.destroyed) broadcastRoom(res.room, "room_update", { room: res.room.view() });
+        if (res.ok && !res.destroyed) {
+          if (res.wasSpectating) announceWatch(res.room, session, false);
+          broadcastRoom(res.room, "room_update", { room: res.room.view() });
+        }
       } else {
         send(ws, { t: "room_leave_ok" });
       }
@@ -469,62 +702,8 @@ function route(session, msg) {
       const room = findRoomOf(session.id);
       if (!room) return send(ws, { t: "error", code: "not_in_room" });
       if (session.id !== room.hostId) return send(ws, { t: "error", code: "not_host" });
-      if (room.state === "racing" || room.state === "countdown") {
-        return send(ws, { t: "error", code: "already_racing" });
-      }
-      // 校验：所有成员已选车；除房主外都必须"准备就绪"（房主随时可开赛）
-      const members = [...room.members.values()];
-      // 自愈：房主的就绪位可能被旧客户端/异常状态弄脏，开赛前无条件纠正
-      const hostMember = room.members.get(room.hostId);
-      if (hostMember && !hostMember.ready) hostMember.ready = true;
-      if (!members.every(m => m.carId && (m.ready || m.session.id === room.hostId))) {
-        const stuck = members
-          .filter(m => !(m.carId && (m.ready || m.session.id === room.hostId)))
-          .map(m => m.session.player?.nickname || "车手");
-        return send(ws, { t: "error", code: "not_all_ready", msg: stuck.join("、") + " 未选车/未就绪" });
-      }
-      try {
-        // 圈数：客户端显式传了就用它，否则沿用房间设置（0 → 赛道默认）
-        room.laps = clampLaps(msg.laps !== undefined ? msg.laps : room.laps);
-        const humans = members.map(m => ({
-          sid: m.session.id,
-          nickname: m.session.player?.nickname || "Pilot",
-          carId: m.carId,
-        }));
-        room.sim = new RaceSim(room, humans);
-        room.state = "countdown";
-        ensureSimLoop();
-        // 参赛名单顺序 = 客户端发车格顺序（人类在前、AI 补位在后）
-        const carInfo = (carId, nickname, fallback) => {
-          const cfg = AI_CONFIGS.find(c => c.id === carId) || AI_CONFIGS[0];
-          return {
-            id: fallback,
-            nickname,
-            shortName: cfg.shortName,
-            color: cfg.color,
-            number: cfg.number,
-          };
-        };
-        broadcastRoom(room, "race_start", {
-          trackId: room.trackId,
-          laps: room.sim.maxLaps,
-          sameCar: room.sameCar,
-          cars: [
-            ...humans.map(h => carInfo(h.carId, h.nickname, h.sid)),
-            ...room.sim.aiEntries.map(e => ({
-              id: "ai:" + e.car.algorithm,
-              nickname: e.car.nickname,
-              shortName: e.car.shortName,
-              color: e.car.color,
-              number: e.car.number,
-            })),
-          ],
-        });
-        broadcastLobby();   // 房间状态变为比赛中 → 大厅列表即时刷新
-      } catch (e) {
-        room.sim = null;
-        send(ws, { t: "error", code: "start_failed", msg: e.message });
-      }
+      const res = startRaceCore(room, msg.laps);
+      if (!res.ok) return send(ws, { t: "error", code: res.code, msg: res.msg });
       break;
     }
 
@@ -570,7 +749,9 @@ function route(session, msg) {
     }
 
     case "ping":
-      send(ws, { t: "pong", now: Date.now() });
+      // ts 原样回传（客户端算 RTT）；perf 是服务器单调时钟，
+      // 客户端用 min RTT 样本算出"服务器 perf → 本机 perf"的偏移，用于发车时刻严格对齐。
+      send(ws, { t: "pong", ts: msg.ts, now: Date.now(), perf: Math.round(performance.now() * 100) / 100 });
       break;
 
     default:

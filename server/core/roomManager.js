@@ -9,8 +9,8 @@ export function createRoom(session, opts = {}) {
   if (rooms.size >= SERVER_CONFIG.maxRooms) return { ok: false, reason: "server_full" };
   const room = new Room(session, opts);
   rooms.set(room.id, room);
-  room.addMember(session);
-  return { ok: true, room };
+  const res = room.addMember(session);
+  return { ok: true, room, spectating: !!res.spectating };
 }
 
 export function getRoom(roomId) {
@@ -23,22 +23,25 @@ export function listRooms() {
     .map(r => r.view());
 }
 
-export function joinRoom(session, roomId) {
+// opts.spectate：显式要求观赛；比赛进行中无论是否传都会按观赛身份加入
+export function joinRoom(session, roomId, opts = {}) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, reason: "room_not_found" };
-  const res = room.addMember(session);
-  return res.ok ? { ok: true, room } : res;
+  const res = room.addMember(session, opts);
+  return res.ok ? { ok: true, room, spectating: !!res.spectating } : res;
 }
 
 export function leaveRoom(session, roomId) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, reason: "room_not_found" };
+  // 先取出身份再删：观赛者离开要单独播一条"离开观赛"提示
+  const wasSpectating = !!room.members.get(session.id)?.spectating;
   room.removeMember(session.id);
   if (room.members.size === 0) {
     rooms.delete(roomId);
-    return { ok: true, room, destroyed: true };
+    return { ok: true, room, destroyed: true, wasSpectating };
   }
-  return { ok: true, room, destroyed: false };
+  return { ok: true, room, destroyed: false, wasSpectating };
 }
 
 export function findRoomOf(sessionId) {
@@ -52,11 +55,12 @@ export function findRoomOf(sessionId) {
 export function handleDisconnect(session, broadcast) {
   const room = findRoomOf(session.id);
   if (!room) return null;
+  const wasSpectating = !!room.members.get(session.id)?.spectating;
   room.removeMember(session.id);
   if (room.members.size === 0) {
     rooms.delete(room.id);
-    return { room, destroyed: true };
+    return { room, destroyed: true, wasSpectating };
   }
   broadcast(room, "room_update", { room: room.view() });
-  return { room, destroyed: false };
+  return { room, destroyed: false, wasSpectating };
 }

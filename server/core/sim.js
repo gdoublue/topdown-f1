@@ -28,6 +28,9 @@ export class RaceSim {
     this.finishReports = new Map();   // sid -> { totalMs, bestLapMs, laps, valid }
     this.tickNo = 0;
     this.simMs = 0;                    // 模拟逻辑时钟（毫秒）：AI 车样本的时间戳来源，均匀步进
+    // 发车时刻（服务器 perf 时钟）：倒计时锚在它上面，客户端用它把"灯灭"对齐到同一个
+    // 绝对时刻，而不是各自等自己收到 racing 包（那样每个人都晚一个单程时延，房主先窜出去）。
+    this.goWallMs = 0;
     this.ended = false;
     this.endBroadcast = false;
     this.maxLaps = room.laps || this.trackCtx.track?.laps || TOTAL_LAPS;
@@ -245,15 +248,24 @@ export class RaceSim {
     this.simMs += dt * 1000;          // 逻辑时钟：AI 样本时间戳 = 这个均匀步进的时钟
 
     if (this.race.state === "countdown") {
-      this.race.countdown -= dt;
-      if (this.race.countdown <= 0) {
+      // 倒计时【锚在真实时钟上】而不是"每 tick 减 dt"：
+      // goWall 一经确定就不再变化，剩余时间 = goWall - now。
+      // 这样客户端拿任一包算出的发车时刻都是同一个精确值（否则 tick 相位会带来 ±16ms 抖动）。
+      if (!this.goWallMs) this.goWallMs = now + Math.max(0, this.race.countdown) * 1000;
+      const leftSec = (this.goWallMs - now) / 1000;
+      // 在"最接近 goWall 的那个 tick"发车（半个 tick 内就算到点）：AI 与客户端的
+      // 出发时刻平均误差 ≈ 0，不会出现"AI 总比人晚半帧起步"。
+      if (leftSec <= dt * 0.5) {
+        this.race.countdown = 0;
         this.race.state = "racing";
         this.race.raceStart = now;
         for (const e of this.aiEntries) {
           e.car.raceStart = now;
           e.car.lapStart = now;   // 圈速从绿灯起算
         }
+        return;
       }
+      this.race.countdown = leftSec;
       return;
     }
     if (this.race.state !== "racing") return;
@@ -331,7 +343,10 @@ export class RaceSim {
   }
 
   // 快照：AI 权威状态 + 人类中继状态
-  snapshot() {
+  // wall：本包发出时的服务器单调时钟（performance.now 同源），与 ts 成线性关系 ts ↔ wall。
+  // 客户端用 ping/pong 的往返时延算出"服务器 perf → 本机 perf"偏移，就能把 goAt
+  // 换算成一个绝对的本机时刻 —— 所有客户端在同一个瞬间起步（不再各自等包到达）。
+  snapshot(wall = 0) {
     // 快照时间戳 = 本房间的模拟逻辑时钟（每 tick 严格 +33.3ms）。
     // 这是客户端的【唯一渲染时间轴】：它均匀、单调、与任何玩家的帧率/网络无关，
     // 客户端据此锁定播放时钟，真人样本只被插值、不参与推进。
@@ -356,6 +371,11 @@ export class RaceSim {
       t: "snapshot",
       tick: this.tickNo++,
       ts,
+      wall: Math.round((Number(wall) || 0) * 100) / 100,
+      // 发车时刻：用【同一个包里的 wall】把 goWall 换算到 sim 时间轴再下发。
+      // 客户端反向换算 goWall = wall + (goAt - ts) 是恒等式，所以无论 tick 相位如何，
+      // 各端算出的发车时刻都精确一致（goAt 本身只是载体，不参与任何计时）。
+      goAt: Math.round((ts + ((this.goWallMs || (wall + Math.max(0, this.race.countdown) * 1000)) - (Number(wall) || 0))) * 100) / 100,
       state: this.race.state,
       // 发车灯（真实 F1：五组红灯逐组亮 → 随机等待 → 灯灭发车）。
       // countdown 改成浮点：客户端要靠它算"还剩多少"做灯架动画，整数秒会一格一格跳；
