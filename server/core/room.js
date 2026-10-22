@@ -112,6 +112,15 @@ export class Room {
       .every(m => !!m.carId && (m.session.id === this.hostId || m.ready));
   }
 
+  // 自动开赛的资格（两条都要满足）：
+  //  1) 房里除房主外至少还有一名【参赛车手】—— 单人房不自动开始（想单跑由房主自己点）
+  //  2) 所有参赛车手（房主只需选好车）全部就绪 —— 见 isEveryoneReady()
+  // 观赛者不是参赛车手，既不占发车位，也不算"准备的人"。
+  canAutoStart() {
+    const hasOtherRacer = this.racers().some(m => m.session.id !== this.hostId);
+    return hasOtherRacer && this.isEveryoneReady();
+  }
+
   view() {
     return {
       id: this.id,
