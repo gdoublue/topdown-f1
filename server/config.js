@@ -13,6 +13,12 @@ export const SERVER_CONFIG = {
   maxSpectatorsPerRoom: 8,   // 观赛位上限定：观赛不占发车位，8 人满房也能进来看
   maxRooms: 64,
 
+  // WebSocket 资源限制
+  maxConnections: 1024,       // 与 64 房 × 16 人（8 车手 + 8 观赛）的理论上限一致
+  wsMaxPayload: 64 * 1024,    // 控制消息最大 64KB；ws 默认 100MB 会被单包打爆内存
+  wsMessageRatePerSec: 120,   // 每会话令牌恢复速率（正常上报 60Hz + 控制消息）
+  wsMessageBurst: 180,        // 令牌桶容量：允许短暂突发
+
   // 心跳与超时（毫秒）
   heartbeatIntervalMs: 15000,
   clientTimeoutMs: 45000,

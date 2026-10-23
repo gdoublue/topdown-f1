@@ -483,13 +483,16 @@ export async function joinSharedRoom({ wsUrl, roomId } = {}) {
   if (!wsUrl) return;
   pendingJoinRoomId = roomId || null;
   // 可能是在别的服务器 / 别的房间里点开的链接：先清掉旧房间视图
+  const wasInRoom = !!room;
   room = null;
   myReady = false;
   autoCarRoomId = null;
   cb.onRoomState?.(false);
   el.wrap.classList.remove("hidden");
   if (conn.isOpen() && conn.url === wsUrl) {
-    switchView(room ? "room" : "lobby");
+    switchView("lobby");
+    // 服务端一个连接只能在一个房间：换房必须先 leave（WS 消息保序，join 会排在后面）
+    if (wasInRoom) conn.send({ t: "room_leave" });
     if (roomId) conn.send({ t: "room_join", roomId });
     return;
   }
@@ -656,6 +659,12 @@ function errorText(msg) {
     room_not_found: "房间已解散",
     not_in_room: "你已不在房间里，请重新进入",
     not_authed: "连接尚未完成认证，请重新连接",
+    already_authed: "连接已认证，无需重复握手",
+    invalid_fingerprint: "客户端身份信息无效，请刷新页面重试",
+    invalid_track: "赛道无效，请重新选择",
+    already_in_room: "你已经在一个房间里，请先退出当前房间",
+    rate_limited: "操作太频繁，请稍后再试",
+    player_capacity: "服务器玩家容量已满，请稍后再试",
     server_full: "服务器房间数已满，稍后再试",
     start_failed: "开赛失败" + (msg.msg ? "：" + msg.msg : ""),
   };
@@ -763,7 +772,7 @@ function renderRoom() {
         <label class="online-ck"><input type="checkbox" id="roomFillAI" ${room.fillAI ? "checked" : ""}> AI 补位车</label>
       </div>`
     : `<div class="online-create room-rules" title="赛道 / 圈数 / 玩法由房主决定">
-        <span class="rule-name">🏁 赛道</span><b>${track ? track.flag + " " + track.name : room.trackId}</b>
+        <span class="rule-name">🏁 赛道</span><b>${track ? track.flag + " " + track.name : escapeHtml(room.trackId)}</b>
         ${trackPreview(room.trackId, "roomTrackPreview")}
         <span class="rule-name">🔄 圈数</span><b>${lapsText}</b>
         <span class="rule-name">🎮 玩法</span><b>${room.fillAI ? `AI 补位 ${aiCount} 台` : "纯玩家对战"}</b>
@@ -797,7 +806,7 @@ function renderRoom() {
 
   el.roomView.innerHTML = `
     <p class="track-modal-desc">
-      房间 <b>${room.id}</b> · ${track ? track.flag + " " + track.name : room.trackId}
+      房间 <b>${escapeHtml(room.id)}</b> · ${track ? track.flag + " " + track.name : escapeHtml(room.trackId)}
       · ${fieldText}
       · 即时网络碰撞 · 0 延迟阻挡 · 动量防穿模
       · ${racers.length}/${room.maxPlayers} 人${viewerText}

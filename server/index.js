@@ -6,14 +6,44 @@
 //   GET  /api/rooms                  房间列表
 import http from "node:http";
 import { SERVER_CONFIG } from "./config.js";
-import { loadDb, flushDb } from "./db/store.js";
+import { loadDb, flushDbSync } from "./db/store.js";
 import { registerPlayer } from "./core/session.js";
-import { submitLapRecord, getLeaderboardView } from "./services/leaderboard.js";
+import { submitLapRecord, getLeaderboardView, pruneLapRecords, isValidTrackId } from "./services/leaderboard.js";
 import { listRooms } from "./core/roomManager.js";
 import { attachGateway, broadcastBoards } from "./net/gateway.js";
 import { rtcAvailable, rtcCleanup } from "./net/rtc.js";
 
 loadDb();
+pruneLapRecords();
+
+// 单人成绩上传限流：每 IP 每分钟 60 次（正常跑完一圈才提交一次）
+const POST_WINDOW_MS = 60_000;
+const POST_LIMIT_MAX = 60;
+const postBuckets = new Map();
+
+function clientIp(req) {
+  // nginx 的 $proxy_add_x_forwarded_for 会把真实直连地址追加在最后；
+  // 不是每个部署都有 CDN，取最后一段比取第一段更难伪造。
+  const forwarded = String(req.headers["x-forwarded-for"] || "")
+    .split(",").map(s => s.trim()).filter(Boolean);
+  return forwarded.length ? forwarded[forwarded.length - 1] : (req.socket.remoteAddress || "unknown");
+}
+
+function allowPost(req) {
+  const now = Date.now();
+  const ip = clientIp(req);
+  let bucket = postBuckets.get(ip);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + POST_WINDOW_MS };
+    postBuckets.set(ip, bucket);
+  }
+  if (bucket.count >= POST_LIMIT_MAX) return false;
+  bucket.count += 1;
+  if (postBuckets.size > 10000) {
+    for (const [key, value] of postBuckets) if (now >= value.resetAt) postBuckets.delete(key);
+  }
+  return true;
+}
 
 const server = http.createServer((req, res) => {
   // 开发期 CORS：vite (5173) 直连本服务
@@ -38,11 +68,14 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/api/leaderboard") {
+    if (!allowPost(req)) return json(429, { ok: false, error: "rate_limited" });
     let body = "";
     req.on("data", c => { body += c; if (body.length > 64 * 1024) req.destroy(); });
     req.on("end", () => {
       try {
         const d = JSON.parse(body);
+        if (!d || typeof d !== "object") throw new Error("invalid body");
+        if (!isValidTrackId(d.trackId)) throw new Error("invalid trackId");
         const { player } = registerPlayer(d.fingerprint, d.nickname);
         const rec = submitLapRecord({
           playerId: player.id, trackId: d.trackId, carId: d.carId,
@@ -80,7 +113,7 @@ server.listen(SERVER_CONFIG.port, () => {
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     console.log(`\n[${sig}] 保存数据并关闭…`);
-    flushDb();
+    flushDbSync();
     rtcCleanup();
     process.exit(0);
   });

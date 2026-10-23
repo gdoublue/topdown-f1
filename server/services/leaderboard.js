@@ -5,9 +5,41 @@
 import crypto from "node:crypto";
 import { loadDb, saveDb } from "../db/store.js";
 import { minLapMsFor, RACE_MIN_LAP_SAFETY } from "./lapValidation.js";
+import { TRACKS } from "../../src/track/tracks.js";
+
+// 每赛道只保留最快的 N 条，防止记录无限增长（玩家数另有上限）
+const MAX_RECORDS_PER_TRACK = 500;
+const VALID_TRACK_IDS = new Set(TRACKS.map(t => t.id));
+
+export function isValidTrackId(trackId) {
+  return VALID_TRACK_IDS.has(String(trackId || ""));
+}
+
+function trimTrackRecords(db, trackId) {
+  const rows = db.lapRecords.filter(r => r.trackId === trackId);
+  if (rows.length <= MAX_RECORDS_PER_TRACK) return false;
+  rows.sort((a, b) => a.bestLapMs - b.bestLapMs);
+  const drop = new Set(rows.slice(MAX_RECORDS_PER_TRACK).map(r => r.id));
+  db.lapRecords = db.lapRecords.filter(r => !drop.has(r.id));
+  return true;
+}
+
+// 启动时清理历史脏数据：无效记录、未知赛道、超量记录
+export function pruneLapRecords() {
+  const db = loadDb();
+  const before = db.lapRecords.length;
+  db.lapRecords = db.lapRecords.filter(r => r.validated && VALID_TRACK_IDS.has(r.trackId));
+  let changed = db.lapRecords.length !== before;
+  for (const trackId of new Set(db.lapRecords.map(r => r.trackId))) {
+    if (trimTrackRecords(db, trackId)) changed = true;
+  }
+  if (changed) saveDb();
+}
 
 export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, laps, source }) {
   const db = loadDb();
+  trackId = String(trackId || "").slice(0, 32);
+  if (!VALID_TRACK_IDS.has(trackId)) throw new Error("invalid trackId");
   bestLapMs = Math.round(Number(bestLapMs) || 0);
   totalMs = Math.round(Number(totalMs) || 0);
   laps = Math.max(1, Math.round(Number(laps) || 1));
@@ -28,7 +60,7 @@ export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, 
     id: "lap_" + crypto.randomBytes(8).toString("hex"),
     playerId,
     trackId,
-    carId: String(carId || "unknown"),
+    carId: String(carId || "unknown").slice(0, 64),
     bestLapMs,
     totalMs,
     laps,
@@ -36,7 +68,10 @@ export function submitLapRecord({ playerId, trackId, carId, bestLapMs, totalMs, 
     validated: validated ? 1 : 0,
     createdAt: Date.now(),
   };
+  // 未通过合理性校验的成绩不落库：否则随便一个客户端就能把库刷爆
+  if (!validated) return record;
   db.lapRecords.push(record);
+  trimTrackRecords(db, trackId);
   saveDb();
   return record;
 }

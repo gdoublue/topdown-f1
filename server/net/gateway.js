@@ -9,7 +9,7 @@ import { WebSocketServer } from "ws";
 import crypto from "node:crypto";
 import { SERVER_CONFIG } from "../config.js";
 import { registerPlayer, countRaceFinish } from "../core/session.js";
-import { createRoom, joinRoom, leaveRoom, listRooms, handleDisconnect, findRoomOf, rooms as _rooms } from "../core/roomManager.js";
+import { createRoom, joinRoom, leaveRoom, listRooms, removeSessionEverywhere, findRoomOf, rooms as _rooms } from "../core/roomManager.js";
 import { RaceSim } from "../core/sim.js";
 import { createRtcLink, rtcAvailable, rtcClientConfig, rtcCleanup } from "./rtc.js";
 import { submitLapRecord, getLeaderboardView } from "../services/leaderboard.js";
@@ -42,6 +42,34 @@ function broadcastRoom(room, type, payload) {
 function clampLaps(v) {
   const n = Math.round(Number(v) || 0);
   return n <= 0 ? 0 : Math.max(1, Math.min(50, n));
+}
+
+// 赛道白名单：房间视图会把 trackId 原样下发给客户端，
+// 服务端必须先验证，避免任意字符串进入房间状态（客户端渲染点见 onlineUI.js）。
+const VALID_TRACK_IDS = new Set(TRACKS.map(t => t.id));
+function normalizeTrackId(v) {
+  const id = String(v ?? "").slice(0, 32);
+  return VALID_TRACK_IDS.has(id) ? id : null;
+}
+
+// 每会话令牌桶：正常上报 60Hz，超频消息直接丢弃（每 5 秒最多提示一次）。
+function allowMessage(session, now) {
+  const capacity = SERVER_CONFIG.wsMessageBurst;
+  let bucket = session.msgBucket;
+  if (!bucket) bucket = session.msgBucket = { tokens: capacity, at: now };
+  const elapsed = Math.max(0, now - bucket.at) / 1000;
+  bucket.at = now;
+  bucket.tokens = Math.min(capacity, bucket.tokens + elapsed * SERVER_CONFIG.wsMessageRatePerSec);
+  if (bucket.tokens < 1) return false;
+  bucket.tokens -= 1;
+  return true;
+}
+
+function warnRateLimited(session) {
+  const now = Date.now();
+  if (now - (session.rateNoticeAt || 0) < 5000) return;
+  session.rateNoticeAt = now;
+  send(session.ws, { t: "error", code: "rate_limited" });
 }
 
 // 聊天记录：全局一份、每个房间一份，各保留最近 10 条，新连上/刚进房时补发
@@ -183,6 +211,11 @@ function autoReadyMember(room, member) {
 
 function maintainRooms() {
   const now = Date.now();
+  // 兜底回收已经断开但 close 事件还没派发的连接（含其所在房间的成员身份），
+  // 否则半开连接会变成永久幽灵成员，64 间房被占满后新玩家再也建不了房。
+  for (const [ws, s] of sessions) {
+    if (ws.readyState !== 1) onClosed(s);
+  }
   for (const room of _rooms.values()) {
     if (room.state !== "lobby") continue;
     if (now < (room.autoHoldUntil || 0)) continue;   // 结算静默期
@@ -417,41 +450,59 @@ function ensureSimLoop() {
 }
 
 function onClosed(session) {
+  // close 事件和心跳/巡检可能各调一次：只处理一次，避免重复判负广播
+  if (session.closed) return;
+  session.closed = true;
   session.rtc?.close();
   session.rtc = null;
-  const res = handleDisconnect(session, broadcastRoom);
+  const affected = removeSessionEverywhere(session, broadcastRoom);
   sessions.delete(session.ws);
-  // 观赛者掉线：房间里的"离开观赛"提示同样要发（他没有车，不需要判负）
-  if (res && !res.destroyed && res.wasSpectating) announceWatch(res.room, session, false);
-  // 比赛中掉线/退出：只把这台车移出比赛（判负），其余车手照常完赛
-  if (res && !res.destroyed && res.room.sim && !res.room.sim.ended) {
-    const ghost = res.room.sim.ghosts.get(session.id);
-    if (ghost && !ghost.gone) {
-      const alreadyOut = res.room.sim.hasForfeited(session.id);
-      res.room.sim.retirePlayer(session.id);
-      if (!alreadyOut) {
-        broadcastRoom(res.room, "player_forfeit", {
-          sid: session.id,
-          nickname: session.player?.nickname || "Player",
-        });
+  for (const res of affected) {
+    const room = res.room;
+    // 观赛者掉线：房间里的"离开观赛"提示同样要发（他没有车，不需要判负）
+    if (!res.destroyed && res.wasSpectating) announceWatch(room, session, false);
+    // 比赛中掉线/退出：只把这台车移出比赛（判负），其余车手照常完赛
+    if (!res.destroyed && room.sim && !room.sim.ended) {
+      const ghost = room.sim.ghosts.get(session.id);
+      if (ghost && !ghost.gone) {
+        const alreadyOut = room.sim.hasForfeited(session.id);
+        room.sim.retirePlayer(session.id);
+        if (!alreadyOut) {
+          broadcastRoom(room, "player_forfeit", {
+            sid: session.id,
+            nickname: session.player?.nickname || "Player",
+          });
+        }
+        checkRaceEnd(room);
       }
-      checkRaceEnd(res.room);
     }
   }
   broadcastLobby();
 }
 
 export function attachGateway(httpServer) {
-  const wss = new WebSocketServer({ server: httpServer, path: SERVER_CONFIG.wsPath });
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: SERVER_CONFIG.wsPath,
+    maxPayload: SERVER_CONFIG.wsMaxPayload,
+  });
 
   wss.on("connection", (ws) => {
+    if (sessions.size >= SERVER_CONFIG.maxConnections) {
+      send(ws, { t: "error", code: "server_full" });
+      ws.close(1013, "server_full");
+      return;
+    }
     const session = { id: "sid_" + crypto.randomBytes(8).toString("hex"), ws, player: null, lastSeen: Date.now() };
     sessions.set(ws, session);
     ws.isAlive = true;
     ws.on("pong", () => { session.lastSeen = Date.now(); });
 
     ws.on("message", (raw) => {
-      session.lastSeen = Date.now();
+      const now = Date.now();
+      session.lastSeen = now;
+      // 限流放在 JSON.parse 之前：超频包连解析成本都不付
+      if (!allowMessage(session, now)) return warnRateLimited(session);
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
       try { route(session, msg); } catch (e) {
@@ -472,7 +523,12 @@ function route(session, msg) {
   const ws = session.ws;
   switch (msg.t) {
     case "hello": {
-      const { player, created } = registerPlayer(msg.fingerprint, msg.nickname);
+      // 一个连接只允许握手一次：重复 hello 会重建 RTC，旧 PeerConnection
+      // 不关闭就会泄漏原生 UDP 端口和内存。
+      if (session.player) return send(ws, { t: "error", code: "already_authed" });
+      const fingerprint = String(msg.fingerprint ?? "").slice(0, 256);
+      if (!fingerprint) return send(ws, { t: "error", code: "invalid_fingerprint" });
+      const { player, created } = registerPlayer(fingerprint, msg.nickname);
       session.player = player;
       send(ws, {
         t: "welcome",
@@ -495,10 +551,16 @@ function route(session, msg) {
             // 建 WebRTC DataChannel（UDP）：信令走 WS，数据通道建好后快照/位姿自动改走 UDP。
             // 建不起来也只是回落 WebSocket，不影响任何功能。
             if (rtcAvailable) {
+              session.rtc?.close();
               session.rtc = createRtcLink(
                 session,
                 (o) => send(ws, o),
-                (m) => { session.lastSeen = Date.now(); route(session, m); },
+                (m) => {
+                  const now = Date.now();
+                  session.lastSeen = now;
+                  if (!allowMessage(session, now)) return;   // DataChannel 也不能绕过限流
+                  route(session, m);
+                },
               );
             }
             break;
@@ -506,7 +568,12 @@ function route(session, msg) {
 
     case "room_create": {
       if (!session.player) return send(ws, { t: "error", code: "not_authed" });
-      const res = createRoom(session, { trackId: msg.trackId, sameCar: msg.sameCar, fillAI: msg.fillAI });
+      let trackId;
+      if (msg.trackId !== undefined) {
+        trackId = normalizeTrackId(msg.trackId);
+        if (!trackId) return send(ws, { t: "error", code: "invalid_track" });
+      }
+      const res = createRoom(session, { trackId, sameCar: msg.sameCar, fillAI: msg.fillAI });
       if (!res.ok) return send(ws, { t: "error", code: res.reason });
       send(ws, { t: "room_update", room: res.room.view() });
       sendRoomHistory(ws, res.room);
@@ -516,8 +583,16 @@ function route(session, msg) {
 
     case "room_join": {
       if (!session.player) return send(ws, { t: "error", code: "not_authed" });
-      const res = joinRoom(session, msg.roomId, { spectate: msg.spectate === true });
+      const roomId = String(msg.roomId ?? "").slice(0, 32);
+      if (!roomId) return send(ws, { t: "error", code: "room_not_found" });
+      const res = joinRoom(session, roomId, { spectate: msg.spectate === true });
       if (!res.ok) return send(ws, { t: "error", code: res.reason });
+      if (res.alreadyIn) {
+        // 重复加入同一间房：只补当前视图，不再广播/重复发观赛提示
+        send(ws, { t: "room_update", room: res.room.view() });
+        sendRoomHistory(ws, res.room);
+        break;
+      }
       broadcastRoom(res.room, "room_update", { room: res.room.view() });
       sendRoomHistory(ws, res.room);   // 刚进房：补发房间最近聊天
       if (res.spectating) {
@@ -645,6 +720,12 @@ function route(session, msg) {
       if (!session.player) return send(ws, { t: "error", code: "not_authed" });
       const room = findRoomOf(session.id);
       if (!room) return send(ws, { t: "error", code: "not_in_room" });
+      const isHost = session.id === room.hostId;
+      let nextTrack = null;
+      if (isHost && msg.trackId !== undefined) {
+        nextTrack = normalizeTrackId(msg.trackId);
+        if (!nextTrack) return send(ws, { t: "error", code: "invalid_track" });
+      }
       const patch = {};
       if (msg.carId !== undefined && msg.carId !== null) {
         const cid = String(msg.carId).slice(0, 32);
@@ -652,17 +733,32 @@ function route(session, msg) {
       }
       if (msg.ready !== undefined) patch.ready = !!msg.ready;
       if (msg.scriptId !== undefined) patch.scriptId = String(msg.scriptId).slice(0, 48);
-      room.setMember(session.id, patch);
+      const member = room.members.get(session.id);
+      const memberChanged = !!member && Object.keys(patch).some(k => member[k] !== patch[k]);
+      if (memberChanged) room.setMember(session.id, patch);
       // 房主专属：改规则
-      if (session.id === room.hostId) {
-        if (msg.sameCar !== undefined) room.sameCar = !!msg.sameCar;
-        if (msg.fillAI !== undefined) room.fillAI = !!msg.fillAI;   // 是否需要 AI 补位车
-        if (msg.trackId) room.trackId = String(msg.trackId).slice(0, 32);
+      let rulesChanged = false;
+      if (isHost) {
+        if (msg.sameCar !== undefined && room.sameCar !== !!msg.sameCar) {
+          room.sameCar = !!msg.sameCar; rulesChanged = true;
+        }
+        if (msg.fillAI !== undefined && room.fillAI !== !!msg.fillAI) {
+          room.fillAI = !!msg.fillAI; rulesChanged = true;   // 是否需要 AI 补位车
+        }
+        if (nextTrack && room.trackId !== nextTrack) {
+          room.trackId = nextTrack; rulesChanged = true;
+        }
         // 圈数也进房间状态：非房主要能提前看到房主的设定（不只是开赛时才知道）
-        if (msg.laps !== undefined) room.laps = clampLaps(msg.laps);
+        if (msg.laps !== undefined) {
+          const laps = clampLaps(msg.laps);
+          if (room.laps !== laps) { room.laps = laps; rulesChanged = true; }
+        }
       }
+      // 状态没变化就不广播：旧客户端/测试若在 room_update 里回发同样的 room_set，
+      // 无条件广播会形成消息回环，把限流桶瞬间打空。
+      if (!memberChanged && !rulesChanged) break;
       broadcastRoom(room, "room_update", { room: room.view() });
-      if (msg.trackId !== undefined || msg.fillAI !== undefined || msg.laps !== undefined) broadcastLobby();
+      if (rulesChanged && (msg.trackId !== undefined || msg.fillAI !== undefined || msg.laps !== undefined)) broadcastLobby();
       break;
     }
 

@@ -12,6 +12,7 @@ let snaps = 0;
 let carMoves = false;
 let gotRaceStart = false;
 let gotRaceEnd = false;
+let configured = false;
 let reported = false;
 
 const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
@@ -26,7 +27,8 @@ ws.on("message", (raw) => {
     sid = msg.sid;
     console.log("[welcome] sid =", sid, "| 昵称 =", msg.nickname);
     ws.send(JSON.stringify({ t: "room_create", trackId: TRACK, sameCar: true }));
-  } else if (msg.t === "room_update" && !gotRaceStart) {
+  } else if (msg.t === "room_update" && !gotRaceStart && !configured) {
+    configured = true;   // 只配置一次：每次 room_update 都回发会形成消息回环
     ws.send(JSON.stringify({ t: "room_set", carId: "mercedes-w15", ready: true }));
     setTimeout(() => ws.send(JSON.stringify({ t: "room_start", laps: LAPS || undefined })), 300);
   } else if (msg.t === "race_start") {

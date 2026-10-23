@@ -6,10 +6,15 @@ const rooms = new Map();
 export { rooms };   // gateway 的模拟主循环需要枚举所有房间
 
 export function createRoom(session, opts = {}) {
+  if (findRoomOf(session.id)) return { ok: false, reason: "already_in_room" };
   if (rooms.size >= SERVER_CONFIG.maxRooms) return { ok: false, reason: "server_full" };
   const room = new Room(session, opts);
   rooms.set(room.id, room);
   const res = room.addMember(session);
+  if (!res.ok) {
+    rooms.delete(room.id);   // 成员没加进去：不能留下空壳房
+    return { ok: false, reason: res.reason };
+  }
   return { ok: true, room, spectating: !!res.spectating };
 }
 
@@ -25,6 +30,15 @@ export function listRooms() {
 
 // opts.spectate：显式要求观赛；比赛进行中无论是否传都会按观赛身份加入
 export function joinRoom(session, roomId, opts = {}) {
+  // 一个连接只能在一个房间里：重复加入同一间按幂等处理，换房必须先离开
+  const current = findRoomOf(session.id);
+  if (current) {
+    if (current.id === roomId) {
+      const member = current.members.get(session.id);
+      return { ok: true, room: current, spectating: !!member?.spectating, alreadyIn: true };
+    }
+    return { ok: false, reason: "already_in_room" };
+  }
   const room = rooms.get(roomId);
   if (!room) return { ok: false, reason: "room_not_found" };
   const res = room.addMember(session, opts);
@@ -51,16 +65,22 @@ export function findRoomOf(sessionId) {
   return null;
 }
 
-// 会话断开时：从所在房间移除并广播
-export function handleDisconnect(session, broadcast) {
-  const room = findRoomOf(session.id);
-  if (!room) return null;
-  const wasSpectating = !!room.members.get(session.id)?.spectating;
-  room.removeMember(session.id);
-  if (room.members.size === 0) {
-    rooms.delete(room.id);
-    return { room, destroyed: true, wasSpectating };
+// 会话断开时：从**所有**房间移除（正常情况只有一间，遍历是为了兜住历史脏状态），
+// 返回每个受影响房间的结果，供网关逐间处理判负 / 观赛提示 / 结算。
+export function removeSessionEverywhere(session, broadcast) {
+  const affected = [];
+  for (const [roomId, room] of rooms) {
+    const member = room.members.get(session.id);
+    if (!member) continue;
+    const wasSpectating = !!member.spectating;
+    room.removeMember(session.id);
+    if (room.members.size === 0) {
+      rooms.delete(roomId);
+      affected.push({ room, destroyed: true, wasSpectating });
+    } else {
+      broadcast(room, "room_update", { room: room.view() });
+      affected.push({ room, destroyed: false, wasSpectating });
+    }
   }
-  broadcast(room, "room_update", { room: room.view() });
-  return { room, destroyed: false, wasSpectating };
+  return affected;
 }

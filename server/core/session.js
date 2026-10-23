@@ -17,6 +17,25 @@ function newId(prefix) {
   return prefix + "_" + crypto.randomBytes(8).toString("hex");
 }
 
+// 玩家表上限：唯一指纹可以无限刷，必须有硬上限。
+// 到顶后优先淘汰"没有成绩、没有胜场"的最久未活跃玩家；腾不出位置就拒绝新玩家。
+const MAX_PLAYERS = 10000;
+const PLAYER_EVICT_RATIO = 0.9;
+
+function ensurePlayerCapacity(db) {
+  if (db.players.length < MAX_PLAYERS) return true;
+  const withRecords = new Set(db.lapRecords.map(r => r.playerId));
+  const removable = db.players
+    .filter(p => !withRecords.has(p.id) && !p.wins && !p.races)
+    .sort((a, b) => (a.lastSeen || 0) - (b.lastSeen || 0));
+  const target = Math.floor(MAX_PLAYERS * PLAYER_EVICT_RATIO);
+  const need = db.players.length - target + 1;   // 腾出的位置要能容纳本次新玩家
+  if (removable.length < need) return false;
+  const drop = new Set(removable.slice(0, need).map(p => p.id));
+  db.players = db.players.filter(p => !drop.has(p.id));
+  return true;
+}
+
 // 没填昵称时的默认昵称：友好的随机车手名（不再用指纹前缀拼 "Pilot-xxxx"，
 // 那种看着就像浏览器签名，房间里别人根本认不出是谁）
 const NICK_POOL = ["闪电", "追风", "弯心", "涡轮", "夜行", "漂移", "雷霆", "赤焰", "疾风", "超车"];
@@ -27,12 +46,14 @@ function randomNickname() {
 // 注册或识别玩家；返回 { player, created }
 export function registerPlayer(fingerprint, nickname) {
   const db = loadDb();
-  const fp = saltedHash(String(fingerprint || ""));
-  if (!fp || fp.length < 8) throw new Error("invalid fingerprint");
+  const raw = String(fingerprint || "").slice(0, 256);
+  if (!raw) throw new Error("invalid fingerprint");
+  const fp = saltedHash(raw);
 
   let player = db.players.find(p => p.fingerprint === fp);
   let created = false;
   if (!player) {
+    if (!ensurePlayerCapacity(db)) throw new Error("player_capacity");
     player = {
       id: newId("plr"),
       fingerprint: fp,
