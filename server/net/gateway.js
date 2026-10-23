@@ -226,7 +226,9 @@ function maintainRooms() {
       else if (now - m.notReadySince >= AUTO_READY_MS) autoReadyMember(room, m);
     }
     // 2) 全员就绪 5 秒 → 房主还没点就开始
-    if (room.isEveryoneReady()) {
+    //    前提是"除房主外至少有一名参赛车手已就绪"：房里只有房主一个人时
+    //    不会自动开始（房主自己点才开始）；观赛者不算准备的人。
+    if (room.canAutoStart()) {
       if (!room.autoStartAt) {
         room.autoStartAt = now + AUTO_START_MS;
         broadcastRoom(room, "room_update", { room: room.view() });   // 客户端显示"5 秒后自动开始"

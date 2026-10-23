@@ -780,9 +780,14 @@ function renderRoom() {
       </div>`;
 
   const viewerText = viewers.length ? ` · 👀 ${viewers.length} 人观战` : "";
-  // 全员已就绪 → 服务端 5 秒后自动开赛（房主不点也照样开）；房主按钮上直接标出来
+  // 全员已就绪 → 服务端 5 秒后自动开赛（房主不点也照样开）；房主按钮上直接标出来。
+  // 房里只有房主一个参赛车手时不会自动开始（服务端不发 autoStartInMs）；观赛者不算准备的人。
   const autoStartMs = Number(room.autoStartInMs) || 0;
   const autoStartText = autoStartMs > 0 ? ` · ${Math.ceil(autoStartMs / 1000)} 秒后自动开始` : "";
+  const hasOtherRacers = racers.some(p => p.id !== room.hostId);
+  const startBtnHint = hasOtherRacers
+    ? "房主无需准备 · 全员就绪 5 秒后自动开始"
+    : "只有你一个人在参赛名单里，不会自动开始（需手动开赛）";
   // 提示条：观赛身份 / 比赛进行中 / 全员就绪即将自动开赛
   const hintHtml = iAmSpectating
     ? `<p class="online-error viewer-hint">👀 你当前是观赛身份：比赛进行中可切换任意赛车观看实时画面；点「加入下一局」回到参赛名单</p>`
@@ -827,7 +832,7 @@ function renderRoom() {
       : ""}
       ${isHost && !iAmSpectating ? `
       <button class="results-btn primary online-btn" id="roomStartBtn" ${canStart ? "" : "disabled"}
-        title="${startReason}（房主无需准备 · 全员就绪 5 秒后自动开始）">${canStart
+        title="${startReason}（${startBtnHint}）">${canStart
       ? `🏁 开始比赛${autoStartText}`
       : "⏳ " + startReason}</button>` : ""}
       ${iAmSpectating ? "" : `<button class="results-btn online-btn ${isAutopilotOn() ? "on" : ""}" id="roomAutopilotBtn"
