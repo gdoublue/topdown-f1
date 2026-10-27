@@ -1,8 +1,10 @@
-// 程序化 F1 赛车 3D 网格：全部用 three.js 基础几何拼装（零外部模型资源）
+// 程序化 F1 赛车 3D 网格：全部用 three.js 基础几何拼装（F1 车型零外部资源）
+// 小米 SU8 Ultra（livery === "su7ultra"）使用真实 SU7 车模：
+// public/models/su7/（EXT_meshopt glTF，来源 github.com/Yechuanjie/xiaomi-su7）
 // 车头朝局部 +x；挂载到场景时 rotation.y = -car.angle（2D 画布角度 → three 坐标）
-// 车身用俯视轮廓 Extrude 成型（鼻锥收窄 / 侧箱 / 平衡的 F1 剪影），
-// 材质为 MeshStandardMaterial + 场景环境反射（renderer.js 注入 scene.environment）。
 import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 
 // 车身几何与 2D 物理包围盒一致：长 5.6m（车头 +2.8 / 车尾 -2.8）、宽 2.0m
 const WHEEL_R_F = 0.33, WHEEL_R_R = 0.36;
@@ -166,8 +168,118 @@ function suspensionLink(x1, y1, z1, x2, y2, z2, mat) {
   return m;
 }
 
+/* ================= 小米 SU7 真实车模（仅 su7ultra 涂装使用） =================
+   public/models/su7/sm_car.gltf（EXT_meshopt + webp 贴图）。
+   参考实现确认：车头朝 +x，车轮节点名 Wheel*，其子节点绕本地 z 自转，
+   "body"/"body.001" 为车漆面（可换色），模型单位经包围盒归一化。 */
+let su7TemplatePromise = null;
+
+function su7ModelUrl() {
+  return new URL("models/su7/sm_car.gltf", document.baseURI).href;
+}
+
+function normalizeSu7Template(root) {
+  // 包围盒归一化：车长 → 5.05m（SU7 实车 4997mm），落地面 y=0，中心对齐原点
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  const k = 5.05 / Math.max(0.01, size.x);
+  root.scale.setScalar(k);
+  box.setFromObject(root);
+  const center = box.getCenter(new THREE.Vector3());
+  root.position.set(-center.x, -box.min.y, -center.z);
+  const wrapped = new THREE.Group();
+  wrapped.add(root);
+  const parts = { spinNodes: [], bodyMats: [], allMats: [] };
+  wrapped.traverse(o => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) {
+        m.aoMap = null;                 // 模型无 UV2，参考实现同样置空
+        parts.allMats.push(m);
+        if (o.name === "body" || o.name === "body.001") parts.bodyMats.push(m);
+      }
+    }
+    if (/^Wheel/.test(o.name)) parts.spinNodes.push(...o.children);
+  });
+  wrapped.userData.parts = parts;
+  return wrapped;
+}
+
+function getSu7Template() {
+  if (!su7TemplatePromise) {
+    const loader = new GLTFLoader();
+    loader.setMeshoptDecoder(MeshoptDecoder);
+    su7TemplatePromise = loader.loadAsync(su7ModelUrl()).then(gltf =>
+      normalizeSu7Template(gltf.scene)
+    ).catch(err => {
+      console.warn("[render3d] SU7 模型加载失败，回退程序化车体", err);
+      su7TemplatePromise = null;
+      throw err;
+    });
+  }
+  return su7TemplatePromise;
+}
+
+// 把模板克隆成一台可独立换色/变透明的实例（材质逐实例克隆，避免幽灵透明度串扰）
+function buildSu7Instance(template, car) {
+  const inst = template.clone(true);
+  const parts = { spinNodes: [], mats: [] };
+  inst.traverse(o => {
+    if (o.isMesh) {
+      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) {
+        parts.mats.push(m);
+        // 车漆面 = 名为 Car_body 的材质（外壳多网格共享）；按材质名换色，灼烈黄与 2D 涂装一致
+        if (m.name === "Car_body") m.color.set(car.color || "#f5c518");
+      }
+    }
+    if (/^Wheel/.test(o.name)) parts.spinNodes.push(...o.children);
+  });
+  inst.userData.parts = parts;
+  return inst;
+}
+
+export function isSu7Car(car) {
+  return !!car && car.livery === "su7ultra";
+}
+
+/* SU7 真实车模实例：模板异步加载（Meshopt 解码），加载完成前显示灼烈黄占位盒 */
+function createSu7Mesh(car) {
+  const root = new THREE.Group();
+  root.userData = {
+    isGlb: true, glbReady: false, spinNodes: [], mats: [],
+    spinAngle: 0, lastAlpha: null,
+  };
+  const placeholder = new THREE.Mesh(
+    new THREE.BoxGeometry(5.0, 1.4, 1.96),
+    new THREE.MeshStandardMaterial({ color: 0xf5c518, roughness: 0.35, metalness: 0.5 })
+  );
+  placeholder.position.y = 0.7;
+  placeholder.castShadow = true;
+  placeholder.name = "placeholder";
+  root.add(placeholder);
+  getSu7Template().then(tpl => {
+    const inst = buildSu7Instance(tpl, car);
+    root.add(inst);
+    root.userData.glbReady = true;
+    root.userData.spinNodes = inst.userData.parts.spinNodes;
+    root.userData.mats = inst.userData.parts.mats;
+    root.userData.lastAlpha = null;
+    const ph = root.getObjectByName("placeholder");
+    if (ph) {
+      root.remove(ph);
+      ph.geometry.dispose();
+      ph.material.dispose();
+    }
+  }).catch(() => { /* 占位盒保留 */ });
+  return root;
+}
+
 /* 创建一辆车的 3D 视觉体（不进入场景，由 renderer 统一管理） */
 export function createCarMesh(car) {
+  if (isSu7Car(car)) return createSu7Mesh(car);
   const baseColor = new THREE.Color(car.color || "#ff3b3b");
   const livery = new THREE.MeshStandardMaterial({
     color: baseColor, metalness: 0.55, roughness: 0.32,
@@ -288,6 +400,24 @@ export function syncCarMesh(root, car, dt) {
   root.rotation.y = -car.angle;
 
   const u = root.userData;
+  const ghostA = car.retired || car.ghostHidden ? 0 : (car.ghostAlpha == null ? 1 : Math.max(0, car.ghostAlpha));
+
+  // SU7 真实车模分支：车轮自转 + 幽灵透明度（无转向节动画，参考实现同款处理）
+  if (u.isGlb) {
+    u.spinAngle -= (car.speed * dt) / 0.3;
+    for (const n of u.spinNodes) n.rotation.z = u.spinAngle;
+    root.position.y = car.shake > 0.2 ? Math.random() * car.shake * 0.01 : 0;
+    if (u.glbReady && ghostA !== u.lastAlpha) {
+      root.visible = ghostA > 0.02;
+      for (const m of u.mats) {
+        m.transparent = ghostA < 0.999;
+        m.opacity = ghostA;
+      }
+      u.lastAlpha = ghostA;
+    }
+    return;
+  }
+
   const spin = (Math.abs(car.speed) * dt) / WHEEL_R_R * (car.speed < 0 ? 1 : -1);
   u.spinAngle = (u.spinAngle + spin) % (Math.PI * 2);
   for (const s of u.wheels.spin) s.rotation.z = u.spinAngle;
@@ -309,8 +439,12 @@ export function syncCarMesh(root, car, dt) {
   }
 }
 
-/* 释放一辆车的独立材质（共享几何与共享贴图不释放） */
+/* 释放一辆车的独立材质（共享几何与模板不释放） */
 export function disposeCarMesh(root) {
   const u = root.userData;
+  if (u.isGlb) {
+    (u.mats || []).forEach(m => m && m.dispose());
+    return;
+  }
   [...(u.liveryMats || []), ...(u._mats || [])].forEach(m => m && m.dispose());
 }

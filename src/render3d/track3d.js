@@ -589,10 +589,12 @@ function buildBoards() {
   return group;
 }
 
-/* ================= 云层（白色扁球体云团，纯几何 + 受雾，避免透明精灵的边缘发黑） ================= */
+/* ================= 云层（纯几何云团）
+   MeshBasicMaterial 不受光照：Lambert 云球底面只吃暗绿地面反光，从下看是黑影；
+   纯白无光照 + 受雾，任何角度都是亮白并自然融入地平线 ================= */
 function buildClouds() {
   const group = new THREE.Group();
-  const mat = new THREE.MeshLambertMaterial({ color: 0xf4f7fa });
+  const mat = new THREE.MeshBasicMaterial({ color: 0xf8fbff });
   const geo = new THREE.SphereGeometry(1, 12, 8);
   let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
   for (const p of pts) {
