@@ -13,6 +13,8 @@ Thumbs.db
 /_cap.mjs
 server/test/tmp-*
 *.err
+# 算法验收 / 回放结果 dump
+/accept-*.json
 
 # 数据库运行时产物（gp.json 本身是种子数据，仍进仓库）
 server/db/data/backups/
