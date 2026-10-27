@@ -7,7 +7,7 @@
 //   S→C  { t: "welcome", ... } | { t: "room_update", ... } | { t: "error", code, msg }
 import { WebSocketServer } from "ws";
 import crypto from "node:crypto";
-import { SERVER_CONFIG } from "../config.js";
+import { SERVER_CONFIG, isOriginAllowed } from "../config.js";
 import { registerPlayer, countRaceFinish } from "../core/session.js";
 import { createRoom, joinRoom, leaveRoom, listRooms, removeSessionEverywhere, findRoomOf, rooms as _rooms } from "../core/roomManager.js";
 import { RaceSim } from "../core/sim.js";
@@ -487,6 +487,13 @@ export function attachGateway(httpServer) {
     server: httpServer,
     path: SERVER_CONFIG.wsPath,
     maxPayload: SERVER_CONFIG.wsMaxPayload,
+    // 握手阶段校验来源：浏览器一定带 Origin，非白名单站点直接 403 拒绝升级。
+    // 不带 Origin 的客户端（node 脚本 / 服务端测试）按 ALLOW_NO_ORIGIN 处理。
+    verifyClient: (info, cb) => {
+      if (isOriginAllowed(info.origin)) return cb(true);
+      console.warn(`[ws] 拒绝来源: ${info.origin || "(none)"}`);
+      cb(false, 403, "origin_not_allowed");
+    },
   });
 
   wss.on("connection", (ws) => {

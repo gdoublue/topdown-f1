@@ -1,7 +1,35 @@
 // 服务端全局配置
+
+// 来源白名单：浏览器跨域请求（CORS）与 WebSocket 握手 Origin 校验共用。
+// 只列 origin（协议+域名+端口），路径不参与比较。
+//  · https://gdoublue.github.io     GitHub Pages 上的游戏站点（/topdown-f1/）
+//  · https://hw.066808.xyz(:8080)   服务端自身域名（前后端同源部署）
+//  · localhost / 127.0.0.1          本地开发（vite dev 5173、直连后端 8081）
+// 需要临时放开别的站点时用环境变量覆盖：ALLOWED_ORIGINS="https://a.com,https://b.com"
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://gdoublue.github.io",
+  "https://hw.066808.xyz",
+  "https://hw.066808.xyz:8080",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:8080",
+  "http://127.0.0.1:8080",
+  "http://localhost:8081",
+  "http://127.0.0.1:8081",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+].join(",");
+
 export const SERVER_CONFIG = {
   port: Number(process.env.PORT) || 8081,
   wsPath: "/ws",
+
+  // 来源限制（浏览器侧唯一可信的"谁在调用"依据）
+  allowedOrigins: String(process.env.ALLOWED_ORIGINS || DEFAULT_ALLOWED_ORIGINS)
+    .split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean),
+  // 不带 Origin 的请求（curl、压测/回放脚本、node 客户端）默认放行；
+  // 想彻底只允许浏览器白名单来访时设 ALLOW_NO_ORIGIN=0。
+  allowNoOrigin: process.env.ALLOW_NO_ORIGIN !== "0",
 
   // 模拟节奏（P3 房间对战启用；当前骨架阶段仅占位）
   simTickHz: 30,          // 权威物理步频
@@ -69,3 +97,16 @@ export const TRACK_MIN_LAP_MS = {
   redbullring: 48000,   // AI 54.7s（0.88）
 };
 export const DEFAULT_MIN_LAP_MS = 60000;
+
+// 归一化 origin：去掉尾部斜杠，忽略大小写
+function normOrigin(origin) {
+  return String(origin || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+// 判定某个请求来源是否允许访问（HTTP 与 WebSocket 共用）。
+// origin 为空 = 非浏览器客户端（curl / 脚本 / 服务端测试）→ 由 allowNoOrigin 决定。
+export function isOriginAllowed(origin) {
+  if (!origin) return SERVER_CONFIG.allowNoOrigin;
+  const o = normOrigin(origin);
+  return SERVER_CONFIG.allowedOrigins.some(allowed => normOrigin(allowed) === o);
+}

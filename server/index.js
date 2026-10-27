@@ -5,7 +5,7 @@
 //   POST /api/leaderboard            在线单人练习成绩提交 { fingerprint, trackId, carId, bestLapMs, totalMs, laps }
 //   GET  /api/rooms                  房间列表
 import http from "node:http";
-import { SERVER_CONFIG } from "./config.js";
+import { SERVER_CONFIG, isOriginAllowed } from "./config.js";
 import { loadDb, flushDbSync } from "./db/store.js";
 import { registerPlayer } from "./core/session.js";
 import { submitLapRecord, getLeaderboardView, pruneLapRecords, isValidTrackId } from "./services/leaderboard.js";
@@ -46,10 +46,20 @@ function allowPost(req) {
 }
 
 const server = http.createServer((req, res) => {
-  // 开发期 CORS：vite (5173) 直连本服务
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // 来源白名单：只回显白名单内的 Origin，不再给 "*"。
+  // 同源 GET 不带 Origin；跨域站点 / 非白名单站点拿不到 CORS 头，且直接 403。
+  const origin = req.headers.origin;
+  if (!isOriginAllowed(origin)) {
+    res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "origin_not_allowed" }));
+    return;
+  }
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, "http://localhost");
