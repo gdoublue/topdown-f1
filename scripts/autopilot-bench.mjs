@@ -31,7 +31,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 
-import { createCar, stepCar, resolveCarCollisions, finishedCarInput } from "../src/car/physics.js";
+import { createCar, stepCar, resolveCarCollisions, finishedCarInput, getCarDistance, CAR_LENGTH } from "../src/car/physics.js";
 import {
   AI_CONFIGS, buildGridSlots, applyCarConfig, createAIInput, lineX, lineY,
   superDriver, driveApexHunter, driveVectorPursuit, driveClassicBaseline, driveSmoothCruiser,
@@ -402,6 +402,10 @@ function runRace(job) {
   let firstError = "";
   const violationKinds = new Map();   // 同一类违规只记一次（附出现次数），避免刷屏
   const sandboxHits = new Map();      // 引擎沙箱拦截的越权写入（加固模式）
+  const touchState = new Map();       // 当前处于接触状态的车辆对（用于去重计数）
+  let contacts = 0;                   // 与自己有关的接触事件数
+  let rearEnds = 0;                   // 其中「我撞他」的追尾次数
+  let minLeadGap = Infinity;          // 全场最近一次「同车道正前方净空」（米）
   let dead = false;
 
   const maxMs = (job.maxSeconds > 0 ? job.maxSeconds : laps * 240 + 120) * 1000;
@@ -515,6 +519,51 @@ function runRace(job) {
 
     resolveCarCollisions(cars);
 
+    // 接触统计：只统计「与自己有关」的接触事件（进入接触的那一帧算 1 次，脱离时清零）
+    if (cars.length > 1) {
+      // 自己所在的赛道切向 / 法向（净空统计用）
+      const mi = meCar.nearIdx % N;
+      const pPrev = pts[(mi - 1 + N) % N], pNext = pts[(mi + 1) % N];
+      let tanX = pNext.x - pPrev.x, tanY = pNext.y - pPrev.y;
+      const tanL = Math.hypot(tanX, tanY) || 1;
+      tanX /= tanL; tanY /= tanL;
+      const norX = nor[mi].x, norY = nor[mi].y;
+      // 最近跟车净空：同一车道、正前方的车辆（用赛道切向/法向坐标，弯中并排不会被误判）
+      for (let k = 0; k < cars.length; k++) {
+        const o = cars[k];
+        if (o === meCar || o.finished) continue;
+        const relX = o.x - meCar.x, relY = o.y - meCar.y;
+        const dLon = relX * tanX + relY * tanY;
+        const dLat = relX * norX + relY * norY;
+        if (dLon > 0 && Math.abs(dLat) < 2.0) {
+          const g = dLon - CAR_LENGTH;
+          if (g < minLeadGap) minLeadGap = g;
+        }
+      }
+      for (let i = 0; i < cars.length; i++) {
+        for (let j = i + 1; j < cars.length; j++) {
+          const a = cars[i], b = cars[j];
+          if (a.finished || b.finished) { touchState.delete(i * 1000 + j); continue; }
+          const geo = getCarDistance(a, b);
+          const touching = geo.gapFrontRear < 0 && geo.gapLateral < 0;
+          const key = i * 1000 + j;
+          if (touching) {
+            if (!touchState.has(key)) {
+              touchState.set(key, 1);
+              if (i === meIdx || j === meIdx) {
+                contacts++;
+                // sLon > 0：b 在 a 前方 → a 是后车（追尾方）
+                const rear = geo.sLon >= 0 ? a : b;
+                if (rear === meCar) rearEnds++;
+              }
+            }
+          } else if (touchState.has(key)) {
+            touchState.delete(key);
+          }
+        }
+      }
+    }
+
     if (dead) break;
     if (cars.every((c) => c.finished)) break;
   }
@@ -575,6 +624,9 @@ function runRace(job) {
     wallMs: Math.round(wallMs),
     violations: violationCount,
     violationSamples,
+    contacts,
+    rearEnds,
+    minLeadGap: isFinite(minLeadGap) ? Math.round(minLeadGap * 100) / 100 : null,
     errors,
     firstError,
     logs: algo.logs ? algo.logs.slice(0, 20) : [],
@@ -662,6 +714,12 @@ function printTable(results, baseline) {
     }
     if (r.errors > 0) {
       console.log(`${pad("", 19)}✗ 运行异常 ${r.errors} 次，首个：${r.firstError}`);
+    }
+    if (r.contacts > 0) {
+      console.log(`${pad("", 19)}⚠ 车辆接触 ${r.contacts} 次（其中我追尾 ${r.rearEnds} 次）`);
+    }
+    if (r.minLeadGap != null) {
+      console.log(`${pad("", 19)}最近跟车净空 ${r.minLeadGap.toFixed(2)}m`);
     }
   }
 }

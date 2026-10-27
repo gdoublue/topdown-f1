@@ -10,6 +10,7 @@
     "ai:sim": "node scripts/ai-sim.mjs",
     "algo:bench": "node scripts/autopilot-bench.mjs",
     "algo:bench:sample": "node scripts/autopilot-bench.mjs --algo=userscripts/自动驾驶脚本.js --car=all",
+    "algo:bench:traffic": "node scripts/autopilot-bench.mjs --mode=vs --track=all --car=all --laps=2",
     "algo:doctor": "node scripts/algo-doctor.mjs",
     "algo:check": "node scripts/algo-check.mjs",
     "build": "vite build",
