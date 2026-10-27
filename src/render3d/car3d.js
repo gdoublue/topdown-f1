@@ -28,7 +28,7 @@ function monocoqueGeometry() {
     depth: 0.26, bevelEnabled: true, bevelThickness: 0.06, bevelSize: 0.06, bevelSegments: 2,
   });
   geo.rotateX(Math.PI / 2);            // 平铺到 xz 平面，厚度朝 -y
-  geo.translate(0, 0.33, 0);           // 底面 ≈ 0.01，顶面 ≈ 0.33
+  geo.translate(0, 0.42, 0);           // 底面 0.10（离地净高），顶面 0.48 —— 高于刹车印平面
   return geo;
 }
 
@@ -183,17 +183,17 @@ export function createCarMesh(car) {
   const body = new THREE.Group();
   root.add(body);
 
-  // 底板 + 单壳车身 + 引擎盖脊线
-  const floor = box(G.floor, carbon, 0, 0.09, 0);
+  // 底板 + 单壳车身 + 引擎盖脊线（车体底面 ≥0.10，刹车印 0.058 从下方通过）
+  const floor = box(G.floor, carbon, 0, 0.13, 0);
   body.add(floor);
   body.add(box(G.mono, livery, 0, 0, 0));
-  body.add(box(G.spine, liveryDark, -0.25, 0.1, 0));
+  body.add(box(G.spine, liveryDark, -0.25, 0.12, 0));
 
   // 前翼：主翼片 + 上层翼片 + 端板
-  body.add(box(G.frontWingMain, liveryDark, 2.62, 0.13, 0));
-  body.add(box(G.frontWingFlap, carbon, 2.42, 0.22, 0, { rx: -0.18 }));
-  body.add(box(G.fwEndplate, carbon, 2.58, 0.2, 0.96));
-  body.add(box(G.fwEndplate, carbon, 2.58, 0.2, -0.96));
+  body.add(box(G.frontWingMain, liveryDark, 2.62, 0.16, 0));
+  body.add(box(G.frontWingFlap, carbon, 2.42, 0.25, 0, { rx: -0.18 }));
+  body.add(box(G.fwEndplate, carbon, 2.58, 0.23, 0.96));
+  body.add(box(G.fwEndplate, carbon, 2.58, 0.23, -0.96));
 
   // 尾翼：主翼 + DRS 翼 + 端板 + 梁翼 + 支柱
   body.add(box(G.rearWingMain, liveryDark, -2.5, 0.9, 0));
@@ -203,34 +203,34 @@ export function createCarMesh(car) {
   body.add(box(G.beamWing, carbon, -2.45, 0.5, 0));
   body.add(box(G.rwPillar, carbon, -2.42, 0.55, 0));
 
-  // Halo + 头盔（带护目镜）
+  // Halo（半环 + 前柱）与头盔（带护目镜）
   const halo = new THREE.Mesh(G.halo, carbon);
-  halo.position.set(0.3, 0.66, 0);
+  halo.position.set(0.3, 0.68, 0);
   halo.rotation.x = -Math.PI / 2 * 0.42;
   halo.rotation.z = Math.PI;                 // 开口朝前下
   halo.castShadow = true;
   body.add(halo);
-  body.add(box(G.haloPillar, carbon, 0.64, 0.56, 0));
+  body.add(box(G.haloPillar, carbon, 0.64, 0.58, 0));
   const helmetMat = new THREE.MeshStandardMaterial({
     color: baseColor.clone().offsetHSL(0.5, 0.1, 0.1), metalness: 0.2, roughness: 0.3,
   });
   const helmet = new THREE.Mesh(G.helmet, helmetMat);
-  helmet.position.set(0.14, 0.62, 0);
+  helmet.position.set(0.14, 0.64, 0);
   helmet.castShadow = true;
   body.add(helmet);
-  body.add(box(G.visor, carbon, 0.28, 0.63, 0));
+  body.add(box(G.visor, carbon, 0.28, 0.65, 0));
 
   // 尾部雨灯（刹车点亮）
   const brakeLight = new THREE.Mesh(G.brakeLight, brakeMat);
-  brakeLight.position.set(-2.74, 0.42, 0);
+  brakeLight.position.set(-2.74, 0.5, 0);
   body.add(brakeLight);
 
-  // 鼻锥车号贴片
+  // 鼻锥车号贴片（单壳顶面 0.48 之上）
   const numMat = new THREE.MeshBasicMaterial({
     map: numberTexture(car.number), transparent: true, side: THREE.FrontSide,
   });
   const numPlane = new THREE.Mesh(G.noseNum, numMat);
-  numPlane.position.set(1.95, 0.345, 0);
+  numPlane.position.set(1.95, 0.485, 0);
   numPlane.rotation.x = -Math.PI / 2;
   numPlane.rotation.z = -Math.PI / 2;
   body.add(numPlane);
@@ -262,10 +262,10 @@ export function createCarMesh(car) {
     root.add(steer);
     wheels.steer.push({ group: steer, front });
     wheels.spin.push(spin);
-    // 双叉臂悬臂
+    // 双叉臂悬臂（锚点随车体抬高）
     const hubY = r;
-    body.add(suspensionLink(x * 0.86, 0.22, Math.sign(z) * 0.3, x, hubY + 0.08, z * 0.98, suspMat));
-    body.add(suspensionLink(x * 0.86, 0.1, Math.sign(z) * 0.3, x, hubY - 0.06, z * 0.98, suspMat));
+    body.add(suspensionLink(x * 0.86, 0.26, Math.sign(z) * 0.3, x, hubY + 0.08, z * 0.98, suspMat));
+    body.add(suspensionLink(x * 0.86, 0.16, Math.sign(z) * 0.3, x, hubY - 0.06, z * 0.98, suspMat));
     root.userData._mats = root.userData._mats || [];
     root.userData._mats.push(tireMat, wallMat, rimMat);
   };

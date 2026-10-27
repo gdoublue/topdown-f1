@@ -589,22 +589,11 @@ function buildBoards() {
   return group;
 }
 
-/* ================= 云层（程序化径向渐变精灵） ================= */
+/* ================= 云层（白色扁球体云团，纯几何 + 受雾，避免透明精灵的边缘发黑） ================= */
 function buildClouds() {
-  const cv = document.createElement("canvas");
-  cv.width = 128; cv.height = 64;
-  const c = cv.getContext("2d");
-  for (const [x, y, r] of [[40, 38, 26], [66, 32, 30], [92, 40, 24], [54, 44, 22], [80, 46, 20]]) {
-    const g = c.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, "rgba(255,255,255,0.92)");
-    g.addColorStop(0.6, "rgba(255,255,255,0.5)");
-    g.addColorStop(1, "rgba(255,255,255,0)");
-    c.fillStyle = g;
-    c.fillRect(0, 0, 128, 64);
-  }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
   const group = new THREE.Group();
+  const mat = new THREE.MeshLambertMaterial({ color: 0xf4f7fa });
+  const geo = new THREE.SphereGeometry(1, 12, 8);
   let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
   for (const p of pts) {
     minx = Math.min(minx, p.x); maxx = Math.max(maxx, p.x);
@@ -613,17 +602,19 @@ function buildClouds() {
   const cx = (minx + maxx) / 2, cz = (miny + maxy) / 2;
   const span = Math.max(maxx - minx, maxy - miny) + 900;
   for (let k = 0; k < 9; k++) {
-    const mat = new THREE.SpriteMaterial({
-      map: tex, transparent: true, depthWrite: false, fog: false, opacity: 0.9,
-    });
-    const sp = new THREE.Sprite(mat);
-    sp.position.set(
-      cx + (hash01(k, 1) - 0.5) * span,
-      300 + hash01(k, 2) * 190,
-      cz + (hash01(k, 3) - 0.5) * span
-    );
-    sp.scale.set(180 + hash01(k, 4) * 160, 60 + hash01(k, 5) * 55, 1);
-    group.add(sp);
+    const px = cx + (hash01(k, 1) - 0.5) * span;
+    const pz = cz + (hash01(k, 3) - 0.5) * span;
+    const py = 290 + hash01(k, 2) * 170;
+    const cluster = new THREE.Group();
+    const blobs = [[0, 0, 0, 55 + hash01(k, 4) * 35], [-0.8, -0.15, 0.2, 38], [0.75, -0.1, -0.25, 42], [0.1, 0.3, -0.4, 30]];
+    for (const [ox, oy, oz, s] of blobs) {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(ox * s, oy * s, oz * s);
+      m.scale.set(s, s * 0.42, s * 0.72);
+      cluster.add(m);
+    }
+    cluster.position.set(px, py, pz);
+    group.add(cluster);
   }
   return group;
 }

@@ -75,9 +75,9 @@ function updateSkids() {
     // 两端各延长 0.85×半宽：相邻段链式相接处无缝（2D 版同样靠端部延长）
     const ex = len > 1e-4 ? (dx / len) * hw * 0.85 : 0;
     const ez = len > 1e-4 ? (dz / len) * hw * 0.85 : 0;
-    // 高度必须低于车底壳（~0.06 起步）：印子贴路面，车身从上方自然遮住，
-    // 高于车底会反过来画在车身上（"穿模"）
-    const y = 0.062 + (skidId(s) % 4) * 0.0009;
+    // 高度仅比沥青路面（0.05）高 8mm：车体所有部件底面都抬到 0.09 以上，
+    // 印子在几何上不可能与车身相交；轮胎落地由深度测试自然遮挡
+    const y = 0.058 + (skidId(s) % 4) * 0.0009;
     const inten = s.intensity || 0.5;
     const alpha = Math.min(0.92, (0.3 + inten * 0.72)) * Math.max(0, s.life);
     const b = i * 12, ba = i * 4;
