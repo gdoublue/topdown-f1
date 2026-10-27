@@ -1,11 +1,11 @@
 // 主入口：组装各模块并驱动主循环（支持多赛道切换与多赛车不同算法同场竞速）
+// 【3D 分支】画面层换成 three.js 程序化渲染（render3d/），物理/AI/比赛/联网与 main 分支完全一致
 import { TOTAL_LAPS, effectiveLaps, setRaceLaps, RACE_LAPS } from "./config.js";
 import { TRACKS, getTrack } from "./track/tracks.js";
-import { WORLD, pts, N, switchTrack, currentTrack, currentTrackId } from "./track/geometry.js";
-import { buildTrackCanvas } from "./track/render.js";
+import { pts, N, switchTrack, currentTrack, currentTrackId } from "./track/geometry.js";
 import { createCar, stepCar, resolveCarCollisions, finishedCarInput } from "./car/physics.js";
-import { drawCar, getRandomPartLivery } from "./car/render.js";
-import { resetCamera, updateCamera, applyCamera, setZoomScale, cam } from "./game/camera.js";
+import { getRandomPartLivery } from "./car/render.js";
+import { resetCamera, updateCamera, setZoomScale, cam } from "./game/camera.js";
 import { initInput, input, NO_INPUT } from "./game/input.js";
 import * as fx from "./game/effects.js";
 import { race, resetRace, tickCountdown, initCarRaceState, updateCarLap, simClock, advanceSimClock, resetSimClock } from "./game/race.js";
@@ -35,9 +35,12 @@ import { getFingerprint } from "./net/fingerprint.js";
 import { startNetRace, stopNetRace, updateNetRace, bindNetRaceHandlers, netrace, forfeitNetRace, setNetAutopilot } from "./net/netrace.js";
 import { driverLabel, driverCode, carModelLabel, carNumberLabel } from "./ui/labels.js";
 import {
-  onQualityChange, setQualityMode, getQualityMode, getTrackSS,
+  onQualityChange, setQualityMode, getQualityMode,
   computeBackingSize, noteViewport, sampleFrameQuality, getQualityStats, getQualityInfo
 } from "./game/renderQuality.js";
+import {
+  init3D, resize3D, applyQuality3D, render3D, cycleCamera3D, getCamera3DLabel
+} from "./render3d/renderer.js";
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
@@ -57,11 +60,8 @@ const offTrackWarnEl = document.getElementById("offTrackWarn");
 const fpsValueEl = document.getElementById("fpsValue");
 let fpsFrames = 0;
 let fpsWindowStart = 0;
-// alpha:false → 不透明画布，避免移动端内核（夸克/UC 等）逐帧透明合成的闪烁
-const ctx = canvas.getContext("2d", { alpha: false });
-// 赛道贴图的超采样倍率随画质档位变化（高·自动=4 / 中=3 / 低·自动低特效=2）
-let currentTrackSS = getTrackSS();
-let trackCanvas = buildTrackCanvas(currentTrackSS);
+// 【3D】画布交给 WebGL；分辨率仍由 renderQuality 动态机制控制（后备像素 ≠ CSS 尺寸）
+init3D(canvas);
 let qualityInfoEl = null;
 
 initMinimap();
@@ -261,8 +261,7 @@ function reset() {
   winner = null;
 }
 
-// 画布后备分辨率由画质档位/动态缩放决定，CSS 尺寸始终铺满窗口：
-// 降的是渲染像素，UI 仍是原生分辨率。镜头按 canvas.height 推导，世界视野不变。
+// 【3D】后备分辨率由画质档位/动态缩放决定（renderQuality 复用），CSS 尺寸始终铺满窗口
 function updateQualityInfo() {
   if (!qualityInfoEl) qualityInfoEl = document.getElementById("qualityInfo");
   if (qualityInfoEl) qualityInfoEl.textContent = getQualityInfo();
@@ -271,33 +270,14 @@ function updateQualityInfo() {
 function resize() {
   const r = canvas.getBoundingClientRect();
   noteViewport(r.width, r.height);
-  // 视口变化可能让自动模式退出低特效，赛道贴图档位随之恢复
-  applyTrackQuality();
   const { w, h } = computeBackingSize(r.width, r.height, window.devicePixelRatio || 1);
-  // 尺寸没变就不重置画布：移动端地址栏收起/展开会触发 resize，
-  // 无条件重设 canvas.width 会清屏，造成"一闪一闪"
-  if (canvas.width === w && canvas.height === h) {
-    updateQualityInfo();
-    return;
-  }
-  canvas.width = w;
-  canvas.height = h;
-  // alpha:false 画布不透底：开局菜单阶段先铺一层深色底（贴近页面渐变背景）
-  ctx.fillStyle = "#0b111c";
-  ctx.fillRect(0, 0, w, h);
+  resize3D(w, h);
   updateQualityInfo();
 }
 window.addEventListener("resize", resize);
 
-function applyTrackQuality() {
-  const ss = getTrackSS();
-  if (ss === currentTrackSS) return;
-  currentTrackSS = ss;
-  trackCanvas = buildTrackCanvas(ss);
-}
-
 onQualityChange(() => {
-  applyTrackQuality();
+  applyQuality3D(getQualityMode());
   resize();
   updateQualityInfo();
 });
@@ -333,7 +313,7 @@ function updateTrackUI() {
   }
 
   const label = mode === "onlinerace" ? (netSpectating ? "观战 · " : "在线对战 · ")
-    : mode === "spectate" ? "AI 锦标赛 · " : mode === "vs" ? "对战 AI · " : "俯视 F1 · ";
+    : mode === "spectate" ? "AI 锦标赛 · " : mode === "vs" ? "对战 AI · " : "F1 3D · ";
   document.title = label + currentTrack.name;
 }
 
@@ -463,15 +443,14 @@ export function cancelTrackModal() {
   closeTrackModal();
 }
 
-// 赛道贴图与小地图都是按"当前赛道上下文"预渲染的位图快照：
+// 赛道贴图与小地图都是按"当前赛道上下文"预渲染的快照：
 // 任何改变当前赛道的路径（选赛道 / 在线开赛 / 练习房）都必须调这里，
 // 否则物理已经跑到新赛道，画面还停在上一张，车会在旧赛道上"越野"。
-// 贴图是一张超大离屏画布（SS=4 时上百 MB），赛道没变就不重建。
+// 【3D】赛道网格由 renderer.js 里的 onTrackChange 监听自动重建，这里只需刷新小地图。
 let visualTrackId = currentTrackId;
 function rebuildTrackVisuals() {
   if (visualTrackId === currentTrackId) return;
   visualTrackId = currentTrackId;
-  trackCanvas = buildTrackCanvas(currentTrackSS);
   pendingTrackId = currentTrackId;
   initMinimap();
 }
@@ -611,6 +590,13 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "-" && mode !== "onlinerace") {
     cycleSpeed(-1);
+    return;
+  }
+  // V：切换 3D 机位（追尾 / 转播远景 / 俯瞰）
+  if ((e.key === "v" || e.key === "V") && !isModalOpen) {
+    e.preventDefault();
+    const label = cycleCamera3D();
+    showMsg("📷 " + label, "再按 V 切换机位", 1100);
     return;
   }
   // 换视角：对战/观战/在线都支持（在线换走会自动开自动驾驶，见 switchFocusCar）
@@ -804,30 +790,8 @@ function update(dt, finalStep = true, simNowMs = 0) {
   }
 }
 
-// 远端车失联分档的绘制包装：正常车直接画；弱网车套一层透明度；彻底失联的车跳过
-function drawCarWithGhostAlpha(car) {
-  if (!car || car.retired || car.ghostHidden) return;
-  const a = car.ghostAlpha;
-  if (a == null || a >= 1) { drawCar(ctx, car); return; }
-  const prev = ctx.globalAlpha;
-  ctx.globalAlpha = prev * Math.max(0, a);
-  drawCar(ctx, car);
-  ctx.globalAlpha = prev;
-}
-
-// 8 车分散在赛道上时，大部分车都在镜头外；车体绘制有几十条路径和渐变，
-// 屏幕外的不画，和屏幕内完全等价（小地图仍显示全部车）。
-const CAR_CULL_MARGIN = 12;
-function isCarVisible(car) {
-  if (!car) return false;
-  const v = cam.view;
-  return car.x > v.x - CAR_CULL_MARGIN && car.x < v.x + v.w + CAR_CULL_MARGIN &&
-         car.y > v.y - CAR_CULL_MARGIN && car.y < v.y + v.h + CAR_CULL_MARGIN;
-}
-
 // 分段耗时统计（__gp.perf.sections）：指数平滑的每帧平均毫秒。
-// 目的：不用猜"到底是什么在吃帧预算"——把绘制拆成 赛道/特效/车辆/小地图，
-// 再加网络物理、HUD 两段，一局就能看出瓶颈在哪。
+// 【3D】track/effects/cars 三段并入 render3D 单次调用，不再单独计时（恒为 0）。
 const secAvg = { track: 0, effects: 0, cars: 0, minimap: 0, update: 0, hud: 0 };
 function markSection(key, ms) {
   // alpha 0.08 ≈ 最近 12 帧的滑动平均，既稳又能跟上场景变化
@@ -835,48 +799,13 @@ function markSection(key, ms) {
 }
 
 function draw() {
-  const activeCar = cars[focusIndex] || cars[0];
-  const tDraw0 = performance.now();
-  applyCamera(ctx, canvas, activeCar.shake);
-  ctx.drawImage(trackCanvas, 0, 0, WORLD.w, WORLD.h);
-  const tTrack = performance.now();
-  markSection("track", tTrack - tDraw0);
-  fx.drawEffects(ctx, cam.view);
-  const tFx = performance.now();
-  markSection("effects", tFx - tTrack);
+  // 【3D】车辆网格同步 + 追尾镜头 + 刹车痕/尘土 + 场景渲染，一次调用完成
+  render3D(cars, focusIndex, lastVisualDt > 0 ? lastVisualDt : 1 / 60, {
+    showAILine,
+    aiTarget: aiInputs[focusIndex],
+  });
 
-  // 绘制当前焦点赛车的前瞻目标点与引线（视图面板可随时关闭）
-  if (showAILine && mode !== "solo" && aiInputs[focusIndex]?.targetX) {
-    const inp = aiInputs[focusIndex];
-    ctx.save();
-    ctx.beginPath();
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = activeCar.color ? `${activeCar.color}66` : "rgba(0, 255, 180, 0.35)";
-    ctx.lineWidth = 1.2;
-    ctx.moveTo(activeCar.x, activeCar.y);
-    ctx.lineTo(inp.targetX, inp.targetY);
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(inp.targetX, inp.targetY, 2.2, 0, Math.PI * 2);
-    ctx.fillStyle = activeCar.color || "#00ffb4";
-    ctx.shadowColor = activeCar.color || "#00ffb4";
-    ctx.shadowBlur = 6;
-    ctx.fill();
-    ctx.restore();
-  }
-
-  // 绘制所有赛车（从后向前绘制，主焦点赛车最后绘制避免被遮挡）
-  // retired = 已退出房间的车友：直接消失，不在赛道上留下幽灵车
-  // ghostHidden / ghostAlpha = 在线对战的失联分档：半透明 → 彻底隐藏
-  const tCars0 = performance.now();
-  for (let i = 0; i < cars.length; i++) {
-    if (i !== focusIndex && isCarVisible(cars[i])) drawCarWithGhostAlpha(cars[i]);
-  }
-  if (isCarVisible(cars[focusIndex])) drawCarWithGhostAlpha(cars[focusIndex]);
-  markSection("cars", performance.now() - tCars0);
-
-  // 小地图
+  // 小地图仍是 2D DOM 画布（左上角仪表）
   const tMini0 = performance.now();
   drawMinimap(cars, focusIndex);
   markSection("minimap", performance.now() - tMini0);
@@ -1242,11 +1171,11 @@ function updateHelpText() {
   } else if (mode === "solo" && onlinePractice) {
     help.innerHTML = "在线练习 · J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 换赛道 · R 重开 · Esc 退出到练习房" + auto;
   } else if (mode === "spectate") {
-    help.innerHTML = "AI 锦标赛 · 点击顶部或按 T 选赛道 · 1-7 换视角 · + / - 倍速快进 · R 重开 · Esc 菜单";
+    help.innerHTML = "AI 锦标赛 · 点击顶部或按 T 选赛道 · 1-7 换视角 · V 切换镜头 · + / - 倍速快进 · R 重开 · Esc 菜单";
   } else if (mode === "vs") {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · V 切换镜头 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
   } else {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · V 切换镜头 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
   }
 }
 
@@ -1979,6 +1908,7 @@ function frame(ts) {
   markSection("hud", performance.now() - tHud0);
 }
 
+applyQuality3D(getQualityMode());
 resize();
 initInput(reset);
 audio.setupAudio();
@@ -2047,6 +1977,7 @@ window.__gp = {
   },
   race, input, aiInputs, pts,
   get mode() { return mode; },
+  get camera3d() { return getCamera3DLabel(); },
   get ai() { return mode !== "solo"; },
   get started() { return started; },
   get speedMult() { return speedMult; },
