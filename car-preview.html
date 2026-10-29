@@ -150,6 +150,9 @@ renderer.setAnimationLoop((tms) => {
   if (spin) mesh.rotation.y += 0.008;
   if (steerDemo) {
     demoCar.steer = Math.sin(tms / 900) * 0.55;
+    // 给悬挂动画喂 G 值：越野卡车的车身侧倾/俯仰与四角弹簧压缩靠它们驱动
+    demoCar.gLat = Math.abs(Math.sin(tms / 900)) * 1.7;
+    demoCar.accel = Math.sin(tms / 700) * 8;
     syncCarMesh(mesh, demoCar, 1 / 60);
   }
   controls.update();

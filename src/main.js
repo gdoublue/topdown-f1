@@ -39,7 +39,7 @@ import {
   computeBackingSize, noteViewport, sampleFrameQuality, getQualityStats, getQualityInfo
 } from "./game/renderQuality.js";
 import {
-  init3D, resize3D, applyQuality3D, render3D, cycleCamera3D, getCamera3DLabel
+  init3D, resize3D, applyQuality3D, render3D, cycleCamera3D, getCamera3DLabel, setTopPitch3D
 } from "./render3d/renderer.js";
 
 function escapeHtml(s) {
@@ -596,7 +596,9 @@ window.addEventListener("keydown", (e) => {
   if ((e.key === "v" || e.key === "V") && !isModalOpen) {
     e.preventDefault();
     const label = cycleCamera3D();
-    showMsg("📷 " + label, "再按 V 切换机位", 1100);
+    showMsg("📷 " + label,
+      label.includes("俯瞰") ? "VIEW 面板可调俯视角度（40°~90°，最高垂直向下）" : "再按 V 切换机位",
+      label.includes("俯瞰") ? 1600 : 1100);
     return;
   }
   // 换视角：对战/观战/在线都支持（在线换走会自动开自动驾驶，见 switchFocusCar）
@@ -1694,6 +1696,32 @@ function initViewTools() {
   if (range) {
     range.addEventListener("input", applyZoom);
     applyZoom();
+  }
+
+  // 俯瞰机位俯视角度：40°（高空斜视）~ 90°（垂直向下），只作用于 V 键切到的俯瞰视角
+  const pitchRange = document.getElementById("pitchRange");
+  const pitchVal = document.getElementById("pitchVal");
+  const applyPitch = () => {
+    const p = setTopPitch3D(Number(pitchRange.value) || 90);
+    if (pitchVal) pitchVal.textContent = "俯视角 " + Math.round(p) + "°";
+  };
+  if (pitchRange) {
+    pitchRange.addEventListener("input", applyPitch);
+    applyPitch();
+  }
+  const pitchReset = document.getElementById("pitchReset");
+  if (pitchReset) {
+    pitchReset.addEventListener("click", () => {
+      if (pitchRange) pitchRange.value = "90";
+      applyPitch();
+      pitchReset.textContent = "已垂直";
+      pitchReset.classList.add("is-done");
+      clearTimeout(pitchReset._doneTimer);
+      pitchReset._doneTimer = setTimeout(() => {
+        pitchReset.textContent = "垂直俯视";
+        pitchReset.classList.remove("is-done");
+      }, 900);
+    });
   }
 
   const resetBtn = document.getElementById("zoomReset");

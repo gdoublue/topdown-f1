@@ -8,9 +8,37 @@ import { terrainAt } from "../track/geometry.js";
 export const CAMERA_MODES = [
   { id: "chase", label: "追尾视角", dist: 13.5, height: 5.4, look: 11, fov: 60 },
   { id: "far",   label: "转播远景", dist: 25,   height: 11.5, look: 7,  fov: 54 },
-  { id: "top",   label: "俯瞰视角", dist: -3,   height: 148,  look: 6,  fov: 50 },
+  { id: "top",   label: "俯瞰视角", dist: 0,    height: 148,  look: 2,  fov: 50 },
 ];
 let modeIdx = 0;
+
+// 俯瞰机位俯视角度（40°~90°，90° = 几乎垂直向下）：玩家在 VIEW 面板自选。
+// 固定轨道半径，按角度解算高度与后撤距离 —— 拖到 90° 就是垂直俯视，40° 接近高空追尾。
+const TOP_ORBIT_DIST = 150;
+const TOP_PITCH_MIN = 40;
+const TOP_PITCH_MAX = 90;
+let topPitchDeg = TOP_PITCH_MAX;
+
+export function setTopPitchDeg(v) {
+  const n = Number(v);
+  topPitchDeg = clamp(Number.isFinite(n) ? n : TOP_PITCH_MAX, TOP_PITCH_MIN, TOP_PITCH_MAX);
+  return topPitchDeg;
+}
+
+export function getTopPitchDeg() {
+  return topPitchDeg;
+}
+
+// 俯瞰机位按当前俯视角度换算实际机位参数；其余机位原样返回
+function modeSpec(m) {
+  if (m.id !== "top") return m;
+  const p = (topPitchDeg * Math.PI) / 180;
+  return {
+    ...m,
+    dist: TOP_ORBIT_DIST * Math.cos(p),          // 水平后撤距离：越接近垂直越小
+    height: TOP_ORBIT_DIST * Math.sin(p),        // 高度：90° 时等于轨道半径
+  };
+}
 
 const _pos = new THREE.Vector3();
 const _look = new THREE.Vector3();
@@ -41,7 +69,7 @@ export function getCamera3DLabel() {
 // 焦点车切换 / 重开时由外部调用：镜头立即吸附，不做跨场平滑
 export function snapCamera3D(car) {
   const ry = car.roadY || 0;
-  const m = CAMERA_MODES[modeIdx];
+  const m = modeSpec(CAMERA_MODES[modeIdx]);
   const floor = terrainAt ? terrainAt(cam.x, cam.y) + 1.2 : -Infinity;
   _pos.set(cam.x, Math.max(ry + m.height, floor), cam.y);
   _look.set(car.x, ry + 1.1, car.y);
@@ -51,7 +79,7 @@ export function snapCamera3D(car) {
 
 export function update3DCamera(car, dt) {
   if (!camera3D) return;
-  const m = CAMERA_MODES[modeIdx];
+  const m = modeSpec(CAMERA_MODES[modeIdx]);
   const zoom = clamp(cam.zoomScale || 1, 0.4, 3);
   const s = 1 / Math.pow(zoom, 0.75);   // 手动视野缩放：越大越近
 

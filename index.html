@@ -47,6 +47,14 @@
         <span class="vt-name">视野缩放</span>
         <input id="zoomRange" type="range" min="0.1" max="3.5" step="0.05" value="1" title="手动调节镜头远近（越大越近）" />
       </div>
+      <div class="vt-row">
+        <span class="vt-name">俯瞰角度</span>
+        <input id="pitchRange" type="range" min="40" max="90" step="1" value="90" title="3D 俯瞰机位（V 键切换）的俯视角度：90° = 垂直向下，40° = 高空斜视" />
+      </div>
+      <div class="vt-row vt-val">
+        <span id="pitchVal">俯视角 90°</span>
+        <button id="pitchReset" class="vt-mini" title="一键回到垂直俯视（90°）">垂直俯视</button>
+      </div>
       <div class="vt-row" id="speedRow">
         <span class="vt-name">比赛倍速</span>
         <div id="speedChips" class="speed-chips" title="快进比赛（在线对战不受影响）· 快捷键 + / -"></div>

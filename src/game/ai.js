@@ -123,11 +123,35 @@ export function buildAIData(ctx) {
   const cLineY = new Float32Array(cN);
   const cLineYaw = new Float32Array(cN);
   const corridor = new Float32Array(cN);
+  const corridorIn = new Float32Array(cN);   // 向弯心一侧的最大偏移（受局部半径限制）
+  const insideSign = new Int8Array(cN);
+
+  // 中心线原始（3 点、未平滑）曲率：平滑曲率会掩盖发夹弯的真实尖点，
+  // 走线向弯心偏移一旦接近当地半径，曲线收缩会把相邻点折到曲率圆心上
+  // （相邻点重合 → 曲率爆炸 → 弯速≈0，车停在弯前，像撞到一堵透明墙）。
+  const rawK = new Float32Array(cN);
+  for (let i = 0; i < cN; i++) {
+    const a = (i - 1 + cN) % cN, b = (i + 1) % cN;
+    const v1x = cPts[i].x - cPts[a].x, v1y = cPts[i].y - cPts[a].y;
+    const v2x = cPts[b].x - cPts[i].x, v2y = cPts[b].y - cPts[i].y;
+    const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+    rawK[i] = Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y)
+      / ((l1 + l2) * 0.5 || 1);
+  }
 
   for (let i = 0; i < cN; i++) {
     cLineX[i] = cPts[i].x;
     cLineY[i] = cPts[i].y;
     corridor[i] = Math.max(0, cHw[i] - 3.4);
+    // 局部半径取邻域最小值（±2 点 ≈ ±7m），单点噪声不能放过尖点
+    let minR = Infinity;
+    for (let d = -2; d <= 2; d++) {
+      const k = Math.abs(rawK[(i + d + cN) % cN]);
+      const r = k > 1e-5 ? 1 / k : 1e6;
+      if (r < minR) minR = r;
+    }
+    corridorIn[i] = Math.max(0, Math.min(corridor[i], minR * 0.6));
+    insideSign[i] = Math.sign(rawK[i]) || 0;
   }
 
   for (let it = 0; it < 900; it++) {
@@ -135,8 +159,10 @@ export function buildAIData(ctx) {
       const a = (i - 1 + cN) % cN, b = (i + 1) % cN;
       const mx = (cLineX[a] + cLineX[b]) * 0.5;
       const my = (cLineY[a] + cLineY[b]) * 0.5;
-      const off = clamp((mx - cPts[i].x) * cNor[i].x + (my - cPts[i].y) * cNor[i].y,
-        -corridor[i], corridor[i]);
+      let off = (mx - cPts[i].x) * cNor[i].x + (my - cPts[i].y) * cNor[i].y;
+      if (insideSign[i] > 0) off = clamp(off, -corridor[i], corridorIn[i]);
+      else if (insideSign[i] < 0) off = clamp(off, -corridorIn[i], corridor[i]);
+      else off = clamp(off, -corridor[i], corridor[i]);
       cLineX[i] = cPts[i].x + cNor[i].x * off;
       cLineY[i] = cPts[i].y + cNor[i].y * off;
     }

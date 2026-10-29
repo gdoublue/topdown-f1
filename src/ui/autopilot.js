@@ -4,7 +4,7 @@
 // 通过 out.up / out.brake / out.steer 输出控制量。默认内容是内置 superDriver 的源码
 // （直接 Function.prototype.toString 取真实实现，永远和游戏内算法保持一致）。
 import {
-  N, pts, nor, hw, curvS, onTrackChange, indexAtDistance,
+  N, pts, nor, hw, curvS, grade, onTrackChange, indexAtDistance,
   currentTrackId, LAP_LENGTH, HW, isLinear, kerbFlag
 } from "../track/geometry.js";
 import { getTrack } from "../track/tracks.js";
@@ -64,7 +64,7 @@ const TRACK_API = {
 // 注入到玩家代码里的可用标识符（切换赛道后已重建的数组 / 表会被重新注入）
 // 导出给无头台架 scripts/autopilot-bench.mjs：保证"游戏内能用的东西"和"台架里能用的东西"只有一份定义
 export const API_PARAMS = [
-  "N", "pts", "nor", "hw", "curvS", "lineX", "lineY", "DS", "PHYS",
+  "N", "pts", "nor", "hw", "curvS", "grade", "lineX", "lineY", "DS", "PHYS",
   "clamp", "wrapAngle", "getSuperCornerCap", "evaluateTrafficAndOvertake",
   "CAR_LENGTH", "CAR_WIDTH", "getCarDistance", "superDriver", "track",
   "getApexReleaseCap"
@@ -100,6 +100,7 @@ export function createAutopilotApiValues(copy = true) {
     copy ? nor.map(freezePoint) : nor,
     copy ? hw.slice() : hw,
     copy ? curvS.slice() : curvS,
+    copy ? grade.slice() : grade,
     copy ? lineX.slice() : lineX,
     copy ? lineY.slice() : lineY,
     DS,

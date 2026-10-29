@@ -9,6 +9,7 @@ import {
   hash01, sampleIndices, ribbonGeometry, quadSegmentsGeometry,
   asphaltTexture, grassTexture, checkerTexture, maxAniso, makeGroundSampler
 } from "./shared.js";
+import { layoutTrees } from "./treeLayout.js";
 
 let groundAt = null;   // 每次 buildTrackScene 重建；buildXXX 里取地面高度用
 export function prepareGroundSampler() { groundAt = makeGroundSampler(); return groundAt; }
@@ -165,26 +166,10 @@ export function buildStartLine() {
   return group;
 }
 
-/* ================= 草地（修剪条纹 + 噪点，F1 赛场割草纹） ================= */
+/* ================= 树木（InstancedMesh，严格避开路面） ================= */
 export function buildTrees(opts = {}) {
-  const spots = [];
-  const step = 5;
-  for (let i = 0; i < N; i += step) {
-    for (const side of [1, -1]) {
-      if (hash01(i, side) > 0.62) continue;
-      const off = hw[i] + 16 + hash01(i, side * 3) * 46;
-      const x = pts[i].x + nor[i].x * side * off;
-      const z = pts[i].y + nor[i].y * side * off;
-      let ok = true;
-      for (let j = 0; j < N; j += 6) {
-        const dx = pts[j].x - x, dz = pts[j].y - z;
-        if (dx * dx + dz * dz < 144) { ok = false; break; }   // 距赛道 <12m 放弃
-      }
-      if (ok) spots.push([x, z, hash01(i, side * 7)]);
-    }
-  }
-  // 密度 >1 时从候选池种子复用并加抖动（±5m，仍在距赛道 ≥12m 安全区内）
-  const count = Math.min(Math.round(spots.length * (opts.treeDensity ?? 1)), opts.treeCap ?? 420);
+  const { spots } = layoutTrees(opts);
+  const count = spots.length;
   const foliage = new THREE.InstancedMesh(
     new THREE.ConeGeometry(1, 1, 7),
     new THREE.MeshLambertMaterial({ color: 0xffffff }),
@@ -199,11 +184,7 @@ export function buildTrees(opts = {}) {
   const up = new THREE.Vector3(0, 1, 0);
   const greens = [new THREE.Color(0x2f6b33), new THREE.Color(0x3f7d3a), new THREE.Color(0x28582e)];
   for (let k = 0; k < count; k++) {
-    let [x, z, r] = spots[k % spots.length];
-    if (k >= spots.length) {
-      x += (hash01(k, 31) - 0.5) * 10;
-      z += (hash01(k, 47) - 0.5) * 10;
-    }
+    const [x, z, r] = spots[k];
     const gY = groundAt ? groundAt(x, z) : 0;   // 贴合起伏地形（路堤过渡区）
     const h = 4.5 + r * 4.5, w = 1.7 + r * 1.3, trunkH = h * 0.22;
     q.setFromAxisAngle(up, r * Math.PI * 2);

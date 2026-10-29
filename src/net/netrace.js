@@ -558,7 +558,8 @@ function onSnapshot(msg) {
  *     锁胎判定按"本车制动能力的 55%"换算（F1 ≈3.5g、街车 ≈1g），开闸点再放宽 12% 抵消平滑；
  *     inBrake（30Hz 快照，且【不】随播放缓冲延后）只当"提前开闸"用，不作为必要条件，
  *     否则闸门会比车身早关 80ms，把印子的尾巴削掉一截。
- *   · 横向：阈值抬到本车侧向极限的 90%，并要求连续 2 帧成立才起印，消掉单帧噪声的假印。
+ *   · 横向：阈值抬到本车侧向极限的 95%，且必须弯中带刹或压路肩才起印（纯转向过弯不留印），
+ *     并要求连续 2 帧成立，消掉单帧噪声的假印。
  * 落印点用与 physics.js 完全相同的轴距/轮距/阿克曼半径差几何，
  * 因此四条痕迹与"画出来的车轮"严格重合（车和印都由同一个位姿得出，视觉不会错位）。
  */
@@ -609,6 +610,9 @@ function emitRemoteSkid(e, dt, fx) {
   sk.ang = c.angle;
   sk.accel += (accelRaw - sk.accel) * (1 - Math.exp(-dt / SKID_ACCEL_TAU));
   sk.glat += (Math.abs(c.speed * yawRate) / 9.81 - sk.glat) * (1 - Math.exp(-dt / SKID_GLAT_TAU));
+  // 供 3D 车模悬挂动画使用（远端车没有本地物理，用位姿反推的 G 值代替）
+  c.accel = sk.accel;
+  c.gLat = sk.glat;
 
   let target = 0, frontBias = 1.0, rearBias = 1.0;
   if (spd > 3.5) {
@@ -616,7 +620,7 @@ function emitRemoteSkid(e, dt, fx) {
     const brakeCap = PHYS.brake * (c.perf?.brakeMult ?? 1);
     const lockDecel = brakeCap * 0.55;
     const latLimitG = (c.perf?.latGrip ?? PHYS.latGrip) / 9.81;
-    const scrubG = latLimitG * 0.9;
+    const scrubG = latLimitG * 0.95;
     // 1. 制动锁胎：差分平滑会削低峰值，开闸点放宽 12%（有 inBrake 时再稍早）
     const gate = lockDecel * (c.inBrake > 0 ? 0.88 : 1.0);
     if (sk.accel < -gate) {
@@ -625,9 +629,12 @@ function emitRemoteSkid(e, dt, fx) {
       frontBias = 1.0; rearBias = 0.86;      // 重心前移：前轮印更深（与本地一致）
     }
     if (target === 0 && sk.glat > scrubG) {
-      // 2. 极限过弯侧滑：后轴先失稳，后轮印更深
-      target = clamp((sk.glat - scrubG) / Math.max(0.05, latLimitG * 0.15), 0.12, 0.55);
-      frontBias = 0.86; rearBias = 1.0;
+      // 2. 极限侧滑搓胎：与本地同源 —— 转向之外还要有额外负载（弯中带刹 / 压路肩），
+      //    纯转向过弯不留印，避免远端车每个弯都拖四条深印
+      if (c.inBrake > 0 || remoteSurface(c) === 1) {
+        target = clamp((sk.glat - scrubG) / Math.max(0.05, latLimitG * 0.15), 0.10, 0.32);
+        frontBias = 0.86; rearBias = 1.0;
+      }
     }
   }
 

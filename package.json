@@ -12,6 +12,7 @@
     "algo:bench:sample": "node scripts/autopilot-bench.mjs --algo=userscripts/自动驾驶脚本.js --car=all",
     "algo:doctor": "node scripts/algo-doctor.mjs",
     "algo:check": "node scripts/algo-check.mjs",
+    "track:debug": "node scripts/track-debug.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },

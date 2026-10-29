@@ -622,11 +622,12 @@ function truckPartGeometry() {
   for (const z of [-0.895, 0.895]) push("glass", new THREE.BoxGeometry(0.95, 0.30, 0.04), 0.92, 1.24, z);
   push("glass", new THREE.BoxGeometry(0.04, 0.30, 1.46), 0.13, 1.24, 0, 0, 0, -0.22);
 
-  /* ---- 进气格栅 + 大灯 + 尾灯 ---- */
+  /* ---- 进气格栅 + 大灯 + 尾灯 ----
+     大灯必须明显突出机盖前脸：原先只露出 4.5cm，追尾/俯瞰机位几乎看不见。 */
   box("dark", 0.06, 0.30, 1.30, 2.44, 0.96, 0);
   for (const z of [-0.62, 0.62]) {
-    push("dark", new THREE.CylinderGeometry(0.165, 0.165, 0.05, 20), 2.45, 1.02, z, 0, 0, Math.PI / 2);
-    push("lamp", new THREE.CylinderGeometry(0.14, 0.14, 0.07, 20), 2.48, 1.02, z, 0, 0, Math.PI / 2);
+    push("dark", new THREE.CylinderGeometry(0.175, 0.175, 0.08, 20), 2.49, 1.02, z, 0, 0, Math.PI / 2);
+    push("lamp", new THREE.CylinderGeometry(0.15, 0.15, 0.10, 20), 2.545, 1.02, z, 0, 0, Math.PI / 2);
     box("tail", 0.05, 0.16, 0.26, -2.34, 0.96, z * 1.15);
   }
 
@@ -751,7 +752,7 @@ function createTruckMesh(car) {
   });
   glass.userData.baseAlpha = 0.5;                 // 幽灵淡出时在此基础上再乘透明度
   const lamp = new THREE.MeshStandardMaterial({
-    color: 0xfff6dc, emissive: 0xffeab4, emissiveIntensity: 1.2, metalness: 0.1, roughness: 0.2,
+    color: 0xfff6dc, emissive: 0xffeab4, emissiveIntensity: 2.0, metalness: 0.1, roughness: 0.15,
   });
   const tailMat = new THREE.MeshStandardMaterial({ color: 0x5a1010, emissive: 0x000000, roughness: 0.4 });
   const springMat = new THREE.MeshStandardMaterial({ color: 0xc4ccd4, metalness: 0.9, roughness: 0.25 });
@@ -760,10 +761,14 @@ function createTruckMesh(car) {
 
   const geo = truckPartGeometry();
   const root = new THREE.Group();
+  // 车身单独一层：过弯侧倾 / 加减速俯仰只作用于车身（车轮始终贴地），
+  // 模拟参考模拟器里大行程悬挂下车身相对车轮的摇摆
+  const body = new THREE.Group();
+  root.add(body);
   const bodyMesh = (g, mat) => {
     const m = new THREE.Mesh(g, mat);
     m.castShadow = true;
-    root.add(m);
+    body.add(m);
     return m;
   };
   bodyMesh(geo.paint, paint);
@@ -775,13 +780,15 @@ function createTruckMesh(car) {
   bodyMesh(geo.tail, tailMat);
   bodyMesh(geo.rubber, rubberMat);
 
-  // 四角螺旋弹簧（静态长度，保留越野车的外露悬挂特征）
+  // 四角螺旋弹簧：独立于车身层，长度随该角车身升降实时压缩/伸张
+  const coils = [];
   for (const x of [TRUCK.frontX, TRUCK.rearX]) {
     for (const z of [-0.74, 0.74]) {
       const coil = new THREE.Mesh(geo.coil, springMat);
       coil.position.set(x, 0.44, z);
       coil.castShadow = true;
       root.add(coil);
+      coils.push({ mesh: coil, x, z });
     }
   }
 
@@ -812,12 +819,13 @@ function createTruckMesh(car) {
     const plate = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.54), numMat);
     plate.position.set(-1.30, 0.80, sgn * 0.966);
     if (sgn < 0) plate.rotation.y = Math.PI;
-    root.add(plate);
+    body.add(plate);
   }
 
   const allMats = [paint, paint2, dark, steel, glass, lamp, tailMat, springMat, rubberMat, rimMat, numMat];
   root.userData = {
     wheels, brakeMat: tailMat, allMats,
+    body, coils, roll: 0, pitch: 0,     // 悬挂视觉状态（车身侧倾/俯仰）
     spinAngle: 0, lastAlpha: null, wheelR: TRUCK.wheelRR,
   };
   return root;
@@ -953,6 +961,25 @@ export function syncCarMesh(root, car, dt) {
   const braking = !!(car.braking || (car.inBrake > 0 && Math.abs(car.speed) > 0.5));
   u.brakeMat.emissive.setHex(braking ? 0xff2020 : 0x000000);
   root.position.y = (car.roadY || 0) + (car.shake > 0.2 ? Math.random() * car.shake * 0.01 : 0);
+
+  // 越野卡车悬挂：车身相对车轮侧倾（横向 G）、俯仰（加减速）与四角弹簧压缩。
+  // 车轮留在 root 上始终贴地，只有 body 层摇摆 —— 参考模拟器里大行程悬挂的观感。
+  if (u.body) {
+    const latG = Math.max(0, car.gLat || 0);
+    const rollTarget = -Math.sign(car.steer || 0) * Math.min(0.14, latG * 0.07);
+    const pitchTarget = Math.max(-0.055, Math.min(0.045, (car.accel || 0) * 0.004));
+    const k = Math.min(1, dt * 8);              // 软悬挂：约 125ms 跟随
+    u.roll += (rollTarget - u.roll) * k;
+    u.pitch += (pitchTarget - u.pitch) * k;
+    u.body.rotation.x = u.roll;
+    u.body.rotation.z = u.pitch;
+    u.body.position.y = -Math.min(0.035, Math.abs(u.roll) * 0.12 + Math.abs(u.pitch) * 0.12);
+    for (const c of u.coils) {
+      // 该角车身垂直位移（+ = 抬升）→ 弹簧按 0.5m 原长缩放，底端仍压在车桥上
+      const dy = u.pitch * c.x - u.roll * c.z;
+      c.mesh.scale.y = Math.max(0.6, Math.min(1.3, 1 + dy / 0.5));
+    }
+  }
 
   if (ghostA !== u.lastAlpha) {
     root.visible = ghostA > 0.02;

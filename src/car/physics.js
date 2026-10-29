@@ -510,14 +510,16 @@ export function stepCar(car, dt, input, fx) {
   const rl = { x: car.x - fxBase + pxPerp * latRL, y: car.y - fyBase + pyPerp * latRL, h: wY(-HALF_BASE, latRL) };
   const rr = { x: car.x - fxBase + pxPerp * latRR, y: car.y - fyBase + pyPerp * latRR, h: wY(-HALF_BASE, latRR) };
 
-  /* 轮胎印：只有真正越过附着极限才留印 —— 重刹接近锁胎、或极限过弯搓胎。
-     起印/收印都走渐变（起 ~55ms、收 ~120ms），不会一帧之间"啪"地出现/消失；
+  /* 轮胎印：只有真正"搓"到轮胎才留印 —— 重刹接近锁胎、或弯中带刹/压路肩的极限侧滑。
+     不能只按"横向 G 接近极限"起印：本作转向是抓地限幅的街机模型（ω = latAvail / v），
+     高速满舵时 gLat 天然等于 latGrip，那样每个高速弯都会拖四条深印，看起来就像没刹车也在踩刹车。
+     起印/收印仍走渐变（起 ~55ms、收 ~120ms），不会一帧之间"啪"地出现/消失；
      阈值按本车制动与侧向能力换算，F1（6.3g / 4.7g）和街车（≈1.8g / 1.7g）都在各自极限附近起印。 */
   let skidTarget = 0, frontBias = 1.0, rearBias = 1.0;
   if (car.prevWheels && surf !== 2 && spd > 3.5) {
+    const brakeCap = PHYS.brake * (perf.brakeMult ?? 1);
     if (car.braking) {
       // 1. 重刹锁胎：制动力用到本车刹车上限的 55% 以上才开始锁（F1 ≈3.5g）
-      const brakeCap = PHYS.brake * (perf.brakeMult ?? 1);
       const lockDecel = brakeCap * 0.55;
       if (car.accel < -lockDecel) {
         const over = clamp((-car.accel - lockDecel) / Math.max(1, brakeCap - lockDecel), 0, 1);
@@ -525,13 +527,14 @@ export function stepCar(car, dt, input, fx) {
         frontBias = 1.0; rearBias = 0.86;     // 重刹重心前移：前轮先锁死，印更深
       }
     }
-    // 2. 极限过弯搓胎：横向 G 到本车侧向极限的 90% 才起印
-    //    （不锁胎时也可能同时发生：循迹刹车到极限的弯中同样会搓出印子）
-    if (skidTarget === 0 && Math.abs(car.steer) > 0.22) {
+    // 2. 极限侧滑搓胎：横向载荷 ≥ 侧向极限 95%，且转向之外还有额外负载
+    //    （弯中带刹的循迹刹车，或压上路肩）；纯满舵过弯不留印
+    if (skidTarget === 0 && Math.abs(car.steer) > 0.22 && spd > 9) {
       const latLimitG = latGrip / 9.81;
-      const scrubG = latLimitG * 0.9;
-      if (car.gLat > scrubG) {
-        skidTarget = clamp((car.gLat - scrubG) / Math.max(0.05, latLimitG * 0.15), 0.12, 0.55);
+      const scrubG = latLimitG * 0.95;
+      const extraLoad = car.braking || car.accel < -brakeCap * 0.3 || surf === 1;
+      if (extraLoad && car.gLat > scrubG) {
+        skidTarget = clamp((car.gLat - scrubG) / Math.max(0.05, latLimitG * 0.15), 0.10, 0.32);
         frontBias = 0.86; rearBias = 1.0;     // 极限过弯：后轴先失稳，后轮印更深
       }
     }

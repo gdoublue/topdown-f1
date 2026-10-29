@@ -7,7 +7,7 @@ import { race } from "../game/race.js";
 import { buildTrackScene, createSky, setGantryLights, setMaxAnisotropy, updateSkyDome, SKY_HORIZON } from "./track3d.js";
 import { createCarMesh, syncCarMesh, disposeCarMesh } from "./car3d.js";
 import { initEffects3D, updateEffects3D } from "./effects3d.js";
-import { init3DCamera, update3DCamera, cycleCameraMode, getCamera3DLabel, CAMERA_MODES } from "./camera3d.js";
+import { init3DCamera, update3DCamera, cycleCameraMode, getCamera3DLabel, CAMERA_MODES, setTopPitchDeg } from "./camera3d.js";
 
 let renderer = null;
 let scene = null;
@@ -96,7 +96,11 @@ export function cycleCamera3D() {
   return cycleCameraMode();
 }
 
-export { getCamera3DLabel } from "./camera3d.js";
+export function setTopPitch3D(v) {
+  return setTopPitchDeg(v);
+}
+
+export { getCamera3DLabel, getTopPitchDeg } from "./camera3d.js";
 
 /* 主渲染：每帧由 main.js 的 draw() 调用 */
 export function render3D(cars, focusIndex, dt, opts = {}) {
