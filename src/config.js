@@ -40,6 +40,7 @@ export const PHYS = {
   coastDecel: 2.24,                  // 松油门引擎制动 ≈0.23g
   coastDrag: 0.02,
   grassCoastExtra: 11.2,
+  grassSideFriction: 0.55,           // 草地横向静摩擦系数：坡度 tanφ > 0.55 才开始侧滑下坡
   latGrip: 45,                       // 最大侧向抓地 ≈4.6g → 过弯极限速度 = sqrt(latGrip * 半径)
   // 摩擦圆残余系数（平方项下限）：满刹车时仍保留 sqrt(0.6)≈77% 横向抓地。
   // 取 1 是纯圆（满刹完全无法转向，键盘操作过于苛刻），0 是关闭摩擦圆。

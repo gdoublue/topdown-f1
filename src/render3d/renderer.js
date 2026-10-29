@@ -4,7 +4,7 @@ import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { onTrackChange } from "../track/geometry.js";
 import { race } from "../game/race.js";
-import { buildTrackScene, createSky, setGantryLights, setMaxAnisotropy } from "./track3d.js";
+import { buildTrackScene, createSky, setGantryLights, setMaxAnisotropy, updateSkyDome, SKY_HORIZON } from "./track3d.js";
 import { createCarMesh, syncCarMesh, disposeCarMesh } from "./car3d.js";
 import { initEffects3D, updateEffects3D } from "./effects3d.js";
 import { init3DCamera, update3DCamera, cycleCameraMode, getCamera3DLabel, CAMERA_MODES } from "./camera3d.js";
@@ -26,6 +26,8 @@ export function init3D(canvas) {
     powerPreference: "high-performance",
   });
   renderer.setPixelRatio(1);   // 分辨率由 renderQuality 动态机制经 resize3D 控制
+  // 兜底：任何被远平面裁剪的像素（如天穹缝隙）露出的应是雾色而非默认黑色
+  renderer.setClearColor(SKY_HORIZON);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   // 胶片感：ACES 色调映射 + 环境反射（车漆 PBR 需要 scene.environment）
@@ -148,6 +150,8 @@ export function render3D(cars, focusIndex, dt, opts = {}) {
     sun.position.set(focusCar.x + 130, 210, focusCar.y + 75);
     sun.target.position.set(focusCar.x, 0, focusCar.y);
     sun.target.updateMatrixWorld();
+    // 天穹跟随相机 XZ：保证穹壁视距恒定 2400m，永不被远平面裁剪（黑球根治）
+    updateSkyDome(focusCar.x, focusCar.y);
   }
 
   // 发车龙门架灯组与 race.lights 联动（倒计时逐组点亮，灯灭发车）

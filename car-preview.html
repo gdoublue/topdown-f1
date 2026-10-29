@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>car3d 车模预览</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; overflow: hidden; background: #0a0e14; font-family: system-ui, sans-serif; }
+  canvas { display: block; }
+  #bar {
+    position: fixed; left: 12px; top: 12px; z-index: 10;
+    display: flex; gap: 8px; flex-wrap: wrap; max-width: 70vw;
+  }
+  #bar button {
+    background: rgba(15,22,34,.9); color: #cfe3ff; border: 1px solid rgba(140,180,220,.35);
+    border-radius: 6px; padding: 7px 12px; font-size: 13px; cursor: pointer;
+  }
+  #bar button:hover { background: rgba(40,60,90,.95); }
+  #bar button.on { background: #2f6fd0; color: #fff; border-color: #7fb1ff; }
+  #hud {
+    position: fixed; right: 12px; top: 12px; z-index: 10; color: #9fb6d0; font-size: 12px;
+    text-align: right; text-shadow: 0 1px 3px #000;
+  }
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<div id="hud">拖动旋转 · 滚轮缩放<br>car-preview.html</div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { createCarMesh, syncCarMesh } from "/src/render3d/car3d.js";
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1420);
+scene.fog = new THREE.Fog(0x0d1420, 60, 160);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(-7.5, 3.2, 6.5);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.55;
+
+const sun = new THREE.DirectionalLight(0xfff4e0, 2.6);
+sun.position.set(14, 22, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -12; sun.shadow.camera.right = 12;
+sun.shadow.camera.top = 12; sun.shadow.camera.bottom = -12;
+sun.shadow.bias = -0.0004;
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xbdd4ff, 0x2a2620, 0.5));
+
+// 地面：哑光沥青 + 网格参考线
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(60, 48),
+  new THREE.MeshStandardMaterial({ color: 0x3a3d42, roughness: 0.95, metalness: 0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+const grid = new THREE.GridHelper(60, 60, 0x556070, 0x2e343d);
+grid.position.y = 0.002;
+scene.add(grid);
+// 5m 参考刻度线
+for (const s of [-2.8, 2.8]) {
+  const tick = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 5.6),
+    new THREE.MeshBasicMaterial({ color: 0xffd166 }));
+  tick.rotation.x = -Math.PI / 2;
+  tick.position.set(s, 0.004, 0);
+  scene.add(tick);
+}
+
+// URL 参数切换车模：?car=truck 预览越野卡车 TRAIL RIG
+const car = new URLSearchParams(location.search).get("car") === "truck"
+  ? { number: 23, color: "#c2551d", livery: "offroad" }
+  : { number: 7, color: "#ff3b3b", livery: "f1" };
+const mesh = createCarMesh(car);
+mesh.traverse(o => { if (o.isMesh) o.receiveShadow = false; });
+scene.add(mesh);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.5, 0);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI / 2 - 0.02;
+
+const VIEWS = {
+  "rear-3/4(主视角)": { pos: [-8.2, 2.6, -5.6], tgt: [0, 0.75, 0] },
+  "front-3/4": { pos: [7.5, 2.4, 5.8], tgt: [0, 0.5, 0] },
+  "side": { pos: [0.2, 1.5, 9.5], tgt: [0, 0.6, 0] },
+  "top": { pos: [0.01, 11, 0.01], tgt: [0, 0, 0] },
+  "尾翼特写": { pos: [-4.4, 1.5, -2.6], tgt: [-2.5, 0.85, 0] },
+  "前翼特写": { pos: [4.6, 1.1, 2.2], tgt: [2.5, 0.3, 0] },
+  "座舱特写": { pos: [1.8, 1.3, 2.2], tgt: [0.2, 0.62, 0] },
+};
+const bar = document.getElementById("bar");
+let activeBtn = null;
+for (const [name, v] of Object.entries(VIEWS)) {
+  const b = document.createElement("button");
+  b.textContent = name;
+  b.onclick = () => {
+    camera.position.set(...v.pos);
+    controls.target.set(...v.tgt);
+    if (activeBtn) activeBtn.classList.remove("on");
+    b.classList.add("on");
+    activeBtn = b;
+    window.__view = name;
+  };
+  bar.appendChild(b);
+  if (name === "rear-3/4(主视角)") { b.onclick(); }
+}
+// URL ?low=1 用低机位后视角（游戏追尾镜头近似）
+if (location.search.includes("low")) {
+  camera.position.set(-9.2, 1.35, -3.2);
+  controls.target.set(-0.4, 0.7, 0);
+}
+
+let spin = false;
+const spinBtn = document.createElement("button");
+spinBtn.textContent = "转台";
+spinBtn.onclick = () => { spin = !spin; spinBtn.classList.toggle("on", spin); };
+bar.appendChild(spinBtn);
+
+// 转向演示：正弦往复打满方向盘，验证前轮转角增益（±0.55 × 0.85 ≈ ±27°）
+let steerDemo = false;
+const steerBtn = document.createElement("button");
+steerBtn.textContent = "转向演示";
+steerBtn.onclick = () => { steerDemo = !steerDemo; steerBtn.classList.toggle("on", steerDemo); };
+bar.appendChild(steerBtn);
+const demoCar = { number: 7, color: "#ff3b3b", x: 0, y: 0, angle: 0, speed: 30, steer: 0 };
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop((tms) => {
+  if (spin) mesh.rotation.y += 0.008;
+  if (steerDemo) {
+    demoCar.steer = Math.sin(tms / 900) * 0.55;
+    syncCarMesh(mesh, demoCar, 1 / 60);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

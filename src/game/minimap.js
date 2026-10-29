@@ -118,7 +118,7 @@ export function drawMinimap(cars, activeIdx = 0) {
     const isFollow = i === activeIdx;
     const px = miniOffX + c.x * miniScale;
     const py = miniOffY + c.y * miniScale;
-    const color = c.color || (c.livery === "redbull" ? "#00b4d8" : c.livery === "aston" ? "#10b981" : c.livery === "mercedes" ? "#e2e8f0" : c.livery === "su7ultra" ? "#f5c518" : c.livery === "yangwang" ? "#f59e0b" : "#ff3b3b");
+    const color = c.color || (c.livery === "redbull" ? "#00b4d8" : c.livery === "aston" ? "#10b981" : c.livery === "mercedes" ? "#e2e8f0" : c.livery === "su7ultra" ? "#f5c518" : c.livery === "yangwang" ? "#f59e0b" : c.livery === "offroad" ? "#c2551d" : "#ff3b3b");
 
     mctx.fillStyle = color;
     mctx.beginPath();

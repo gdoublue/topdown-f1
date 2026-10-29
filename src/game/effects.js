@@ -8,13 +8,18 @@ export const dust = [];
 const MAX_SKIDS = 9000;
 const MAX_DUST = 200;
 
-export function addSkid(a, b, intensity = 0.5, width = 0.38) {
+// yA / yB：段两端各自的路面高度。3D 里一个印子段可能跨过纵向坡度或横坡，
+// 两端共用同一高度会让远端扎进沥青（斯帕 14% 坡上 1m 段就差 14cm）。
+export function addSkid(a, b, intensity = 0.5, width = 0.38, yA = 0, yB = yA) {
   skids.push({
     a: { x: a.x, y: a.y },
     b: { x: b.x, y: b.y },
     life: 1,
     intensity: Math.max(0.15, Math.min(1.0, intensity)),
-    width: width || 0.38
+    width: width || 0.38,
+    ya: yA || 0,
+    yb: yB || 0,
+    seed: Math.random()     // 每段沉积深浅的随机相位（3D 着色用）
   });
   if (skids.length > MAX_SKIDS) skids.splice(0, 60);
 }
