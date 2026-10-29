@@ -7,7 +7,7 @@ import { race } from "../game/race.js";
 import { buildTrackScene, createSky, setGantryLights, setMaxAnisotropy, updateSkyDome, SKY_HORIZON } from "./track3d.js";
 import { createCarMesh, syncCarMesh, disposeCarMesh } from "./car3d.js";
 import { initEffects3D, updateEffects3D } from "./effects3d.js";
-import { init3DCamera, update3DCamera, cycleCameraMode, getCamera3DLabel, CAMERA_MODES, setTopPitchDeg } from "./camera3d.js";
+import { init3DCamera, update3DCamera, cycleCameraMode, getCamera3DLabel, CAMERA_MODES, setTopPitchDeg, useTopCameraMode } from "./camera3d.js";
 
 let renderer = null;
 let scene = null;
@@ -29,7 +29,9 @@ export function init3D(canvas) {
   // 兜底：任何被远平面裁剪的像素（如天穹缝隙）露出的应是雾色而非默认黑色
   renderer.setClearColor(SKY_HORIZON);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // PCFSoftShadowMap 在新版 three 已移除（会被强制降级并打印警告）；
+  // 用 PCF + light.shadow.radius 做柔边，效果一致且可控
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   // 胶片感：ACES 色调映射 + 环境反射（车漆 PBR 需要 scene.environment）
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.15;
@@ -98,6 +100,10 @@ export function cycleCamera3D() {
 
 export function setTopPitch3D(v) {
   return setTopPitchDeg(v);
+}
+
+export function switchToTopCamera3D() {
+  return useTopCameraMode();
 }
 
 export { getCamera3DLabel, getTopPitchDeg } from "./camera3d.js";

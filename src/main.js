@@ -39,7 +39,8 @@ import {
   computeBackingSize, noteViewport, sampleFrameQuality, getQualityStats, getQualityInfo
 } from "./game/renderQuality.js";
 import {
-  init3D, resize3D, applyQuality3D, render3D, cycleCamera3D, getCamera3DLabel, setTopPitch3D
+  init3D, resize3D, applyQuality3D, render3D, cycleCamera3D, getCamera3DLabel, setTopPitch3D,
+  switchToTopCamera3D
 } from "./render3d/renderer.js";
 
 function escapeHtml(s) {
@@ -1698,7 +1699,9 @@ function initViewTools() {
     applyZoom();
   }
 
-  // 俯瞰机位俯视角度：40°（高空斜视）~ 90°（垂直向下），只作用于 V 键切到的俯瞰视角
+  // 俯瞰机位俯视角度：40°（高空斜视）~ 90°（垂直向下）。
+  // 这个角度只参与俯瞰机位的解算：当前在追尾/远景机位时拖动滑杆，画面不会有任何变化，
+  // 玩家会判定"滑杆失效"——所以拖动时直接切到俯瞰机位，让调整立刻可见。
   const pitchRange = document.getElementById("pitchRange");
   const pitchVal = document.getElementById("pitchVal");
   const applyPitch = () => {
@@ -1706,7 +1709,13 @@ function initViewTools() {
     if (pitchVal) pitchVal.textContent = "俯视角 " + Math.round(p) + "°";
   };
   if (pitchRange) {
-    pitchRange.addEventListener("input", applyPitch);
+    pitchRange.addEventListener("input", () => {
+      applyPitch();
+      if (!getCamera3DLabel().includes("俯瞰")) {
+        switchToTopCamera3D();
+        showMsg("📷 俯瞰视角", "已切到俯瞰机位 · 滑杆实时调整俯视角度（V 键切回追尾）", 1600);
+      }
+    });
     applyPitch();
   }
   const pitchReset = document.getElementById("pitchReset");

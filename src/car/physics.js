@@ -76,7 +76,7 @@ export function createCar(gridPos = 0) {
     trackS0 = (LAP_LENGTH - distBehindStart + LAP_LENGTH) % LAP_LENGTH;
   }
 
-  return {
+  const car = {
     x: slot.x,
     y: slot.y,
     angle: slot.angle,
@@ -94,6 +94,11 @@ export function createCar(gridPos = 0) {
     prevWheels: null,
     slideV: 0           // 草坡侧滑速度（m/s，+ = 车身左侧；仅离路陡坡生效）
   };
+  // 停车状态也要有路面高度/坡度：roadY 平时由 stepCar 每帧刷新，
+  // 但发车倒计时期间物理不推进，缺了它车体在 3D 里会停在 y=0，
+  // 被有海拔的赛道（上海起跑区 +2.3m、斯帕更高）整台埋进沥青路面里。
+  updateRoadProfile(car);
+  return car;
 }
 
 function distToSegmentSquared(px, py, ax, ay, bx, by) {

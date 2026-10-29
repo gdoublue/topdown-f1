@@ -19,8 +19,8 @@ export function hash01(a, b) {
    在采样点 i 处取横向偏移 oA(i)、oB(i) 的两列顶点，逐段连成四边形条带。
    绕序自动校正：段的前进方向恒为 +tan，因此当面朝上时必须 oA > oB，
    否则翻转三角剖分（左右侧条带共用同一构建器）。
-   UV：u 横向 0→1，v 沿赛道里程每 8m 重复一次（配合沥青纹理）。 */
-export function ribbonGeometry(idxList, oA, oB, y, colorAt) {
+   UV：u 横向 0→1，v 沿赛道里程每 vRepeat 米（默认 8m）重复一次（配合沥青纹理）。 */
+export function ribbonGeometry(idxList, oA, oB, y, colorAt, vRepeat = 8) {
   const segs = idxList.length - 1;
   const pos = new Float32Array(segs * 4 * 3);
   const col = new Float32Array(segs * 4 * 3);
@@ -35,7 +35,7 @@ export function ribbonGeometry(idxList, oA, oB, y, colorAt) {
     const c = colorAt ? colorAt(i, u) : [1, 1, 1];
     col[vp] = c[0]; col[vp + 1] = c[1]; col[vp + 2] = c[2];
     uv[up] = u;
-    uv[up + 1] = (cumDist[i] ?? 0) / 8;
+    uv[up + 1] = (cumDist[i] ?? 0) / vRepeat;
     vp += 3; up += 2;
   };
   for (let s = 0; s < segs; s++) {
@@ -113,39 +113,108 @@ export function sampleIndices() {
   for (let i = 0; i <= last; i++) list.push(isLinear ? i : i % N);
   return list;
 }
-export function asphaltTexture() {
-  const S = 256;
-  const cv = document.createElement("canvas");
-  cv.width = S; cv.height = S;
-  const c = cv.getContext("2d");
-  c.fillStyle = "#43464c";
-  c.fillRect(0, 0, S, S);
-  // 细颗粒：密集随机点，明暗两档
-  for (let i = 0; i < 5200; i++) {
-    const x = Math.random() * S, y = Math.random() * S;
-    const l = Math.random();
-    c.fillStyle = l > 0.55 ? "rgba(88,92,100,0.55)" : "rgba(44,46,52,0.55)";
-    const s = 1 + Math.random() * 2;
-    c.fillRect(x, y, s, s);
+
+/* 可平铺值噪声：size×size 随机格点 + 平滑双线性插值，边界回绕 → 贴图无缝。
+   沥青用它做"多尺度"细节：一层噪声只负责一个尺度，合成后才像真实路面。 */
+function latticeNoise(size, seed) {
+  const a = new Float32Array(size * size);
+  let s = seed >>> 0;
+  for (let i = 0; i < a.length; i++) {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    a[i] = s / 4294967296;
   }
-  // 大块深浅斑驳（轮胎胶层/修补痕迹）
-  for (let i = 0; i < 14; i++) {
-    const x = Math.random() * S, y = Math.random() * S;
-    const r = 18 + Math.random() * 46;
-    const g = c.createRadialGradient(x, y, 0, x, y, r);
-    const dark = Math.random() > 0.5;
-    g.addColorStop(0, dark ? "rgba(38,40,46,0.28)" : "rgba(96,100,108,0.2)");
-    g.addColorStop(1, "rgba(0,0,0,0)");
-    c.fillStyle = g;
-    c.fillRect(x - r, y - r, r * 2, r * 2);
-  }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.wrapS = THREE.ClampToEdgeWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = maxAniso;
-  return tex;
+  return (x, y) => {
+    const fx = x * size, fy = y * size;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const tx = fx - x0, ty = fy - y0;
+    const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+    const i0 = ((x0 % size) + size) % size, i1 = (i0 + 1) % size;
+    const j0 = ((y0 % size) + size) % size, j1 = (j0 + 1) % size;
+    const v00 = a[j0 * size + i0], v10 = a[j0 * size + i1];
+    const v01 = a[j1 * size + i0], v11 = a[j1 * size + i1];
+    return (v00 + (v10 - v00) * sx) * (1 - sy) + (v01 + (v11 - v01) * sx) * sy;
+  };
 }
+
+/* ================= 沥青贴图（颜色 + 粗糙度） =================
+   旧版 256px 贴图靠十几个大半径径向渐变做"斑驳"，平铺到路面上就是一块块深色云团，
+   远看/俯视都像洒了一路影子。新版改成多尺度值噪声叠加：
+     低频 = 含油量/压实度差异，中频 = 补丁与摊铺接缝，高频 = 骨料团，像素级 = 砂粒；
+   再在 u=0.5（正好是路面中线）叠一条柔和的中央车辙，两端积灰略发白。
+   同时输出粗糙度贴图：骨料处更涩、车辙被轮胎磨光更亮一点，阳光下有轻微反光变化。
+   返回 { map, roughnessMap } —— u 横向 0..1 铺满整幅路宽，v 沿赛道每 16m 循环一次。 */
+export function asphaltTextures() {
+  const S = 512;
+  const colorCv = document.createElement("canvas");
+  colorCv.width = S; colorCv.height = S;
+  const cc = colorCv.getContext("2d");
+  const colorImg = cc.createImageData(S, S);
+  const cd = colorImg.data;
+
+  const roughCv = document.createElement("canvas");
+  roughCv.width = S; roughCv.height = S;
+  const rc = roughCv.getContext("2d");
+  const roughImg = rc.createImageData(S, S);
+  const rd = roughImg.data;
+
+  const nLow = latticeNoise(6, 0x9e3779b9);
+  const nMid = latticeNoise(24, 0x85ebca6b);
+  const nFine = latticeNoise(80, 0xc2b2ae35);
+
+  for (let y = 0; y < S; y++) {
+    const v = y / S;
+    for (let x = 0; x < S; x++) {
+      const u = x / S;
+      // 多尺度灰度（0.5 为中心）：越靠后的项频率越高、越细
+      let lum = 0.5
+        + (nLow(u, v) - 0.5) * 0.14
+        + (nMid(u, v) - 0.5) * 0.18
+        + (nFine(u, v) - 0.5) * 0.22
+        + (Math.random() - 0.5) * 0.30;
+      // 中央车辙：橡胶沉积 + 骨料被磨平（σ≈6% 路宽，约 ±0.8m 的两条轮迹合成一条柔带）
+      const band = Math.exp(-((u - 0.5) * (u - 0.5)) / (2 * 0.06 * 0.06));
+      lum -= band * 0.13;
+      // 路面最外侧（靠近白线/路肩）积灰，略微发白
+      lum += Math.min(1, Math.max(0, (Math.abs(u - 0.5) - 0.43) / 0.07)) * 0.05;
+
+      const d = (lum - 0.5) * 36;
+      const p = (y * S + x) * 4;
+      cd[p] = 59 + d;
+      cd[p + 1] = 62 + d;
+      cd[p + 2] = 69 + d;
+      cd[p + 3] = 255;
+
+      // 车辙处只轻微抛光（差值太大时中央会被高光反成一条亮带，反而不像沥青）
+      const rv = Math.max(0, Math.min(1, 0.84 + (lum - 0.5) * 0.18 - band * 0.07));
+      const r = rv * 255;
+      rd[p] = r; rd[p + 1] = r; rd[p + 2] = r; rd[p + 3] = 255;
+    }
+  }
+
+  // 零星亮骨料：1px 的反光碎石，近看才有，远看被 mipmap 平均掉
+  for (let i = 0; i < 12000; i++) {
+    const p = (((Math.random() * S) | 0) * S + ((Math.random() * S) | 0)) * 4;
+    const lift = 12 + Math.random() * 26;
+    cd[p] += lift; cd[p + 1] += lift; cd[p + 2] += lift;
+  }
+
+  cc.putImageData(colorImg, 0, 0);
+  rc.putImageData(roughImg, 0, 0);
+
+  const map = new THREE.CanvasTexture(colorCv);
+  map.wrapS = THREE.ClampToEdgeWrapping;
+  map.wrapT = THREE.RepeatWrapping;
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.anisotropy = maxAniso;
+
+  const roughnessMap = new THREE.CanvasTexture(roughCv);
+  roughnessMap.wrapS = THREE.ClampToEdgeWrapping;
+  roughnessMap.wrapT = THREE.RepeatWrapping;
+  roughnessMap.anisotropy = maxAniso;
+
+  return { map, roughnessMap };
+}
+
 export function grassTexture() {
   const S = 512;
   const cv = document.createElement("canvas");

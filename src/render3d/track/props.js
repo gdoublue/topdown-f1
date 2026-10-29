@@ -7,7 +7,7 @@ import {
 } from "../../track/geometry.js";
 import {
   hash01, sampleIndices, ribbonGeometry, quadSegmentsGeometry,
-  asphaltTexture, grassTexture, checkerTexture, maxAniso, makeGroundSampler
+  asphaltTextures, grassTexture, checkerTexture, maxAniso, makeGroundSampler
 } from "./shared.js";
 import { layoutTrees } from "./treeLayout.js";
 
@@ -58,7 +58,11 @@ export function buildGround() {
   return group;
 }
 
-/* ================= 树木（InstancedMesh，避开路面随机分布） ================= */
+/* ================= 沥青路面 =================
+   条带只有左右两列顶点，顶点色做不出"中间暗、两边亮"的赛车线（插值到边缘都是 1），
+   旧的 groove 顶点色实际是空操作 —— 车辙/积灰/骨料全部改由贴图承担：
+   u 横向铺满整幅路宽（车辙正好压在中线），v 沿赛道每 16m 循环，颗粒不被拉长。
+   材质用 map + roughnessMap：骨料处更涩、车辙被磨光更亮，阳光下有轻微反光变化。 */
 export function buildAsphalt() {
   const list = sampleIndices();
   const geo = ribbonGeometry(
@@ -66,16 +70,14 @@ export function buildAsphalt() {
     i => hw[i],
     i => -hw[i],
     0.05,
-    (i, u) => {
-      // 中央磨黑的赛车线：u=0.5 最暗，向两侧渐亮
-      const groove = 1 - 0.34 * Math.exp(-((u - 0.5) * (u - 0.5)) / 0.02);
-      return [groove, groove, groove];
-    }
+    null,
+    16
   );
+  const tex = asphaltTextures();
   const mat = new THREE.MeshStandardMaterial({
-    map: asphaltTexture(),
-    vertexColors: true,
-    roughness: 0.96,
+    map: tex.map,
+    roughnessMap: tex.roughnessMap,
+    roughness: 1.0,          // 实际粗糙度全部由 roughnessMap 给（约 0.6~0.95）
     metalness: 0.0,
   });
   const mesh = new THREE.Mesh(geo, mat);
@@ -87,7 +89,8 @@ export function buildAsphalt() {
 export function buildEdgeLines() {
   const list = sampleIndices();
   const group = new THREE.Group();
-  const mat = new THREE.MeshBasicMaterial({ color: 0xe8eaed });
+  // 受光的漆面而不是自发光纯白：跟着太阳/阴影明暗走，不再像贴上去的白条
+  const mat = new THREE.MeshStandardMaterial({ color: 0xd8dbdf, roughness: 0.84, metalness: 0.0 });
   for (const side of [1, -1]) {
     const geo = ribbonGeometry(
       list,
@@ -96,7 +99,9 @@ export function buildEdgeLines() {
       0.085,
       () => [1, 1, 1]
     );
-    group.add(new THREE.Mesh(geo, mat));
+    const line = new THREE.Mesh(geo, mat);
+    line.receiveShadow = true;     // 树影/看台影落在路面上时，白线也要跟着变暗
+    group.add(line);
   }
   return group;
 }

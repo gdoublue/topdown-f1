@@ -70,6 +70,10 @@ export function createSky(scene) {
   sun.shadow.camera.far = 700;
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.02;
+  // 树影/看台影落在路面上时不要是硬邦邦的黑块：
+  // radius 让 PCF 采样范围变宽（边缘柔和），intensity 抬一点（保留天光与地面反弹）
+  sun.shadow.radius = 2.5;
+  sun.shadow.intensity = 0.8;
   scene.add(sun);
   scene.add(sun.target);
   scene.fog = new THREE.Fog(SKY_HORIZON, 550, 1700);
