@@ -1670,11 +1670,11 @@ export const AI_CONFIGS = [
     driver: geminiDriver,
     perf: {
       maxSpeed: [103.2, 92.8, 33.6],
-      latGrip: 46.0,
-      maxOmega: 3.30,
+      latGrip: 46.5,
+      maxOmega: 3.50,
       accelMult: 1.00,
       brakeMult: 1.08,
-      steerRate: 10.5
+      steerRate: 12.5
     }
   },
     {
@@ -1707,6 +1707,7 @@ export const AI_CONFIGS = [
     model: "SU8 Ultra",
     color: "#f5c518",
     livery: "su7ultra",
+    heavyModel: true,          // 真车模 ~5MB：玩家不选它就不出场、不下载
     number: "7",
     driverName: "小米车手 (XIAO #7)",
     driverShort: "小米车手",
@@ -1731,6 +1732,7 @@ export const AI_CONFIGS = [
     model: "U9 Xtreme",
     color: "#f59e0b",
     livery: "yangwang",
+    heavyModel: true,          // 真车模 ~5MB：玩家不选它就不出场、不下载
     number: "9",
     driverName: "仰望车手 (U9X #9)",
     driverShort: "仰望车手",
@@ -1775,6 +1777,20 @@ export const AI_CONFIGS = [
     }
   }
 ];
+
+/* ================= 大体积车模按需参赛 =================
+   小米 SU8 / 仰望 U9X 用的是真车模（各 ~5MB：glTF + webp 贴图），
+   一局里无条件加载会拖慢开局。规则：
+   玩家没选这两台车 → 电脑阵容里也不出现它们，模型完全不下载；
+   玩家选了其中一台 → 只有这一台参赛（AI 同款车 + 玩家车），另一台仍不出场。 */
+export function isHeavyModelCar(cfg) {
+  return !!(cfg && cfg.heavyModel);
+}
+
+// 按玩家选择过滤阵容：playerCarId 对应的重车保留（玩家自己要开），其余重车剔除
+export function rosterForPlayer(configs, playerCarId) {
+  return configs.filter(c => !isHeavyModelCar(c) || c.id === playerCarId);
+}
 
 /* ================= 发车位生成：支持在 AI_CONFIGS 中用 gridPos 指定杆位 ================= */
 // 用法：配置项加 gridPos: 0 即锁定 P1 杆位（0 起始编号），未指定 gridPos 的车随机/顺序填入剩余格位。

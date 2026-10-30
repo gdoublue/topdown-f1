@@ -23,7 +23,7 @@ import {
 } from "./ui/autopilot.js";
 import { initMinimap, drawMinimap } from "./game/minimap.js";
 import * as audio from "./game/audio.js";
-import { AI_CONFIGS, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
+import { AI_CONFIGS, rosterForPlayer, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
 import { conn } from "./net/connection.js";
 import { rtc } from "./net/rtc.js";
 import {
@@ -75,7 +75,7 @@ let playerCarId = null;   // 玩家选择的赛车 id（solo / vs）
 let playerIndex = 0;      // 玩家在 cars 数组中的下标
 let started = false;
 
-// 赛车列表：对战/观战模式装载全部 AI 配置；单人模式只有玩家一辆
+// 赛车列表：对战/观战模式装载 AI 配置（大车模车型按玩家选择过滤，见 setupCars）；单人模式只有玩家一辆
 let cars = [];
 let aiInputs = [];
 const activeCars = [];   // 未完赛车辆（复用数组，供 AI 避让感知；完赛车已幽灵化）
@@ -161,12 +161,15 @@ function setupCars() {
   }
 
   // vs：玩家占了一台车，但电脑仍要保留这个型号的车手 → 名单 = 全部车型 + 一台同款车（玩家开）
-  // 观战：名单就是全部车型，没有玩家车
-  const chosen = AI_CONFIGS.findIndex(c => c.id === playerCarId);
-  const playerCfg = AI_CONFIGS[chosen >= 0 ? chosen : 0];
-  const roster = mode === "vs" ? [...AI_CONFIGS, playerCfg] : AI_CONFIGS;
+  // 观战：名单就是全部车型（大车模除外），没有玩家车
+  // 大体积车模（小米 / 仰望）只在玩家选了它时才上场：没选就连电脑的同款车也不出现，
+  // 模型随之不下载（preloadCars 只加载本场实际有的车型），开局不用白等 ~10MB。
+  const pool = rosterForPlayer(AI_CONFIGS, playerCarId);
+  const chosen = pool.findIndex(c => c.id === playerCarId);
+  const playerCfg = pool[chosen >= 0 ? chosen : 0];
+  const roster = mode === "vs" ? [...pool, playerCfg] : pool;
   // 玩家车固定排在名单末尾（前面全是 AI 的车队车手）
-  playerIndex = mode === "vs" ? AI_CONFIGS.length : 0;
+  playerIndex = mode === "vs" ? pool.length : 0;
 
   // 发车位：读取配置中 gridPos 指定的杆位，其余车辆随机填入剩余格位
   const carGrid = buildGridSlots(roster, true);

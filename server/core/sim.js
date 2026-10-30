@@ -8,7 +8,7 @@
 //   - 车辆间不发生实体碰撞（幽灵竞速）——在线竞速没有必须实时对撞的交互
 import { activateContext, createTrackContext } from "../../src/track/geometry.js";
 import { createCar, stepCar, nearestIndex, finishedCarInput, resolveCarCollisions, getCarDistance } from "../../src/car/physics.js";
-import { applyCarConfig, createAIInput, driveAI, AI_CONFIGS } from "../../src/game/ai.js";
+import { applyCarConfig, createAIInput, driveAI, AI_CONFIGS, isHeavyModelCar } from "../../src/game/ai.js";
 import { createRaceState, initCarRaceState, updateCarLap, lightsFor } from "../../src/game/race.js";
 import { TOTAL_LAPS, PHYS, setRaceLaps } from "../../src/config.js";
 import { TRACK_MIN_LAP_MS, DEFAULT_MIN_LAP_MS } from "../config.js";
@@ -48,10 +48,14 @@ export class RaceSim {
     const sameCarId = this.room.sameCar
       ? (this.humans[0]?.carId || AI_CONFIGS[0].id)
       : null;
+    // 大车模（小米 / 仰望，各 ~5MB）按需上场：只有房里有人选了这台车，才排进 AI 补位。
+    // 否则服务端把车塞进名单 → 所有客户端都要下完才能过加载闸门（见 gateway.checkRoomLoadingComplete）。
+    const humanCarIds = new Set(this.humans.map(h => h.carId));
+    const aiPool = AI_CONFIGS.filter(c => !isHeavyModelCar(c) || humanCarIds.has(c.id));
     let gridPos = this.humans.length;   // 人类占前排发车位，AI 排后
     // AI 阵容固定：人类选了同一款车也照常出这台 AI（保留它原本的车和车手），
     // 不再从 AI 名单里剔除被玩家占用的车型；同款车的区分交给客户端的随机涂装。
-    for (const cfg of AI_CONFIGS) {
+    for (const cfg of aiPool) {
       if (this.aiEntries.length >= aiCount) break;
       const perfCfg = sameCarId
         ? (AI_CONFIGS.find(c => c.id === sameCarId) || AI_CONFIGS[0])

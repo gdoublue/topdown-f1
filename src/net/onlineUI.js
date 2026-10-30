@@ -2,7 +2,7 @@
 // 与 src/main.js 协作：选模式 online 时调用 showOnline()；
 // "单人在线练习"通过回调交还 main.js 走 solo 流程（成绩自动上传）。
 import { TRACKS } from "../track/tracks.js";
-import { AI_CONFIGS } from "../game/ai.js";
+import { AI_CONFIGS, isHeavyModelCar } from "../game/ai.js";
 import { conn } from "./connection.js";
 import { getFingerprint } from "./fingerprint.js";
 import { isAutopilotOn } from "../ui/autopilot.js";
@@ -754,9 +754,12 @@ function renderRoom() {
     : !myCarId
       ? "先选择你的赛车"
       : (waitingNames.length ? `等待 ${waitingNames.join("、")} 就绪` : "全员就绪，开赛！");
-  // AI 补位数量与服务器一致：maxPlayers - 真人车手数量（不超过 AI_CONFIGS 的车型数量）
+  // AI 补位数量与服务器一致：maxPlayers - 真人车手数量（不超过可补位的车型数量）。
+  // 大车模车型（小米 / 仰望）只有房里有人选了才补位，规则同 RaceSim._buildAI。
+  const humanCarIds = new Set(racers.map(p => p.carId).filter(Boolean));
+  const aiPool = AI_CONFIGS.filter(c => !isHeavyModelCar(c) || humanCarIds.has(c.id));
   const aiCount = room.fillAI
-    ? Math.max(0, Math.min(AI_CONFIGS.length, (room.maxPlayers || 8) - racers.length))
+    ? Math.max(0, Math.min(aiPool.length, (room.maxPlayers || 8) - racers.length))
     : 0;
   const fieldText = room.fillAI
     ? `🤖 AI 补位 ${aiCount} 台 · 共 ${racers.length + aiCount} 车`

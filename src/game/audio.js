@@ -1,4 +1,6 @@
 // 音频：引擎六层“换挡”循环、轮胎尖叫、倒计时蜂鸣、F1 实录事件音、背景音乐
+// 电车车型（小米 / 仰望）不用内燃机六层，改用单层电机加速声（music/ev_accel_loop.mp3）
+// 越野卡车不用 F1 六层，改用柴油机实录循环（music/offroad_engine_loop.mp3，原素材前 30s）
 // 素材授权见 music/README.md（domasx2 CC0 / Edvvc CC BY-SA 3.0 / audible-edge CC BY 3.0）
 import { PHYS } from "../config.js";
 import { clamp } from "../utils.js";
@@ -7,7 +9,11 @@ const BG_MUSIC = "./music/bg_music.mp3";
 const BG_VOLUME = 0.16;
 
 const ENGINE_FILES = [0, 1, 2, 3, 4, 5].map(i => "./music/engine_loop_" + i + ".wav");
+const EV_ACCEL_FILE = "./music/ev_accel_loop.mp3";   // 电机加速声：首尾已交叉淡化，可无缝循环
+const OFFROAD_FILE = "./music/offroad_engine_loop.mp3"; // 越野卡车柴油机实录（原素材前 30s，首尾交叉淡化）
 const SCREECH_FILE = "./music/tire_screech_loop.ogg";
+// 纯电车型（按涂装判定，与 render3d/car 的车型匹配口径一致）：小米 SU8 Ultra / 仰望 U9 Xtreme
+const ELECTRIC_LIVERIES = new Set(["su7ultra", "yangwang"]);
 const CLIP_FILES = [
   "./music/f1_1985_lola_hart_turbo.ogg",          // GO 起步爆发
   "./music/f1_1988_mclaren_honda_turbo.ogg",      // 完赛 rotation
@@ -20,7 +26,7 @@ const GO_CLIP = 0, FINISH_CLIP = 5;
 const LAP_ROTATION = [1, 2, 3, 4];
 
 let actx = null, master = null, lp = null, screechGain = null, bgGain = null, bgOn = false;
-let layers = [], clipBuf = [];
+let layers = [], clipBuf = [], evLayer = null, offroadLayer = null;
 let ready = false, started = false, muted = false;
 let rpm = 0, lapIdx = 0;
 
@@ -56,6 +62,22 @@ async function start() {
       src.start();
       layers.push({ src, gain: g });
     }
+
+    // 车型专属单层循环（电车电机声 / 越野卡车柴油机）：各自独立加载，
+    // 任一文件缺失只丢该音色，不影响其它音效。
+    const loopLayer = async (url) => {
+      const buf = await load(url);
+      const src = actx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      const g = actx.createGain();
+      g.gain.value = 0;
+      src.connect(g).connect(master);
+      src.start();
+      return { src, gain: g };
+    };
+    try { evLayer = await loopLayer(EV_ACCEL_FILE); } catch (e) { evLayer = null; }
+    try { offroadLayer = await loopLayer(OFFROAD_FILE); } catch (e) { offroadLayer = null; }
 
     // 轮胎尖叫
     {
@@ -114,23 +136,52 @@ export function updateAudio(car, input, dt, racing) {
   const t = actx.currentTime;
   const spd = Math.abs(car.speed);
   const vmax = PHYS.maxSpeed[0];
+  const electric = ELECTRIC_LIVERIES.has(car.livery);
+  const offroad = !electric && car.livery === "offroad";
 
   const target = racing
     ? clamp(spd / vmax * 0.85 + (ctrl.up ? 0.15 : 0), 0, 1)
     : 0.06;   // 怠速
   rpm += (target - rpm) * Math.min(1, dt * 3.5);
 
-  // 六层换挡：当前挡位循环播放并随转速变调，其余静音
-  const gear = Math.min(5, Math.floor(rpm * 6));
-  const local = clamp(rpm * 6 - gear, 0, 1);
-  const vol = 0.10 + rpm * 0.18;
-  for (let i = 0; i < layers.length; i++) {
-    const L = layers[i];
-    const active = i === gear;
-    L.src.playbackRate.setTargetAtTime(0.75 + local * 1.25, t, 0.03);
-    L.gain.gain.setTargetAtTime(active ? vol : 0, t, 0.045);
+  if (electric) {
+    // 电车：没有挡位换挡，只有随车速升调的电机声；松油门立即变轻（真车也没有排气回味）
+    for (let i = 0; i < layers.length; i++) {
+      layers[i].gain.gain.setTargetAtTime(0, t, 0.045);
+    }
+    if (offroadLayer) offroadLayer.gain.gain.setTargetAtTime(0, t, 0.1);
+    if (evLayer) {
+      const evVol = racing ? (0.05 + rpm * 0.16) * (ctrl.up ? 1 : 0.45) : 0;
+      evLayer.gain.gain.setTargetAtTime(evVol, t, racing ? 0.06 : 0.2);
+      evLayer.src.playbackRate.setTargetAtTime(0.72 + rpm * 0.85, t, 0.05);
+    }
+  } else if (offroad) {
+    // 越野卡车：柴油机单层实录循环（低频厚重），音高随转速，怠速留一点咕噜声
+    for (let i = 0; i < layers.length; i++) {
+      layers[i].gain.gain.setTargetAtTime(0, t, 0.045);
+    }
+    if (evLayer) evLayer.gain.gain.setTargetAtTime(0, t, 0.1);
+    if (offroadLayer) {
+      const vol = racing ? 0.14 + rpm * 0.20 : 0.05;
+      offroadLayer.gain.gain.setTargetAtTime(vol, t, racing ? 0.08 : 0.2);
+      offroadLayer.src.playbackRate.setTargetAtTime(0.78 + rpm * 0.70, t, 0.06);
+    }
+  } else {
+    if (evLayer) evLayer.gain.gain.setTargetAtTime(0, t, 0.1);
+    if (offroadLayer) offroadLayer.gain.gain.setTargetAtTime(0, t, 0.1);
+
+    // 六层换挡：当前挡位循环播放并随转速变调，其余静音
+    const gear = Math.min(5, Math.floor(rpm * 6));
+    const local = clamp(rpm * 6 - gear, 0, 1);
+    const vol = 0.10 + rpm * 0.18;
+    for (let i = 0; i < layers.length; i++) {
+      const L = layers[i];
+      const active = i === gear;
+      L.src.playbackRate.setTargetAtTime(0.75 + local * 1.25, t, 0.03);
+      L.gain.gain.setTargetAtTime(active ? vol : 0, t, 0.045);
+    }
+    lp.frequency.setTargetAtTime(650 + rpm * 4300, t, 0.06);
   }
-  lp.frequency.setTargetAtTime(650 + rpm * 4300, t, 0.06);
 
   // 轮胎尖叫：重刹或高速猛打方向
   const skid = racing && ((car.braking && spd > vmax * 0.5) ||
