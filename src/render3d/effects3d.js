@@ -8,29 +8,27 @@ const MAX_SKIDS = 9000;   // 与 effects.js 的池子上限一致
 const MAX_DUST = 240;
 const MAX_SPARKS = 320;   // F1 底板钛合金火花粒子上限
 
-/* ================= 刹车痕：单个大 BufferGeometry，每帧重写可见段 ================= */
+/* ================= 刹车痕：连续无缝丝带网格（共享接缝顶点 + 首尾梭形插值） ================= */
 const skidGeo = new THREE.BufferGeometry();
 {
   const pos = new Float32Array(MAX_SKIDS * 4 * 3);
   const alpha = new Float32Array(MAX_SKIDS * 4);
   const side = new Float32Array(MAX_SKIDS * 4);
   const along = new Float32Array(MAX_SKIDS * 4);
-  const seed = new Float32Array(MAX_SKIDS * 4);
   const idx = new Uint32Array(MAX_SKIDS * 6);
   for (let i = 0; i < MAX_SKIDS; i++) {
     const b = i * 4, j = i * 6;
-    // 两个三角形都必须朝上（+y）：顶点序 a+n, b+n, b-n, a-n
+    // 两个三角形都必须朝上（+y）：顶点序 a+nA(0), b+nB(1), b-nB(2), a-nA(3)
     idx[j] = b; idx[j + 1] = b + 1; idx[j + 2] = b + 2;
     idx[j + 3] = b; idx[j + 4] = b + 2; idx[j + 5] = b + 3;
-    // 横向（±1 = 胎肩边缘）与纵向（0/1 = 段首/段尾）坐标：着色器据此羽化边缘、做沉积颗粒
+    // 横向坐标（±1 = 左右胎肩边缘）
     side[b] = 1; side[b + 1] = 1; side[b + 2] = -1; side[b + 3] = -1;
     along[b] = 0; along[b + 1] = 1; along[b + 2] = 1; along[b + 3] = 0;
   }
   skidGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
   skidGeo.setAttribute("aAlpha", new THREE.BufferAttribute(alpha, 1).setUsage(THREE.DynamicDrawUsage));
   skidGeo.setAttribute("aSide", new THREE.BufferAttribute(side, 1));
-  skidGeo.setAttribute("aAlong", new THREE.BufferAttribute(along, 1));
-  skidGeo.setAttribute("aSeed", new THREE.BufferAttribute(seed, 1).setUsage(THREE.DynamicDrawUsage));
+  skidGeo.setAttribute("aAlong", new THREE.BufferAttribute(along, 1).setUsage(THREE.DynamicDrawUsage));
   skidGeo.setIndex(new THREE.BufferAttribute(idx, 1));
   skidGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e7);   // 永不剔除
 }
@@ -46,16 +44,15 @@ const skidMat = new THREE.ShaderMaterial({
     attribute float aAlpha;
     attribute float aSide;
     attribute float aAlong;
-    attribute float aSeed;
     varying float vA;
     varying float vSide;
     varying float vAlong;
-    varying float vSeed;
+    varying vec2 vWorldXZ;
     void main() {
       vA = aAlpha;
       vSide = aSide;
       vAlong = aAlong;
-      vSeed = aSeed;
+      vWorldXZ = position.xz;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }`,
   fragmentShader: `
@@ -63,7 +60,7 @@ const skidMat = new THREE.ShaderMaterial({
     varying float vA;
     varying float vSide;
     varying float vAlong;
-    varying float vSeed;
+    varying vec2 vWorldXZ;
 
     float hash21(vec2 p) {
       p = fract(p * vec2(123.34, 456.21));
@@ -72,15 +69,15 @@ const skidMat = new THREE.ShaderMaterial({
     }
 
     void main() {
-      // 胎肩接触压力低 → 横向羽化，边缘融融地散进沥青，而不是一条硬边色块
+      // 胎肩边缘柔和羽化 + 胎冠纵向受力双峰纹理（消除硬边色块感）
       float across = 1.0 - abs(vSide);
-      float shape = smoothstep(0.0, 0.24, across) * (0.88 + 0.12 * across);
-      // 橡胶沉积不匀：每段随机深浅（段间无接缝跳变：seed 只决定整段亮度）
-      float grain = 0.74 + 0.26 * hash21(vec2(vSeed * 71.3, 3.7));
-      // 段内被刮擦出的明暗起伏
-      float wobble = 0.93 + 0.07 * sin(vAlong * 5.0 + vSeed * 6.2831);
-      float a = vA * shape * grain * wobble;
-      if (a < 0.005) discard;
+      float edgeFeather = smoothstep(0.0, 0.24, across);
+      float treadRib = 0.86 + 0.14 * cos(vSide * 7.2);
+      // 沿世界坐标连续采样的沥青微颗粒 + 纵向连续摩擦波纹（跨段 100% 连续，无分段跳变）
+      float grain = 0.86 + 0.14 * hash21(floor(vWorldXZ * 14.0));
+      float streak = 0.94 + 0.06 * sin(vAlong * 2.4 + vSide * 3.1);
+      float a = vA * edgeFeather * treadRib * grain * streak;
+      if (a < 0.004) discard;
       gl_FragColor = vec4(uColor, a);
     }`,
 });
@@ -90,55 +87,62 @@ skidMesh.renderOrder = 2;
 
 const _sp = skidGeo.getAttribute("position");
 const _sa = skidGeo.getAttribute("aAlpha");
-const _ss = skidGeo.getAttribute("aSeed");
+const _sal = skidGeo.getAttribute("aAlong");
 
-// 分段稳定 ID：seg 对象首次出现时分配，跨帧不变。
-// 高度抖动若按数组下标取（下标随淘汰滚动），重叠段会整帧互换高度 → 闪烁。
+// 分段稳定 ID：同条连续轮胎印共享同一个 chainId，处于完全相同的高度层
 let _skidSeq = 0;
-function skidId(s) {
+function skidChainLayer(s) {
+  if (s.chainId != null) return s.chainId;
   if (s._v3id == null) s._v3id = _skidSeq++;
   return s._v3id;
 }
 
+function intensityToAlpha(inten, life) {
+  const v = Math.max(0, Math.min(1, inten || 0));
+  if (v <= 0.002) return 0;
+  return Math.min(0.88, Math.pow(v, 0.78) * 0.90) * Math.max(0, life);
+}
+
 function updateSkids() {
   const n = Math.min(skids.length, MAX_SKIDS);
-  const p = _sp.array, a = _sa.array, sd = _ss.array;
+  const p = _sp.array, a = _sa.array, al = _sal.array;
   for (let i = 0; i < n; i++) {
     const s = skids[i];
-    // 宽度贴近真实胎宽（物理端前 0.32 / 后 0.42）：只加 8% 抗锯齿余量。
     const hw = Math.max(0.05, (s.width || 0.38) * 0.5) * 1.08;
-    const dx = s.b.x - s.a.x, dz = s.b.y - s.a.y;
-    const len = Math.hypot(dx, dz);
-    let nx, nz;
-    if (len > 1e-4) {
-      nx = (-dz / len) * hw; nz = (dx / len) * hw;
-    } else {
-      nx = hw; nz = 0;
+    let nxA = s.nxA, nyA = s.nyA, nxB = s.nxB, nyB = s.nyB;
+    if (nxA == null || nxB == null) {
+      const dx = s.b.x - s.a.x, dz = s.b.y - s.a.y;
+      const len = Math.hypot(dx, dz);
+      const nx = len > 1e-4 ? (-dz / len) * hw : hw;
+      const nz = len > 1e-4 ? (dx / len) * hw : 0;
+      nxA = nxB = nx;
+      nyA = nyB = nz;
     }
-    // 两端各延长 0.85×半宽：相邻段链式相接处无缝（2D 版同样靠端部延长）
-    const ex = len > 1e-4 ? (dx / len) * hw * 0.85 : 0;
-    const ez = len > 1e-4 ? (dz / len) * hw * 0.85 : 0;
-    // 高度仅比沥青路面（0.05）高 8mm：车体所有部件底面都抬到 0.09 以上，
-    // 印子在几何上不可能与车身相交；轮胎落地由深度测试自然遮挡
-    const yOff = 0.058 + (skidId(s) % 4) * 0.0009;
+    // 同一条连续轮胎痕共享同一高度偏移，相邻段严格共面且共享顶点，绝不重叠出深色横杠
+    const yOff = 0.058 + (skidChainLayer(s) % 4) * 0.0009;
     const ya = (s.ya != null ? s.ya : s.y || 0) + yOff;
     const yb = (s.yb != null ? s.yb : s.ya || 0) + yOff;
-    const inten = s.intensity || 0.5;
-    const alpha = Math.min(0.9, 0.26 + inten * 0.7) * Math.max(0, s.life);
-    const seed = s.seed != null ? s.seed : (s.seed = Math.random());
+    const iA = s.intensityA != null ? s.intensityA : (s.intensity || 0.5);
+    const iB = s.intensity != null ? s.intensity : 0.5;
+    const alphaA = intensityToAlpha(iA, s.life);
+    const alphaB = intensityToAlpha(iB, s.life);
+    const alongA = s.alongA || 0;
+    const alongB = s.alongB != null ? s.alongB : alongA + 1;
+
     const b = i * 12, ba = i * 4;
-    p[b]     = s.a.x - ex + nx; p[b + 1]  = ya; p[b + 2]  = s.a.y - ez + nz;
-    p[b + 3] = s.b.x + ex + nx; p[b + 4]  = yb; p[b + 5]  = s.b.y + ez + nz;
-    p[b + 6] = s.b.x + ex - nx; p[b + 7]  = yb; p[b + 8]  = s.b.y + ez - nz;
-    p[b + 9] = s.a.x - ex - nx; p[b + 10] = ya; p[b + 11] = s.a.y - ez - nz;
-    a[ba] = alpha; a[ba + 1] = alpha; a[ba + 2] = alpha; a[ba + 3] = alpha;
-    sd[ba] = seed; sd[ba + 1] = seed; sd[ba + 2] = seed; sd[ba + 3] = seed;
+    // 顶点 0, 3 为段首 (s.a ± nA)，顶点 1, 2 为段尾 (s.b ± nB)
+    p[b]     = s.a.x + nxA; p[b + 1]  = ya; p[b + 2]  = s.a.y + nyA;
+    p[b + 3] = s.b.x + nxB; p[b + 4]  = yb; p[b + 5]  = s.b.y + nyB;
+    p[b + 6] = s.b.x - nxB; p[b + 7]  = yb; p[b + 8]  = s.b.y - nyB;
+    p[b + 9] = s.a.x - nxA; p[b + 10] = ya; p[b + 11] = s.a.y - nyA;
+    a[ba] = alphaA; a[ba + 1] = alphaB; a[ba + 2] = alphaB; a[ba + 3] = alphaA;
+    al[ba] = alongA; al[ba + 1] = alongB; al[ba + 2] = alongB; al[ba + 3] = alongA;
   }
   skidGeo.setDrawRange(0, n * 6);
   if (n > 0) {
     _sp.needsUpdate = true;
     _sa.needsUpdate = true;
-    _ss.needsUpdate = true;
+    _sal.needsUpdate = true;
   }
 }
 

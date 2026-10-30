@@ -8,18 +8,63 @@ export const dust = [];
 const MAX_SKIDS = 9000;
 const MAX_DUST = 240;
 
+let _chainSeq = 0;
+
 // yA / yB：段两端各自的路面高度。3D 里一个印子段可能跨过纵向坡度或横坡，
 // 两端共用同一高度会让远端扎进沥青（斯帕 14% 坡上 1m 段就差 14cm）。
-export function addSkid(a, b, intensity = 0.5, width = 0.38, yA = 0, yB = yA) {
+// 通过在端点对象 b 上挂载法向 (_nx/_ny) 与强度 (_i)，相邻帧自动共享接缝顶点与起止透明度，
+// 形成连续无接缝的丝带网格，彻底消除逐帧重叠黑节与阶梯断层。
+export function addSkid(a, b, intensity = 0.5, width = 0.38, yA = 0, yB = yA, intensityA = null) {
+  const hw = Math.max(0.05, (width || 0.38) * 0.5) * 1.08;
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  let nxB, nyB;
+  if (len > 1e-4) {
+    nxB = (-dy / len) * hw;
+    nyB = (dx / len) * hw;
+  } else if (a && a._nx != null) {
+    nxB = a._nx;
+    nyB = a._ny;
+  } else {
+    nxB = hw;
+    nyB = 0;
+  }
+
+  const chained = !!(a && a._nx != null && len < 4.5);
+  const nxA = chained ? a._nx : nxB;
+  const nyA = chained ? a._ny : nyB;
+  const iB = Math.max(0.0, Math.min(1.0, intensity));
+  // 新起印首段从 0 平滑渐入（梭形起头），续接段严格承接上一帧末尾强度
+  const iA = intensityA != null
+    ? Math.max(0.0, Math.min(1.0, intensityA))
+    : (chained ? a._i : 0.0);
+  const chainId = chained ? a._chainId : (_chainSeq++);
+  const alongA = chained ? (a._along || 0) : 0;
+  const alongB = alongA + len;
+
+  if (b && typeof b === "object") {
+    b._nx = nxB;
+    b._ny = nyB;
+    b._i = iB;
+    b._chainId = chainId;
+    b._along = alongB;
+  }
+
   skids.push({
     a: { x: a.x, y: a.y },
     b: { x: b.x, y: b.y },
+    nxA, nyA,
+    nxB, nyB,
+    chained,
+    chainId,
+    alongA,
+    alongB,
     life: 1,
-    intensity: Math.max(0.15, Math.min(1.0, intensity)),
+    intensityA: iA,
+    intensity: iB,
     width: width || 0.38,
     ya: yA || 0,
     yb: yB || 0,
-    seed: Math.random()     // 每段沉积深浅的随机相位（3D 着色用）
   });
   if (skids.length > MAX_SKIDS) skids.splice(0, 60);
 }
@@ -82,8 +127,8 @@ export function drawEffects(ctx, view) {
         const maxY = (s.a.y > s.b.y ? s.a.y : s.b.y) + hw;
         if (maxX < vx0 || minX > vx1 || maxY < vy0 || minY > vy1) continue;
       }
-      const inten = s.intensity || 0.5;
-      const alpha = (0.16 + inten * 0.68) * s.life;
+      const inten = ((s.intensityA ?? s.intensity ?? 0.5) + (s.intensity ?? 0.5)) * 0.5;
+      const alpha = (0.12 + inten * 0.72) * s.life;
       const bIdx = Math.min(BUCKET_COUNT - 1, Math.max(0, Math.floor(alpha * BUCKET_COUNT)));
       buckets[bIdx].push(s);
     }
@@ -100,18 +145,18 @@ export function drawEffects(ctx, view) {
         const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
         const len = Math.hypot(dx, dy);
         if (len < 1e-4) {
-          // 原地滑移：补一个圆点，避免出现空洞
           ctx.moveTo(s.a.x + hw, s.a.y);
           ctx.arc(s.a.x, s.a.y, hw, 0, Math.PI * 2);
           continue;
         }
-        const ux = dx / len, uy = dy / len;
-        const nx = -uy * hw, ny = ux * hw;
-        const ex = ux * hw * 0.6, ey = uy * hw * 0.6;   // 两端略微延长，模拟圆头接缝
-        ctx.moveTo(s.a.x - ex + nx, s.a.y - ey + ny);
-        ctx.lineTo(s.b.x + ex + nx, s.b.y + ey + ny);
-        ctx.lineTo(s.b.x + ex - nx, s.b.y + ey - ny);
-        ctx.lineTo(s.a.x - ex - nx, s.a.y - ey - ny);
+        const nxA = s.nxA != null ? s.nxA : (-dy / len) * hw;
+        const nyA = s.nyA != null ? s.nyA : (dx / len) * hw;
+        const nxB = s.nxB != null ? s.nxB : nxA;
+        const nyB = s.nyB != null ? s.nyB : nyA;
+        ctx.moveTo(s.a.x + nxA, s.a.y + nyA);
+        ctx.lineTo(s.b.x + nxB, s.b.y + nyB);
+        ctx.lineTo(s.b.x - nxB, s.b.y - nyB);
+        ctx.lineTo(s.a.x - nxA, s.a.y - nyA);
         ctx.closePath();
       }
       ctx.fill();

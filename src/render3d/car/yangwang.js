@@ -6,7 +6,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import {
-  glowPositions, createBrakeGlow, updateBrakeGlow, disposeBrakeGlow,
+  sampleRearLampEmitters, createBrakeGlow, updateBrakeGlow, disposeBrakeGlow,
 } from "./shared.js";
 
 export const id = "yangwang";
@@ -22,9 +22,10 @@ export function match(car) {
 const MODEL_URL = "models/u9/u9.glb";
 const TARGET_LEN = 5.05;          // 车长归一化目标（米，与 SU7 车模一致）
 const BODY_MAT = "MAT_BYD_YangWang_U9_Carpaint";
-// 随车轮转动的件：轮胎+轮毂（Hub）、轮辐（Wheel）、刹车盘（Disk）；
-// MAT_Tire_Brake（卡钳）保持静止
+// 随车轮自转（绕 z 轴滚动）的件：轮胎+轮毂（Hub）、轮辐（Wheel）、刹车盘（Disk）
 const SPIN_MAT = /Hub|Wheel|Disk/i;
+// 随前轮转向节（绕 y 轴转向）但保持静止不自转的件：刹车卡钳（MAT_Tire_Brake）
+const CALIPER_MAT = /Tire_Brake/i;
 // 轮胎本体材质：用它自己的包围盒定轮心，保证自转/转向严格绕轮毂中心
 const TIRE_MAT = /Hub/i;
 // 灯光材质：MAT_Lights 同时用于头灯、尾灯与灯带，只能按网格位置区分车头/车尾
@@ -32,8 +33,9 @@ const LIGHT_MAT = /Lights?/i;
 const DEFAULT_WHEEL_R = 0.33;
 const STEER_GAIN = 0.85;          // 与 F1 一致：car.steer(±0.55) × 0.85 ≈ 满舵 ±27°
 const STEER_SMOOTH = 18;          // 转向视觉插值速率（1/s）
-const BRAKE_GLOW = 9.0;           // 刹车时尾灯自发光强度（ACES 下需要拉高才够亮）
-const BRAKE_SMOOTH = 12;          // 尾灯亮灭插值速率（1/s）
+const BRAKE_GLOW = 11.5;          // 刹车时尾灯自发光强度（配合贴合灯带光核抵抗 ACES 压暗）
+const BRAKE_RISE = 24;            // LED 刹车灯点亮速率（1/s）
+const BRAKE_FALL = 11;            // 刹车灯余晖回落速率（1/s）
 
 let templatePromise = null;
 
@@ -96,7 +98,9 @@ function buildInstance(root, template, car) {
 
   const mats = [];
   const wheelMeshes = [];
+  const caliperMeshes = [];
   const brakeMats = [];
+  const rearLightMeshes = [];
   const rearLightBox = new THREE.Box3();
   const box = new THREE.Box3();
   inst.traverse(o => {
@@ -110,15 +114,17 @@ function buildInstance(root, template, car) {
       if (m.name === BODY_MAT) m.color.set(car.color || "#f59e0b");
     }
     if (cloned.some(m => SPIN_MAT.test(m.name || ""))) wheelMeshes.push(o);
+    else if (cloned.some(m => CALIPER_MAT.test(m.name || ""))) caliperMeshes.push(o);
     // 尾灯：材质逐网格克隆，按网格在车尾（-X）挑出尾灯组，免得头灯一起亮
     if (cloned.some(m => LIGHT_MAT.test(m.name || ""))) {
       box.setFromObject(o);
       if (box.getCenter(new THREE.Vector3()).x < -0.2) {
         rearLightBox.union(box);
+        rearLightMeshes.push(o);
         for (const m of cloned) {
           if (!LIGHT_MAT.test(m.name || "")) continue;
-          m.emissive.setHex(0xff2008);
-          m.emissiveIntensity = 0;
+          m.emissive.setRGB(0.65, 0.05, 0.02);
+          m.emissiveIntensity = 0.55;
           brakeMats.push(m);
         }
       }
@@ -127,15 +133,19 @@ function buildInstance(root, template, car) {
 
   const c = new THREE.Vector3();
   const clusters = new Map();
+  const ensureCluster = (key) => {
+    let cl = clusters.get(key);
+    if (!cl) {
+      cl = { all: null, tire: null, meshes: [], calipers: [] };
+      clusters.set(key, cl);
+    }
+    return cl;
+  };
   for (const mesh of wheelMeshes) {
     box.setFromObject(mesh);
     box.getCenter(c);
     const key = (c.x >= 0 ? "F" : "R") + (c.z >= 0 ? "L" : "R");
-    let cl = clusters.get(key);
-    if (!cl) {
-      cl = { all: null, tire: null, meshes: [] };
-      clusters.set(key, cl);
-    }
+    const cl = ensureCluster(key);
     cl.all = cl.all ? cl.all.union(box) : box.clone();
     const ms = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     if (ms.some(m => TIRE_MAT.test(m.name || ""))) {
@@ -143,25 +153,52 @@ function buildInstance(root, template, car) {
     }
     cl.meshes.push(mesh);
   }
+  for (const cal of caliperMeshes) {
+    box.setFromObject(cal);
+    box.getCenter(c);
+    const key = (c.x >= 0 ? "F" : "R") + (c.z >= 0 ? "L" : "R");
+    ensureCluster(key).calipers.push(cal);
+  }
 
   const spinNodes = [];
   const steerNodes = [];
   let radiusSum = 0;
   for (const cl of clusters.values()) {
     const hubBox = cl.tire || cl.all;   // 轮心以轮胎本体为准，轮辐外凸不影响圆心
-    const pivot = new THREE.Group();
-    pivot.rotation.order = "YXZ";       // 先转向（y）再滚动（z）
-    pivot.position.copy(hubBox.getCenter(new THREE.Vector3()));
-    if (pivot.position.x > 0) steerNodes.push(pivot);   // +X 为车头 → 前轮参与转向
-    root.add(pivot);
-    for (const mesh of cl.meshes) pivot.attach(mesh);
-    spinNodes.push(pivot);
+    if (!hubBox) continue;
+    // 外层转向节 steerPivot：负责绕轮心竖直轴（y）转向，挂载刹车卡钳（随轮转向、不随轮自转）
+    const steerPivot = new THREE.Group();
+    steerPivot.position.copy(hubBox.getCenter(new THREE.Vector3()));
+    if (steerPivot.position.x > 0) steerNodes.push(steerPivot);   // +X 为车头 → 前轮参与转向
+    root.add(steerPivot);
+    for (const cal of cl.calipers) steerPivot.attach(cal);
+
+    // 内层轮毂轴 spinPivot：负责绕车轴（z）滚动，挂载轮胎、轮辐与刹车盘
+    const spinPivot = new THREE.Group();
+    steerPivot.add(spinPivot);
+    for (const mesh of cl.meshes) spinPivot.attach(mesh);
+    spinNodes.push(spinPivot);
     radiusSum += Math.abs(hubBox.max.y - hubBox.min.y) / 2;
   }
 
-  // 尾灯辉光 + 车尾红色点光源（把光洒到车后路面，配合自发光更像真车）
-  const brakeGlow = createBrakeGlow(root, glowPositions(rearLightBox), {
-    color: 0xff3a12, size: 1.0, lightPower: 5.0,
+  // 在 root 局部坐标（归零态）下沿仰望 U9 星际穿廊矩阵尾灯叶片采样真实 3D 表面发光点
+  const lampEmitters = sampleRearLampEmitters(rearLightMeshes, rearLightBox, {
+    count: 8,
+    back: 0.015,
+    size: 0.26,
+    coreSize: 0.125,
+    aspectX: 1.48,
+    aspectY: 0.85,
+  });
+
+  // 矩阵尾灯多点灯芯光晕 + 左右灯位点光源 + 车后地面扇形红光池
+  const brakeGlow = createBrakeGlow(root, lampEmitters, {
+    color: 0xff260c,
+    coreColor: 0xfff2d6,
+    lightPower: 5.6,
+    lightDistance: 5.6,
+    poolLength: 2.4,
+    idleGlow: 0.12,
   });
 
   const u = root.userData;
@@ -225,11 +262,16 @@ export function sync(root, car, ctx) {
   u.steerVis = (u.steerVis || 0) + (target - (u.steerVis || 0)) * Math.min(1, dt * STEER_SMOOTH);
   for (const p of u.steerNodes) p.rotation.y = u.steerVis;
 
-  // 尾灯：踩刹车时点亮（红光亮起/熄灭带插值，避免一闪一闪）
+  // 尾灯：踩刹车时快速点亮炽白橙红灯芯，松刹车带余晖平滑回落
   const glowTarget = ctx.braking ? 1 : 0;
-  u.brakeGlow = (u.brakeGlow || 0) + (glowTarget - (u.brakeGlow || 0)) * Math.min(1, dt * BRAKE_SMOOTH);
+  const glowRate = glowTarget > (u.brakeGlow || 0) ? BRAKE_RISE : BRAKE_FALL;
+  u.brakeGlow = (u.brakeGlow || 0) + (glowTarget - (u.brakeGlow || 0)) * Math.min(1, dt * glowRate);
   if (u.brakeMats && u.brakeMats.length) {
-    for (const m of u.brakeMats) m.emissiveIntensity = u.brakeGlow * BRAKE_GLOW;
+    const g = u.brakeGlow;
+    for (const m of u.brakeMats) {
+      m.emissive.setRGB(0.65 + 0.35 * g, 0.05 + 0.23 * g, 0.02 + 0.07 * g);
+      m.emissiveIntensity = 0.55 + g * BRAKE_GLOW;
+    }
   }
   updateBrakeGlow(u.brakeGlowObj, u.brakeGlow, ctx.ghostA ?? 1);
 }

@@ -328,104 +328,424 @@ export function isBraking(car, spd) {
 // 刹车灯（F1 尾灯/雨灯、卡车尾灯共用）；glTF 车模的灯材质由各自模块处理
 export function syncBrakeLights(root, car, ctx) {
   const u = root.userData;
+  const dt = ctx.dt ?? 0.016;
   const braking = ctx.braking ?? isBraking(car, ctx.spd);
-  if (!u.brakeMat) return braking;
-  u.brakeMat.emissive.setHex(braking ? 0xff1e1e : 0x000000);
-  u.brakeMat.emissiveIntensity = braking ? 2.2 : 0;
+  const target = braking ? 1 : 0;
+  // LED 刹车灯物理响应：点亮极快（约 40ms 满亮），松刹带轻微余晖衰减
+  const rate = target > (u.brakeGlow || 0) ? 24 : 11;
+  u.brakeGlow = (u.brakeGlow || 0) + (target - (u.brakeGlow || 0)) * Math.min(1, dt * rate);
+  const g = u.brakeGlow;
+
+  if (u.brakeMat) {
+    // 常态保留微弱暗红尾灯底色；制动时由深红升至炽白橙红灯芯，抵抗 ACES 色调映射压暗
+    u.brakeMat.color.setRGB(0.28 + 0.72 * g, 0.03 + 0.22 * g, 0.04 + 0.08 * g);
+    u.brakeMat.emissive.setRGB(0.22 + 0.78 * g, 0.01 + 0.25 * g, 0.02 + 0.06 * g);
+    u.brakeMat.emissiveIntensity = 0.38 + g * 5.8;
+  }
+  if (u.brakeCoreMat) {
+    // 灯罩内部高亮度 LED 二极管发光芯（制动时呈现炽热黄白光核）
+    u.brakeCoreMat.color.setRGB(0.55 + 0.45 * g, 0.08 + 0.68 * g, 0.06 + 0.36 * g);
+    u.brakeCoreMat.opacity = (0.28 + g * 0.72) * (ctx.ghostA ?? 1);
+  }
+  if (u.brakeGlowObj) {
+    updateBrakeGlow(u.brakeGlowObj, g, ctx.ghostA ?? 1);
+  }
   return braking;
 }
 
-/* ================= 刹车灯辉光（叠加 Sprite 光晕 + 车尾点光源） =================
-   模型的自发光在 ACES 色调映射下很容易被压暗，单靠 emissiveIntensity 提不亮；
-   这里补一层不受色调映射影响的加法混合光晕，再用一个红色点光源把光洒到路面。 */
+/* ================= 刹车灯光学系统（灯芯炙热光核 + 贴合灯带光晕 + 灯位点光源 + 地面投射光斑） =================
+   真实车灯点亮需要三层物理视觉：
+   1. 灯体自身亮起：紧贴灯罩表面的高亮度炽白-橙黄 LED 灯芯光核（Core）与沿灯具轮廓分布的深红光学微晕（Halo）；
+   2. 光源从灯发出：锚定在左右/中央灯壳正后方的近距点光源（照射后保险杠、扩散器与尾翼端板反光）+ 向后发散的体积光锥；
+   3. 车后路面洒光：紧随车尾地面投射的双束扇形深红尾灯光池（Ground Light Pool）。 */
 
-let _glowTex = null;
-function brakeGlowTexture() {
-  if (_glowTex) return _glowTex;
+let _coreTex = null;
+function brakeCoreTexture() {
+  if (_coreTex) return _coreTex;
   const S = 128;
   const cv = document.createElement("canvas");
   cv.width = S; cv.height = S;
   const c = cv.getContext("2d");
   const g = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
-  g.addColorStop(0, "rgba(255,255,255,1)");
-  g.addColorStop(0.18, "rgba(255,224,200,0.92)");
-  g.addColorStop(0.42, "rgba(255,110,60,0.42)");
-  g.addColorStop(0.72, "rgba(255,50,20,0.14)");
-  g.addColorStop(1, "rgba(255,30,10,0)");
+  g.addColorStop(0, "rgba(255,255,252,1)");
+  g.addColorStop(0.22, "rgba(255,232,185,0.95)");
+  g.addColorStop(0.48, "rgba(255,115,40,0.62)");
+  g.addColorStop(0.76, "rgba(245,28,8,0.18)");
+  g.addColorStop(1, "rgba(180,0,0,0)");
   c.fillStyle = g;
   c.fillRect(0, 0, S, S);
-  _glowTex = new THREE.CanvasTexture(cv);
-  _glowTex.colorSpace = THREE.SRGBColorSpace;
-  return _glowTex;
+  _coreTex = new THREE.CanvasTexture(cv);
+  _coreTex.colorSpace = THREE.SRGBColorSpace;
+  return _coreTex;
 }
 
-// 车灯位置 → 光晕点位：贯穿式宽灯带取左右各一处，普通灯组取中心一处
-export function glowPositions(box, { back = 0.06, splitWidth = 0.9 } = {}) {
+let _haloTex = null;
+function brakeHaloTexture() {
+  if (_haloTex) return _haloTex;
+  const S = 128;
+  const cv = document.createElement("canvas");
+  cv.width = S; cv.height = S;
+  const c = cv.getContext("2d");
+  // 主径向深红灯罩辉光
+  const g = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  g.addColorStop(0, "rgba(255,175,120,0.88)");
+  g.addColorStop(0.24, "rgba(255,64,22,0.58)");
+  g.addColorStop(0.55, "rgba(235,18,8,0.24)");
+  g.addColorStop(0.82, "rgba(190,6,4,0.06)");
+  g.addColorStop(1, "rgba(140,0,0,0)");
+  c.fillStyle = g;
+  c.fillRect(0, 0, S, S);
+
+  // 叠加细微水平变形镜头衍射光束（Anamorphic Lens Streak），贴合现代横向 LED 尾灯光学质感
+  c.save();
+  c.translate(S / 2, S / 2);
+  c.scale(1.0, 0.22);
+  const sg = c.createRadialGradient(0, 0, 0, 0, 0, S * 0.48);
+  sg.addColorStop(0, "rgba(255,220,180,0.45)");
+  sg.addColorStop(0.45, "rgba(255,60,20,0.22)");
+  sg.addColorStop(1, "rgba(200,0,0,0)");
+  c.fillStyle = sg;
+  c.beginPath();
+  c.arc(0, 0, S * 0.48, 0, Math.PI * 2);
+  c.fill();
+  c.restore();
+
+  _haloTex = new THREE.CanvasTexture(cv);
+  _haloTex.colorSpace = THREE.SRGBColorSpace;
+  return _haloTex;
+}
+
+let _groundPoolTex = null;
+function brakeGroundPoolTexture() {
+  if (_groundPoolTex) return _groundPoolTex;
+  const W = 256, H = 256;
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const c = cv.getContext("2d");
+  // UV 约定：PlaneGeometry 旋转后 u(x轴) 对应车辆前后方向，v(y轴) 对应车辆左右方向(z)
+  // 在左侧(v=0.26)、中央(v=0.50)、右侧(v=0.74)绘制向车尾方向扩散的扇形红光投射束
+  const drawBeam = (vy, rx, ry, alpha) => {
+    c.save();
+    c.translate(W * 0.72, H * vy);
+    c.scale(rx, ry);
+    const rg = c.createRadialGradient(0, 0, 0, -W * 0.14, 0, W * 0.46);
+    rg.addColorStop(0, `rgba(255,75,25,${alpha})`);
+    rg.addColorStop(0.32, `rgba(240,22,8,${(alpha * 0.65).toFixed(3)})`);
+    rg.addColorStop(0.68, `rgba(195,8,4,${(alpha * 0.25).toFixed(3)})`);
+    rg.addColorStop(1, "rgba(140,0,0,0)");
+    c.fillStyle = rg;
+    c.beginPath();
+    c.arc(0, 0, W * 0.48, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+  };
+  drawBeam(0.26, 1.15, 0.58, 0.52);
+  drawBeam(0.74, 1.15, 0.58, 0.52);
+  drawBeam(0.50, 0.95, 0.52, 0.34);
+
+  _groundPoolTex = new THREE.CanvasTexture(cv);
+  _groundPoolTex.colorSpace = THREE.SRGBColorSpace;
+  return _groundPoolTex;
+}
+
+// 从 glTF 车尾灯网格采样真实的 3D 灯带/灯组表面轮廓发光点（保证光源严格贴在 3D 灯具表面而非悬空大圆球）
+export function sampleRearLampEmitters(meshes, fallbackBox, {
+  count = 8,
+  back = 0.015,
+  aspectX = 1.45,
+  aspectY = 0.85,
+  size = 0.30,
+  coreSize = 0.14,
+} = {}) {
+  const pts = [];
+  const v = new THREE.Vector3();
+  for (const mesh of meshes || []) {
+    if (!mesh || !mesh.geometry || !mesh.geometry.attributes.position) continue;
+    const pos = mesh.geometry.attributes.position;
+    const step = Math.max(1, Math.floor(pos.count / 600));
+    for (let i = 0; i < pos.count; i += step) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+      if (v.x < -0.5 && v.y > 0.22 && v.y < 1.35) {
+        pts.push(v.clone());
+      }
+    }
+  }
+
+  if (pts.length >= 4) {
+    let minZ = Infinity, maxZ = -Infinity;
+    for (const p of pts) {
+      if (p.z < minZ) minZ = p.z;
+      if (p.z > maxZ) maxZ = p.z;
+    }
+    const spanZ = Math.max(0.2, maxZ - minZ);
+    const bins = Array.from({ length: count }, () => []);
+    for (const p of pts) {
+      const idx = Math.min(count - 1, Math.max(0, Math.floor(((p.z - minZ) / spanZ) * count)));
+      bins[idx].push(p);
+    }
+    const emitters = [];
+    for (let b = 0; b < count; b++) {
+      const bucket = bins[b];
+      if (!bucket.length) continue;
+      // 取该横向切片中最靠车尾外侧（x 最小）的前 35% 顶点均值，精确贴合尾灯外透镜表面
+      bucket.sort((a, c) => a.x - c.x);
+      const take = Math.max(1, Math.ceil(bucket.length * 0.35));
+      let sx = 0, sy = 0, sz = 0;
+      for (let i = 0; i < take; i++) {
+        sx += bucket[i].x;
+        sy += bucket[i].y;
+        sz += bucket[i].z;
+      }
+      const ex = sx / take - back;
+      const ey = sy / take;
+      const ez = sz / take;
+      const isOuter = b <= 1 || b >= count - 2;
+      emitters.push({
+        pos: new THREE.Vector3(ex, ey, ez),
+        size: isOuter ? size * 1.12 : size,
+        coreSize: isOuter ? coreSize * 1.12 : coreSize,
+        aspectX,
+        aspectY,
+        hasBeam: isOuter,
+      });
+    }
+    if (emitters.length) return emitters;
+  }
+
+  return glowPositions(fallbackBox, { back }).map(p => ({
+    pos: p, size, coreSize, aspectX, aspectY, hasBeam: true,
+  }));
+}
+
+// 车灯包围盒 → 灯面发光点位（供无顶点网格或兜底使用）
+export function glowPositions(box, { back = 0.02, splitWidth = 0.85 } = {}) {
   if (!box || box.isEmpty()) return [];
   const c = box.getCenter(new THREE.Vector3());
   const w = Math.abs(box.max.z - box.min.z);
-  const x = box.min.x - back;           // 灯面外侧（车尾方向）
+  const x = box.min.x - back;           // 紧贴灯面外侧
   if (w > splitWidth) {
     return [
-      new THREE.Vector3(x, c.y, box.min.z + w * 0.24),
-      new THREE.Vector3(x, c.y, box.max.z - w * 0.24),
+      new THREE.Vector3(x, c.y, box.min.z + w * 0.22),
+      new THREE.Vector3(x, c.y, box.max.z - w * 0.22),
     ];
   }
   return [new THREE.Vector3(x, c.y, c.z)];
 }
 
-export function createBrakeGlow(root, positions, opts = {}) {
-  const color = opts.color ?? 0xff3a12;
-  const baseSize = opts.size ?? 1.05;
-  const tex = brakeGlowTexture();
-  const sprites = positions.map(p => {
-    const mat = new THREE.SpriteMaterial({
-      map: tex, color, transparent: true, opacity: 0,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const sp = new THREE.Sprite(mat);
-    sp.position.copy(p);
-    sp.scale.setScalar(baseSize);
-    sp.visible = false;
-    root.add(sp);
-    return sp;
+export function createBrakeGlow(parent, rawPositions, opts = {}) {
+  const haloColor = opts.color ?? 0xff2a10;
+  const coreColor = opts.coreColor ?? 0xfff2d6;
+  const defaultSize = opts.size ?? 0.34;
+  const defaultCoreSize = opts.coreSize ?? defaultSize * 0.44;
+  const coreTex = brakeCoreTexture();
+  const haloTex = brakeHaloTexture();
+
+  const items = (rawPositions || []).map(item => {
+    if (item && item.isVector3) {
+      return {
+        pos: item.clone(),
+        size: defaultSize,
+        coreSize: defaultCoreSize,
+        aspectX: opts.aspectX ?? 1.25,
+        aspectY: opts.aspectY ?? 0.9,
+        hasBeam: true,
+      };
+    }
+    return {
+      pos: item.pos.clone(),
+      size: item.size ?? defaultSize,
+      coreSize: item.coreSize ?? defaultCoreSize,
+      aspectX: item.aspectX ?? opts.aspectX ?? 1.25,
+      aspectY: item.aspectY ?? opts.aspectY ?? 0.9,
+      hasBeam: item.hasBeam ?? false,
+      beamRadius: item.beamRadius ?? 0.09,
+      beamLength: item.beamLength ?? 0.42,
+    };
   });
 
-  let light = null;
-  if (opts.light !== false && positions.length) {
-    light = new THREE.PointLight(color, 0, opts.lightDistance ?? 8, 2);
-    const c = new THREE.Vector3();
-    for (const p of positions) c.add(p);
-    c.multiplyScalar(1 / positions.length);
-    c.x -= opts.lightBack ?? 0.3;              // 光源略微退到灯面之后
-    c.y = Math.max(0.35, c.y);
-    light.position.copy(c);
-    root.add(light);
+  const coreSprites = [];
+  const haloSprites = [];
+  const beamMeshes = [];
+
+  for (const it of items) {
+    // 1) 紧贴灯面的高亮度白橙色 LED 发光核（让人眼看清光是灯芯亮起来）
+    const cMat = new THREE.SpriteMaterial({
+      map: coreTex,
+      color: coreColor,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: true,
+    });
+    const cSp = new THREE.Sprite(cMat);
+    cSp.position.copy(it.pos);
+    cSp.scale.set(it.coreSize * it.aspectX, it.coreSize * it.aspectY, 1);
+    cSp.renderOrder = 3;
+    parent.add(cSp);
+    coreSprites.push({ sprite: cSp, baseW: it.coreSize * it.aspectX, baseH: it.coreSize * it.aspectY });
+
+    // 2) 包裹灯罩边缘的深红光学光晕（严格控制尺寸，绝不变成悬空大红球）
+    const hMat = new THREE.SpriteMaterial({
+      map: haloTex,
+      color: haloColor,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: true,
+    });
+    const hSp = new THREE.Sprite(hMat);
+    hSp.position.copy(it.pos);
+    hSp.position.x -= 0.008;
+    hSp.scale.set(it.size * it.aspectX, it.size * it.aspectY, 1);
+    hSp.renderOrder = 2;
+    parent.add(hSp);
+    haloSprites.push({ sprite: hSp, baseW: it.size * it.aspectX, baseH: it.size * it.aspectY });
+
+    // 3) 从灯面往车后（-X）射出的柔和立体体积光锥（表现光线从灯罩向外发散）
+    if (it.hasBeam) {
+      const bGeo = new THREE.ConeGeometry(it.beamRadius, it.beamLength, 14, 1, true);
+      // Cone 默认尖端在 +Y，开口在 -Y：旋转 -PI/2 绕 Z 轴使尖端在 +X（灯芯）、开口朝 -X（车后发散）
+      bGeo.rotateZ(-Math.PI / 2);
+      bGeo.translate(-it.beamLength * 0.5, 0, 0);
+      const bMat = new THREE.MeshBasicMaterial({
+        color: haloColor,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const bMesh = new THREE.Mesh(bGeo, bMat);
+      bMesh.position.copy(it.pos);
+      bMesh.visible = false;
+      bMesh.renderOrder = 2;
+      parent.add(bMesh);
+      beamMeshes.push(bMesh);
+    }
   }
 
-  // 点光源强度按物理单位（坎德拉）：本场景主平行光为 3.0，刹车灯洒地取 4~5 即可见而不刺眼
-  return { sprites, light, baseSize, lightPower: opts.lightPower ?? 4.5 };
+  // 4) 锚定在左右车灯真实位置的点光源（照亮灯框周围的车尾保险杠、扩散器与地面）
+  const lights = [];
+  if (opts.light !== false && items.length) {
+    const sortedZ = [...items].sort((a, b) => a.pos.z - b.pos.z);
+    const leftAnchor = sortedZ[0].pos;
+    const rightAnchor = sortedZ[sortedZ.length - 1].pos;
+    const anchors = Math.abs(rightAnchor.z - leftAnchor.z) > 0.32
+      ? [leftAnchor, rightAnchor]
+      : [leftAnchor];
+    const perLightPower = (opts.lightPower ?? 4.8) / anchors.length;
+    const dist = opts.lightDistance ?? 5.2;
+    for (const a of anchors) {
+      const pt = new THREE.PointLight(haloColor, 0, dist, 2);
+      pt.position.set(a.x - (opts.lightBack ?? 0.08), Math.max(0.28, a.y), a.z);
+      parent.add(pt);
+      lights.push({ light: pt, maxPower: perLightPower });
+    }
+  }
+
+  // 5) 车尾地面扇形红光投射斑（随刹车灯同步把深红扇形光束洒在车后柏油路面上）
+  let groundPool = null;
+  if (opts.groundPool !== false && items.length) {
+    let minX = Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const it of items) {
+      if (it.pos.x < minX) minX = it.pos.x;
+      if (it.pos.z < minZ) minZ = it.pos.z;
+      if (it.pos.z > maxZ) maxZ = it.pos.z;
+    }
+    const poolW = Math.max(1.55, (maxZ - minZ) + 1.15);
+    const poolLen = opts.poolLength ?? 2.35;
+    const poolGeo = new THREE.PlaneGeometry(poolLen, poolW);
+    poolGeo.rotateX(-Math.PI / 2);
+    const poolMat = new THREE.MeshBasicMaterial({
+      map: brakeGroundPoolTexture(),
+      color: 0xff2208,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+      polygonOffsetUnits: -3,
+    });
+    groundPool = new THREE.Mesh(poolGeo, poolMat);
+    groundPool.position.set(minX - poolLen * 0.42, 0.008, (minZ + maxZ) * 0.5);
+    groundPool.renderOrder = 2;
+    groundPool.visible = false;
+    (opts.groundRoot || parent).add(groundPool);
+  }
+
+  return {
+    coreSprites,
+    haloSprites,
+    beamMeshes,
+    lights,
+    groundPool,
+    idleGlow: opts.idleGlow ?? 0.08, // 尾灯行车微亮底光
+  };
 }
 
 // k：0~1 的制动强度（已含淡入淡出插值）；dim：幽灵/淘汰透明度
 export function updateBrakeGlow(glow, k, dim = 1) {
   if (!glow) return;
-  const v = Math.max(0, Math.min(1, k)) * Math.max(0, Math.min(1, dim));
-  for (const sp of glow.sprites) {
-    sp.visible = v > 0.01;
-    sp.material.opacity = v;
-    sp.scale.setScalar(glow.baseSize * (1 + v * 0.7));
+  const alphaDim = Math.max(0, Math.min(1, dim));
+  const brakeK = Math.max(0, Math.min(1, k));
+  // 常态行车时保留极轻微的尾灯微光，踩下刹车时爆发炽亮灯芯与光晕
+  const vCore = (glow.idleGlow * 0.5 + brakeK * (1 - glow.idleGlow * 0.5)) * alphaDim;
+  const vHalo = (glow.idleGlow * 0.25 + brakeK * (1 - glow.idleGlow * 0.25)) * alphaDim;
+
+  for (const c of glow.coreSprites) {
+    c.sprite.visible = vCore > 0.015;
+    c.sprite.material.opacity = Math.min(1, vCore * 0.96);
+    const s = 0.86 + brakeK * 0.32;
+    c.sprite.scale.set(c.baseW * s, c.baseH * s, 1);
   }
-  if (glow.light) glow.light.intensity = v * glow.lightPower;
+  for (const h of glow.haloSprites) {
+    h.sprite.visible = vHalo > 0.015;
+    h.sprite.material.opacity = Math.min(0.9, vHalo * 0.78);
+    const s = 0.85 + brakeK * 0.38;
+    h.sprite.scale.set(h.baseW * s, h.baseH * s, 1);
+  }
+  for (const b of glow.beamMeshes) {
+    b.visible = brakeK * alphaDim > 0.03;
+    b.material.opacity = brakeK * alphaDim * 0.22;
+    const lenScale = 0.75 + brakeK * 0.45;
+    b.scale.set(lenScale, 0.88 + brakeK * 0.24, 0.88 + brakeK * 0.24);
+  }
+  for (const l of glow.lights) {
+    l.light.intensity = (glow.idleGlow * 0.12 + brakeK) * alphaDim * l.maxPower;
+  }
+  if (glow.groundPool) {
+    const pOpacity = brakeK * alphaDim * 0.62;
+    glow.groundPool.visible = pOpacity > 0.015;
+    glow.groundPool.material.opacity = pOpacity;
+  }
 }
 
 export function disposeBrakeGlow(glow) {
   if (!glow) return;
-  for (const sp of glow.sprites) {
-    sp.material.dispose();
-    sp.removeFromParent();
+  for (const c of glow.coreSprites) {
+    c.sprite.material.dispose();
+    c.sprite.removeFromParent();
   }
-  if (glow.light) glow.light.removeFromParent();
+  for (const h of glow.haloSprites) {
+    h.sprite.material.dispose();
+    h.sprite.removeFromParent();
+  }
+  for (const b of glow.beamMeshes) {
+    b.geometry.dispose();
+    b.material.dispose();
+    b.removeFromParent();
+  }
+  for (const l of glow.lights) {
+    l.light.removeFromParent();
+  }
+  if (glow.groundPool) {
+    glow.groundPool.geometry.dispose();
+    glow.groundPool.material.dispose();
+    glow.groundPool.removeFromParent();
+  }
 }
 
 // 幽灵车 / 淘汰车透明度：glTF 车模走独立材质列表，程序化车型走 allMats

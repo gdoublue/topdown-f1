@@ -7,7 +7,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { CAR_LIVERIES } from "../../car/render.js";
 import {
   _up, _one, mergeBucket, loftRings, makeSuperSection, buildSweptAirfoil,
-  numberTexture, GROUND,
+  numberTexture, GROUND, createBrakeGlow, disposeBrakeGlow,
 } from "./shared.js";
 
 export const id = "f1";
@@ -757,8 +757,12 @@ function f1PartGeometry() {
       x: -2.48, y: 0.535, z: v * 0.55, chord: 0.15, thick: 0.10, angle: -0.34, camber: 0.09,
     }), 16, 10));
 
-    // 6) 尾部碳纤维防撞吸能盒
+    // 6) 尾部碳纤维防撞吸能盒 + FIA 中央尾灯与端板 LED 嵌入式碳纤维灯框
     box("carbon", 0.34, 0.155, 0.105, -2.46, 0.245, 0, 0, 0, -0.04);
+    box("carbon", 0.032, 0.158, 0.098, -2.625, 0.245, 0);
+    for (const sgn of [-1, 1]) {
+      box("carbon", 0.024, 0.205, 0.024, -2.716, 0.795, sgn * 0.602);
+    }
   }
 
   /* ---- 8. 翼型截面双叉臂悬挂（Aero Wishbones）+ 推拉杆 + 转向横拉杆 + 后传动半轴 ---- */
@@ -994,8 +998,16 @@ export function create(car) {
     color: 0xc2cad6, metalness: 0.90, roughness: 0.20,
   });
   const brakeMat = new THREE.MeshStandardMaterial({
-    color: 0x380808, emissive: 0x000000, roughness: 0.35,
+    color: 0x48080c, emissive: 0x380306, emissiveIntensity: 0.38, metalness: 0.18, roughness: 0.22,
   });
+  const brakeCoreMat = new THREE.MeshBasicMaterial({
+    color: 0xffb86c,
+    transparent: true,
+    opacity: 0.28,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  brakeCoreMat.userData.baseAlpha = 0.28;
   const discMat = new THREE.MeshStandardMaterial({
     color: 0x3b4048, emissive: 0x000000, metalness: 0.78, roughness: 0.34,
   });
@@ -1044,16 +1056,51 @@ export function create(car) {
   bodyMesh(G.steerWheel.screen, steerScreenMat, steerWheelGroup);
   chassis.add(steerWheelGroup);
 
-  // 尾部 FIA 矩阵雨灯 + 尾翼端板后缘双 LED 刹车灯条（刹车时同步高亮）
+  // 尾部 FIA 矩阵雨灯 + 尾翼端板后缘双 LED 刹车灯条（红宝石外灯罩 + 内部高亮度 LED 二极管发光芯 + 贴合灯位光晕与点光源）
   const rainLight = new THREE.Mesh(G.rainLight, brakeMat);
   rainLight.position.set(-2.635, 0.245, 0);
   rainLight.castShadow = true;
   chassis.add(rainLight);
+  const rainCore = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.115, 0.056), brakeCoreMat);
+  rainCore.position.set(-2.654, 0.245, 0);
+  chassis.add(rainCore);
+
+  const epLensGeo = new THREE.BoxGeometry(0.018, 0.19, 0.016);
+  const epCoreGeo = new THREE.BoxGeometry(0.010, 0.172, 0.010);
   for (const sgn of [-1, 1]) {
-    const epLed = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.19, 0.016), brakeMat);
+    const epLed = new THREE.Mesh(epLensGeo, brakeMat);
     epLed.position.set(-2.725, 0.795, sgn * 0.602);
     chassis.add(epLed);
+    const epCore = new THREE.Mesh(epCoreGeo, brakeCoreMat);
+    epCore.position.set(-2.732, 0.795, sgn * 0.602);
+    chassis.add(epCore);
   }
+
+  const brakeGlowObj = createBrakeGlow(chassis, [
+    {
+      pos: new THREE.Vector3(-2.665, 0.245, 0),
+      size: 0.30, coreSize: 0.15, aspectX: 0.92, aspectY: 1.32,
+      hasBeam: true, beamRadius: 0.085, beamLength: 0.46,
+    },
+    {
+      pos: new THREE.Vector3(-2.740, 0.795, -0.602),
+      size: 0.24, coreSize: 0.11, aspectX: 0.52, aspectY: 1.95,
+      hasBeam: true, beamRadius: 0.058, beamLength: 0.34,
+    },
+    {
+      pos: new THREE.Vector3(-2.740, 0.795, 0.602),
+      size: 0.24, coreSize: 0.11, aspectX: 0.52, aspectY: 1.95,
+      hasBeam: true, beamRadius: 0.058, beamLength: 0.34,
+    },
+  ], {
+    color: 0xff240c,
+    coreColor: 0xfff0d0,
+    lightPower: 5.2,
+    lightDistance: 5.5,
+    groundRoot: root,
+    poolLength: 2.4,
+    idleGlow: 0.10,
+  });
 
   // 中央排气管降挡回火蓝橙尾焰（重刹降挡瞬态爆燃闪烁）
   const flameMat = new THREE.MeshBasicMaterial({
@@ -1112,7 +1159,7 @@ export function create(car) {
 
   const allMats = [
     livery, liveryDark, accentMat, carbon, suspMat, metalMat,
-    brakeMat, discMat, helmetMat, visorMat, steerScreenMat, numMat,
+    brakeMat, brakeCoreMat, discMat, helmetMat, visorMat, steerScreenMat, numMat,
     tireMat, wallMat, coverMat, nutMat, aoMat,
   ];
 
@@ -1171,6 +1218,9 @@ export function create(car) {
   root.userData = {
     wheels,
     brakeMat,
+    brakeCoreMat,
+    brakeGlowObj,
+    brakeGlow: 0,
     discMat,
     brakeHeat: 0,
     exhaustFlame,
@@ -1244,4 +1294,6 @@ export function sync(root, car, ctx) {
 /* 释放一辆车的独立材质（共享几何、贴图与模板不释放） */
 export function dispose(root) {
   (root.userData.allMats || []).forEach(m => m && m.dispose());
+  disposeBrakeGlow(root.userData.brakeGlowObj);
+  root.userData.brakeGlowObj = null;
 }

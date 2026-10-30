@@ -3,7 +3,10 @@
 // 坐标沿用项目约定：x 向前（+2.7 车头）、y 向上、z 向右（车身右侧）；
 // 轮位与 physics.js 的落印坐标对齐（±1.75 / ±0.8x），刹车印才能压在轮胎正下方。
 import * as THREE from "three";
-import { _up, _one, mergeBucket, numberTexture, GROUND } from "./shared.js";
+import {
+  _up, _one, mergeBucket, numberTexture, GROUND,
+  createBrakeGlow, disposeBrakeGlow,
+} from "./shared.js";
 
 export const id = "offroad";
 
@@ -69,7 +72,7 @@ function truckRod(push, name, x1, y1, z1, x2, y2, z2, r = 0.028) {
 let truckGeoCache = null;
 function truckPartGeometry() {
   if (truckGeoCache) return truckGeoCache;
-  const B = { paint: [], paint2: [], dark: [], steel: [], glass: [], lamp: [], tail: [], rubber: [] };
+  const B = { paint: [], paint2: [], dark: [], steel: [], glass: [], lamp: [], tail: [], tailCore: [], rubber: [] };
   const push = (name, geo, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => {
     const m = new THREE.Matrix4().compose(
       new THREE.Vector3(x, y, z),
@@ -104,13 +107,22 @@ function truckPartGeometry() {
   for (const z of [-0.895, 0.895]) push("glass", new THREE.BoxGeometry(0.95, 0.30, 0.04), 0.92, 1.24, z);
   push("glass", new THREE.BoxGeometry(0.04, 0.30, 1.46), 0.13, 1.24, 0, 0, 0, -0.22);
 
-  /* ---- 进气格栅 + 大灯 + 尾灯 ---- */
+  /* ---- 进气格栅 + 大灯 + 尾灯总成（嵌入式灯框 + 红宝石灯罩 + 双腔 LED 导光灯芯 + 高位刹车灯） ---- */
   box("dark", 0.06, 0.30, 1.30, 2.44, 0.96, 0);
   for (const z of [-0.62, 0.62]) {
+    const tz = z * 1.15;
     push("dark", new THREE.CylinderGeometry(0.175, 0.175, 0.08, 20), 2.49, 1.02, z, 0, 0, Math.PI / 2);
     push("lamp", new THREE.CylinderGeometry(0.15, 0.15, 0.10, 20), 2.545, 1.02, z, 0, 0, Math.PI / 2);
-    box("tail", 0.05, 0.16, 0.26, -2.34, 0.96, z * 1.15);
+    // 车尾嵌入式护框 + 红宝石尾灯外罩 + 上下双腔高亮度 LED 发光灯条
+    box("dark", 0.052, 0.195, 0.295, -2.328, 0.96, tz);
+    box("tail", 0.046, 0.162, 0.262, -2.344, 0.96, tz);
+    box("tailCore", 0.016, 0.042, 0.222, -2.364, 0.996, tz);
+    box("tailCore", 0.016, 0.042, 0.222, -2.364, 0.924, tz);
   }
+  // 驾驶室后上方防滚架高位刹车灯（CHMSL）
+  box("dark", 0.046, 0.052, 0.44, 0.155, 1.545, 0);
+  box("tail", 0.036, 0.036, 0.40, 0.142, 1.545, 0);
+  box("tailCore", 0.014, 0.020, 0.36, 0.126, 1.545, 0);
 
   /* ---- 轮眉 + 挡泥板 + 侧踏板 ---- */
   for (const x of [TRUCK.frontX, TRUCK.rearX]) {
@@ -161,6 +173,7 @@ function truckPartGeometry() {
     glass: mergeBucket(B.glass),
     lamp: mergeBucket(B.lamp),
     tail: mergeBucket(B.tail),
+    tailCore: mergeBucket(B.tailCore),
     rubber: mergeBucket(B.rubber),
     coil: coilSpringGeometry(0.50),
   };
@@ -233,7 +246,17 @@ function createTruckMesh(car) {
   const lamp = new THREE.MeshStandardMaterial({
     color: 0xfff6dc, emissive: 0xffeab4, emissiveIntensity: 2.0, metalness: 0.1, roughness: 0.15,
   });
-  const tailMat = new THREE.MeshStandardMaterial({ color: 0x5a1010, emissive: 0x000000, roughness: 0.4 });
+  const tailMat = new THREE.MeshStandardMaterial({
+    color: 0x4a090c, emissive: 0x380306, emissiveIntensity: 0.38, metalness: 0.16, roughness: 0.24,
+  });
+  const tailCoreMat = new THREE.MeshBasicMaterial({
+    color: 0xffb86c,
+    transparent: true,
+    opacity: 0.28,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  tailCoreMat.userData.baseAlpha = 0.28;
   const springMat = new THREE.MeshStandardMaterial({ color: 0xc4ccd4, metalness: 0.9, roughness: 0.25 });
   const rubberMat = new THREE.MeshStandardMaterial({ color: 0x1d2022, metalness: 0.02, roughness: 0.95 });
   const rimMat = new THREE.MeshStandardMaterial({ color: 0x8e979f, metalness: 0.9, roughness: 0.3 });
@@ -255,7 +278,35 @@ function createTruckMesh(car) {
   bodyMesh(geo.glass, glass);
   bodyMesh(geo.lamp, lamp);
   bodyMesh(geo.tail, tailMat);
+  bodyMesh(geo.tailCore, tailCoreMat);
   bodyMesh(geo.rubber, rubberMat);
+
+  // 越野卡车双侧矩阵尾灯 + 驾驶室高位刹车灯光学辉光（挂载在簧上 body 上，随车身俯仰/侧倾同步摆动）
+  const brakeGlowObj = createBrakeGlow(body, [
+    {
+      pos: new THREE.Vector3(-2.378, 0.96, -0.713),
+      size: 0.38, coreSize: 0.19, aspectX: 1.38, aspectY: 0.95,
+      hasBeam: true, beamRadius: 0.12, beamLength: 0.52,
+    },
+    {
+      pos: new THREE.Vector3(-2.378, 0.96, 0.713),
+      size: 0.38, coreSize: 0.19, aspectX: 1.38, aspectY: 0.95,
+      hasBeam: true, beamRadius: 0.12, beamLength: 0.52,
+    },
+    {
+      pos: new THREE.Vector3(0.118, 1.545, 0),
+      size: 0.24, coreSize: 0.11, aspectX: 1.85, aspectY: 0.48,
+      hasBeam: false,
+    },
+  ], {
+    color: 0xff260c,
+    coreColor: 0xfff0d0,
+    lightPower: 5.4,
+    lightDistance: 5.8,
+    groundRoot: root,
+    poolLength: 2.5,
+    idleGlow: 0.12,
+  });
 
   const coils = [];
   for (const x of [TRUCK.frontX, TRUCK.rearX]) {
@@ -296,7 +347,7 @@ function createTruckMesh(car) {
     body.add(plate);
   }
 
-  const allMats = [paint, paint2, dark, steel, glass, lamp, tailMat, springMat, rubberMat, rimMat, numMat];
+  const allMats = [paint, paint2, dark, steel, glass, lamp, tailMat, tailCoreMat, springMat, rubberMat, rimMat, numMat];
   const aoMat = new THREE.MeshBasicMaterial({
     map: GROUND.contactShadow,
     transparent: true,
@@ -314,7 +365,7 @@ function createTruckMesh(car) {
   root.add(aoShadow);
 
   root.userData = {
-    wheels, brakeMat: tailMat, allMats,
+    wheels, brakeMat: tailMat, brakeCoreMat: tailCoreMat, brakeGlowObj, brakeGlow: 0, allMats,
     body, coils, roll: 0, pitch: 0, kerbLift: 0, aoShadow,
     spinAngle: 0, lastAlpha: null, wheelR: TRUCK.wheelRR,
   };
@@ -350,4 +401,6 @@ export function sync(root, car, ctx) {
 /* 释放一辆车的独立材质（共享几何与贴图不释放） */
 export function dispose(root) {
   (root.userData.allMats || []).forEach(m => m && m.dispose());
+  disposeBrakeGlow(root.userData.brakeGlowObj);
+  root.userData.brakeGlowObj = null;
 }

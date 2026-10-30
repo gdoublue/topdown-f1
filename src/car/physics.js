@@ -516,52 +516,95 @@ export function stepCar(car, dt, input, fx) {
   const rl = { x: car.x - fxBase + pxPerp * latRL, y: car.y - fyBase + pyPerp * latRL, h: wY(-HALF_BASE, latRL) };
   const rr = { x: car.x - fxBase + pxPerp * latRR, y: car.y - fyBase + pyPerp * latRR, h: wY(-HALF_BASE, latRR) };
 
-  /* 轮胎印：只有真正"搓"到轮胎才留印 —— 重刹接近锁胎、或弯中带刹/压路肩的极限侧滑。
-     不能只按"横向 G 接近极限"起印：本作转向是抓地限幅的街机模型（ω = latAvail / v），
-     高速满舵时 gLat 天然等于 latGrip，那样每个高速弯都会拖四条深印，看起来就像没刹车也在踩刹车。
-     起印/收印仍走渐变（起 ~55ms、收 ~120ms），不会一帧之间"啪"地出现/消失；
-     阈值按本车制动与侧向能力换算，F1（6.3g / 4.7g）和街车（≈1.8g / 1.7g）都在各自极限附近起印。 */
-  let skidTarget = 0, frontBias = 1.0, rearBias = 1.0;
+  /* 四轮独立物理滑移与热惯性留印系统：
+     1. 纵/横耦合摩擦圆（Trail Braking / 点刹入弯）：直道需重刹（≥54% 制动极限）才锁胎；
+        弯中横向载荷已占用抓地力时，锁胎阈值随侧向 G 自动降低（最低至 32%），因此入弯点刹（轻刹 45%）也会真实触发内侧前轮优先抱死留印。
+     2. 载荷转移（Weight Transfer）：制动+转向时重心前移且压向弯外，弯内侧前轮因垂向卸载最先锁死留深印，
+        重刹到底时四轮全面抱死；极限侧滑搓胎时则由重载的弯外侧前后轮主导留印。
+     3. 滑移热惯性迟滞（Hysteresis ~85ms）+ 首尾梭形包络：过滤 1~3 帧的临界抖动（杜绝碎麻点），
+        同时让真实的人为点刹呈现“浅入→深印→浅出”的连续梭形（纺锤形）轮胎印。 */
+  const wTarget = { fl: 0, fr: 0, rl: 0, rr: 0 };
   if (car.prevWheels && surf !== 2 && spd > 3.5) {
     const brakeCap = PHYS.brake * (perf.brakeMult ?? 1);
+    const latLimitG = Math.max(0.5, latGrip / 9.81);
+    const latRatio = clamp((car.gLat || 0) / latLimitG, 0, 1.15);
+    const steerMag = clamp(Math.abs(car.steer || 0) / 0.32, 0, 1);
+    // turnSign > 0（右转）时 fl/rl 为弯内侧轮、fr/rr 为弯外侧轮
+    const flIsInside = turnSign >= 0;
+
     if (car.braking) {
-      // 1. 重刹锁胎：制动力用到本车刹车上限的 55% 以上才开始锁（F1 ≈3.5g）
-      const lockDecel = brakeCap * 0.55;
+      // 弯中带刹（循迹刹车/点刹）时横向力已消耗摩擦圆，纵向起印阈值随之下降
+      const lockDecel = brakeCap * (0.54 - 0.22 * clamp(latRatio, 0, 1));
       if (car.accel < -lockDecel) {
         const over = clamp((-car.accel - lockDecel) / Math.max(1, brakeCap - lockDecel), 0, 1);
-        skidTarget = (0.28 + 0.62 * over) * (0.82 + 0.18 * Math.min(1, spd / 45));
-        frontBias = 1.0; rearBias = 0.86;     // 重刹重心前移：前轮先锁死，印更深
+        const baseI = (0.24 + 0.68 * over) * (0.80 + 0.20 * Math.min(1, spd / 42));
+        // 弯内前轮卸载最易抱死；弯外前轮与后轮随制动加深逐步加入锁胎
+        const inFront = baseI * (1.0 + 0.16 * steerMag);
+        const outFront = baseI * clamp((over - 0.16 * steerMag) / Math.max(0.2, 1 - 0.16 * steerMag), 0, 1);
+        const inRear = baseI * 0.84 * clamp((over - 0.08 * steerMag) / 0.92, 0, 1);
+        const outRear = baseI * 0.80 * clamp((over - 0.20 * steerMag) / 0.80, 0, 1);
+        wTarget.fl = clamp(flIsInside ? inFront : outFront, 0, 1);
+        wTarget.fr = clamp(flIsInside ? outFront : inFront, 0, 1);
+        wTarget.rl = clamp(flIsInside ? inRear : outRear, 0, 1);
+        wTarget.rr = clamp(flIsInside ? outRear : inRear, 0, 1);
       }
     }
-    // 2. 极限侧滑搓胎：横向载荷 ≥ 侧向极限 95%，且转向之外还有额外负载
-    //    （弯中带刹的循迹刹车，或压上路肩）；纯满舵过弯不留印
-    if (skidTarget === 0 && Math.abs(car.steer) > 0.22 && spd > 9) {
-      const latLimitG = latGrip / 9.81;
-      const scrubG = latLimitG * 0.95;
-      const extraLoad = car.braking || car.accel < -brakeCap * 0.3 || surf === 1;
-      if (extraLoad && car.gLat > scrubG) {
-        skidTarget = clamp((car.gLat - scrubG) / Math.max(0.05, latLimitG * 0.15), 0.10, 0.32);
-        frontBias = 0.86; rearBias = 1.0;     // 极限过弯：后轴先失稳，后轮印更深
-      }
-    }
-  }
-  const skidPrev = car.skidI || 0;
-  // 起印快、收印快：锁胎几十毫秒内出现，松刹后约 0.1s（几米）收干净，
-  // 避免指数尾巴在停车点叠出一团黑斑
-  car.skidI = skidTarget > skidPrev
-    ? skidPrev + (skidTarget - skidPrev) * Math.min(1, dt / 0.055)
-    : Math.max(0, skidPrev - dt * 7.5);
-  if (car.skidI < 0.04) car.skidI = 0;
 
-  if (car.skidI > 0 && car.prevWheels && surf !== 2 && spd > 1) {
-    // 前轮窄胎 0.32m、后轮宽胎 0.42m：四条痕迹的宽度、深浅与半径各不相同；
-    // 两个端点各带自己的路面高度，印子贴合纵向坡度与横坡
-    fx.addSkid(car.prevWheels.fl, fl, car.skidI * frontBias, 0.32, car.prevWheels.fl.h, fl.h);
-    fx.addSkid(car.prevWheels.fr, fr, car.skidI * frontBias, 0.32, car.prevWheels.fr.h, fr.h);
-    fx.addSkid(car.prevWheels.rl, rl, car.skidI * rearBias, 0.42, car.prevWheels.rl.h, rl.h);
-    fx.addSkid(car.prevWheels.rr, rr, car.skidI * rearBias, 0.42, car.prevWheels.rr.h, rr.h);
+    // 极限侧滑搓胎：横向载荷 ≥ 侧向极限 93%，且有带刹减速或压路肩负载时，重载的弯外侧车轮留下搓胎印
+    if (wTarget.fl === 0 && wTarget.fr === 0 && Math.abs(car.steer) > 0.20 && spd > 9) {
+      const extraLoad = car.braking || car.accel < -brakeCap * 0.26 || surf === 1;
+      if (extraLoad && latRatio > 0.93) {
+        const scrubI = clamp((latRatio - 0.93) / 0.16, 0.12, 0.38);
+        const outF = scrubI * 0.88, inF = scrubI * 0.38;
+        const outR = scrubI * 1.00, inR = scrubI * 0.45;
+        wTarget.fl = flIsInside ? inF : outF;
+        wTarget.fr = flIsInside ? outF : inF;
+        wTarget.rl = flIsInside ? inR : outR;
+        wTarget.rr = flIsInside ? outR : inR;
+      }
+    }
   }
-  car.prevWheels = { fl, fr, rl, rr };
+
+  if (!car.wSkid) {
+    car.wSkid = { fl: 0, fr: 0, rl: 0, rr: 0 };
+    car.wHold = { fl: 0, fr: 0, rl: 0, rr: 0 };
+    car.wPeak = { fl: 0, fr: 0, rl: 0, rr: 0 };
+  }
+  const wSkid = car.wSkid, wHold = car.wHold, wPeak = car.wPeak;
+  const curWheels = { fl, fr, rl, rr };
+  let maxWheelSkid = 0;
+
+  for (const k of ["fl", "fr", "rl", "rr"]) {
+    const rawT = wTarget[k];
+    if (rawT > 0) {
+      wHold[k] = 0.085; // 85ms 热迟滞窗口：桥接 1~4 帧的阈值微抖，防止印迹碎裂成麻点
+      wPeak[k] = rawT;
+    } else if (wHold[k] > 0) {
+      wHold[k] = Math.max(0, wHold[k] - dt);
+    }
+    const effTarget = rawT > 0
+      ? rawT
+      : (wHold[k] > 0 ? wPeak[k] * (wHold[k] / 0.085) * 0.72 : 0);
+
+    const prevI = wSkid[k] || 0;
+    // 起印升温快（~45ms），松刹回滚平滑（~95ms），天然形成两端尖、中间深的梭形点刹印
+    let nextI = effTarget > prevI
+      ? prevI + (effTarget - prevI) * Math.min(1, dt / 0.045)
+      : prevI + (effTarget - prevI) * Math.min(1, dt / 0.095);
+    if (nextI < 0.025 && effTarget === 0) nextI = 0;
+    wSkid[k] = nextI;
+    if (nextI > maxWheelSkid) maxWheelSkid = nextI;
+
+    // 只要上一帧或本帧有滑移（prevI > 0 或 nextI > 0），就补全过渡段（确保收印末端平滑归零）
+    if ((nextI > 0 || prevI > 0) && car.prevWheels && surf !== 2 && spd > 1) {
+      const w = (k === "fl" || k === "fr") ? 0.32 : 0.42;
+      const pw = car.prevWheels[k];
+      const cw = curWheels[k];
+      fx.addSkid(pw, cw, nextI, w, pw.h, cw.h, prevI);
+    }
+  }
+  car.skidI = maxWheelSkid;
+  car.prevWheels = curWheels;
 
   /* 草地尘土与抖动（横向侧滑时即使车速不高也会扬尘） */
   if (surf === 2 && (spd > 8 || Math.abs(car.slideV || 0) > 1.5)) {
