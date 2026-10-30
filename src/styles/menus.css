@@ -685,20 +685,162 @@
 }
 
 .autopilot-card { width: min(920px, 96%); }
+.autopilot-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 4px 0 12px;
+  flex-wrap: wrap;
+}
+.autopilot-top-row .autopilot-switch {
+  margin: 0;
+}
 .autopilot-switch {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 4px 0 10px;
   font-size: 13px;
   font-weight: 700;
   color: #e2e8f0;
   cursor: pointer;
 }
 .autopilot-switch input { width: 16px; height: 16px; accent-color: var(--green); cursor: pointer; }
+
+.autopilot-selector-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.autopilot-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 280px;
+}
+.autopilot-field-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+.autopilot-algo-select {
+  flex: 1;
+  max-width: 420px;
+  background: #090e17;
+  color: #f1f5f9;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.autopilot-algo-select:focus {
+  border-color: var(--f1-red);
+}
+.autopilot-io-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 内置算法展示卡片 */
+.autopilot-builtin-card {
+  background: linear-gradient(135deg, rgba(20, 30, 48, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.builtin-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.builtin-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.builtin-badge {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: var(--f1-red);
+  color: #fff;
+}
+.builtin-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: #f8fafc;
+  letter-spacing: 0.3px;
+}
+.builtin-ready-tag {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4ade80;
+}
+.builtin-desc {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #cbd5e1;
+  margin: 0 0 12px 0;
+}
+.builtin-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 自定义手写算法编辑区 */
+.autopilot-custom-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.custom-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.custom-tip {
+  font-size: 12px;
+  color: #94a3b8;
+}
+.custom-tip code {
+  color: #38bdf8;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.custom-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .autopilot-code {
   width: 100%;
-  height: 300px;
+  height: 280px;
   resize: vertical;
   font-family: ui-monospace, "Cascadia Code", "Courier New", monospace;
   font-size: 12px;

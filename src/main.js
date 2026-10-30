@@ -8,7 +8,9 @@ import { getRandomPartLivery } from "./car/render.js";
 import { resetCamera, updateCamera, setZoomScale, cam } from "./game/camera.js";
 import { initInput, input, NO_INPUT } from "./game/input.js";
 import * as fx from "./game/effects.js";
-import { race, resetRace, tickCountdown, initCarRaceState, updateCarLap, simClock, advanceSimClock, resetSimClock } from "./game/race.js";
+import { race, resetRace, startRaceCountdown, tickCountdown, initCarRaceState, updateCarLap, simClock, advanceSimClock, resetSimClock } from "./game/race.js";
+import { preloadCars } from "./render3d/car/index.js";
+import { showSingleLoading, updateSingleProgress, showMultiLoading, updateMultiProgress, hideRaceLoading } from "./ui/loadingUI.js";
 import { initHud, fmt, showMsg, hideMsg, tickMsg, updateHUD, updateAIHUD, setOnSelectCar, showStartLights, hideStartLights } from "./game/hud.js";
 import { initTuner, syncTuner, setTunerEnabled } from "./game/tuner.js";
 import {
@@ -39,7 +41,7 @@ import {
   computeBackingSize, noteViewport, sampleFrameQuality, getQualityStats, getQualityInfo
 } from "./game/renderQuality.js";
 import {
-  init3D, resize3D, applyQuality3D, render3D, cycleCamera3D, getCamera3DLabel, setTopPitch3D,
+  init3D, resize3D, applyQuality3D, render3D, cycleCamera3D, getCamera3DLabel, setTopPitch3D, setTopYaw3D,
   switchToTopCamera3D
 } from "./render3d/renderer.js";
 
@@ -247,6 +249,29 @@ function releaseFocusAutopilot(silent = false) {
 }
 setOnSelectCar(switchFocusCar);
 
+
+let currentLoadSeq = 0;
+function loadModelsAndStartRace(targetCars) {
+  const seq = ++currentLoadSeq;
+  showSingleLoading("正在加载比赛赛车模型…", "下载并解析真实 3D 车模，完毕后开始发车");
+  preloadCars(targetCars, (progress) => {
+    if (seq !== currentLoadSeq) return;
+    updateSingleProgress(progress, progress >= 1 ? "所有模型加载完毕，准备发车！" : ("模型加载中 " + Math.round(progress * 100) + "%"));
+  }).then(() => {
+    if (seq !== currentLoadSeq) return;
+    setTimeout(() => {
+      if (seq !== currentLoadSeq) return;
+      hideRaceLoading();
+      startRaceCountdown();
+    }, 200);
+  }).catch(err => {
+    console.error("[main] loadModels err:", err);
+    if (seq !== currentLoadSeq) return;
+    hideRaceLoading();
+    startRaceCountdown();
+  });
+}
+
 function reset() {
   if (!started || resultsShown) return;   // 开局选择阶段 / 结算大屏展示中不响应 R 重开
   if (mode === "onlinerace") return;      // 在线对战物理在服务器，R 不做本地重开
@@ -254,6 +279,7 @@ function reset() {
   setupCars();
   resetRace();
   switchFocusCar(playerIndex);
+  loadModelsAndStartRace(cars);
   fx.clearEffects();
   hideMsg(true);
   finishAt = 0;
@@ -680,6 +706,7 @@ function update(dt, finalStep = true, simNowMs = 0) {
     // 灯灭就是发车信号：不再弹 "GO!" 文字，只留一声提示音（画面不打断）
     const wasCountdown = race.state === "countdown";
     const ev = updateNetRace(dt, input, simNowMs || performance.now(), fx, finalStep);
+    if (race.state === "countdown" || race.state === "racing") hideRaceLoading();
     updateStartLights();
     if (wasCountdown && race.state !== "countdown") {
       audio.beep(1200, 0.35, 0.2);
@@ -901,7 +928,11 @@ function startGame({ skipTrackModal = false } = {}) {
   updateHelpText();
   updateTopControls();   // 从在线对局切回单机/对战时，把联机里隐藏的控件恢复回来
   // 单人 / 对战 AI：每次开局都先停在「赛道与圈数」这一步（练习房已选好赛道时直接发车）
-  if (!skipTrackModal && mode !== "spectate") openTrackModal(true);
+  if (!skipTrackModal && mode !== "spectate") {
+    openTrackModal(true);
+  } else {
+    loadModelsAndStartRace(cars);
+  }
 }
 
 
@@ -1263,6 +1294,19 @@ function initStartFlow() {
 
   // 在线即时对战：race_start → 切入 onlinerace 模式。
   // 已经回到主菜单（不在在线流程里）时，直接拒绝，避免被别人的房间拽进对局
+  
+  conn.on("load_progress", (msg) => {
+    if (mode === "onlinerace") {
+      updateMultiProgress(msg.players, conn.session?.sid);
+    }
+  });
+
+  conn.on("race_countdown", () => {
+    if (mode === "onlinerace") {
+      hideRaceLoading();
+    }
+  });
+
   conn.on("race_start", (msg) => {
     if (mode !== "online" && mode !== "onlinerace") {
       if (conn.isOpen()) conn.send({ t: "surrender" });
@@ -1297,6 +1341,25 @@ function startOnlineRace(msg) {
   // 在线对战的玩家车在本地模拟：自动驾驶算法交给 netrace 驱动
   setNetAutopilot(isAutopilotOn(), getAutopilotDriver());
   cars = startNetRace(msg, conn.session?.sid);
+
+  // 联机模式赛车模型加载与多端同步
+  showMultiLoading("正在加载比赛赛车模型…", "等待所有车手加载完毕后统一发车");
+  preloadCars(cars, (progress) => {
+    const pct = Math.round(progress * 100);
+    if (conn.isOpen()) {
+      conn.send({ t: "load_progress", progress: pct });
+    }
+  }).then(() => {
+    if (conn.isOpen()) {
+      conn.send({ t: "load_progress", progress: 100 });
+    }
+  }).catch(err => {
+    console.error("[main] online preload err:", err);
+    if (conn.isOpen()) {
+      conn.send({ t: "load_progress", progress: 100 });
+    }
+  });
+
   // 参赛名单里没有自己的车 = 观赛（比赛中进房 / 中途转观赛）：只渲染实时画面，不模拟自车
   netSpectating = msg.spectate === true || !cars.some(c => c.isPlayer);
   // startNetRace 内部按服务端下发的 trackId 切了赛道上下文（房间里换赛道后可能和上一局不同）：
@@ -1733,12 +1796,53 @@ function initViewTools() {
     });
   }
 
+  
+  const yawRange = document.getElementById("yawRange");
+  const yawVal = document.getElementById("yawVal");
+  const applyYaw = () => {
+    const val = Number(yawRange?.value) || 0;
+    const y = setTopYaw3D(val);
+    if (yawVal) {
+      if (Math.abs(y) < 1) yawVal.textContent = "正向 0°";
+      else if (y > 0) yawVal.textContent = "向右旋转 " + Math.round(y) + "°";
+      else yawVal.textContent = "向左旋转 " + Math.round(-y) + "°";
+    }
+  };
+  if (yawRange) {
+    yawRange.addEventListener("input", () => {
+      applyYaw();
+      if (!getCamera3DLabel().includes("俯瞰")) {
+        switchToTopCamera3D();
+        showMsg("📷 俯瞰视角", "已切到俯瞰机位 · 滑杆实时环绕旋转视角（V 键切回追尾）", 1600);
+      }
+    });
+    applyYaw();
+  }
+  const yawReset = document.getElementById("yawReset");
+  if (yawReset) {
+    yawReset.addEventListener("click", () => {
+      if (yawRange) yawRange.value = "0";
+      applyYaw();
+      yawReset.textContent = "已正向";
+      yawReset.classList.add("is-done");
+      clearTimeout(yawReset._doneTimer);
+      yawReset._doneTimer = setTimeout(() => {
+        yawReset.textContent = "正向";
+        yawReset.classList.remove("is-done");
+      }, 900);
+    });
+  }
+
   const resetBtn = document.getElementById("zoomReset");
   if (resetBtn) {
     resetBtn.addEventListener("click", () => {
       if (range) {
         range.value = "1";
         applyZoom();
+      }
+      if (yawRange) {
+        yawRange.value = "0";
+        applyYaw();
       }
       // 滑杆归位之外，镜头也要立刻吸附回当前焦点车：
       // 只改缩放系数时，若本来就接近 1× 会"看起来毫无反应"

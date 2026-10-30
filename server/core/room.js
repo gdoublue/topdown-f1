@@ -30,13 +30,14 @@ export class Room {
     this.createdAt = Date.now();
     this.autoStartAt = 0;                        // 全员就绪后的自动开赛时刻（Date.now，0 = 没有在倒计时）
     this.autoHoldUntil = 0;                      // 静默期：刚打完一局时先不自动就绪/自动开赛
+    this.loadProgress = new Map();               // sessionId -> 0~100 加载进度
     this.trackCtx = null;                        // 比赛开始时构建（createTrackContext）
     this.sim = null;                             // RaceSim 实例（开赛时创建）
   }
 
   // 比赛进行中（倒计时 / 正赛）：此时进房只能观赛，不能占发车位
   isRacing() {
-    return this.state === "racing" || this.state === "countdown";
+    return this.state === "racing" || this.state === "countdown" || this.state === "loading";
   }
 
   racers() {
@@ -65,6 +66,7 @@ export class Room {
       // 观赛不占发车位：赛满 8 人也能进来看；单独限一个观赛上限防刷
       if (this.spectatorCount() >= this.maxSpectators) return { ok: false, reason: "spectator_full" };
       this.members.set(session.id, { session, carId: null, ready: false, scriptId: null, spectating: true, notReadySince: 0 });
+    this.loadProgress.delete(session.id);
       return { ok: true, spectating: true };
     }
     if (this.racerCount() >= this.maxPlayers) return { ok: false, reason: "room_full" };
@@ -79,6 +81,7 @@ export class Room {
 
   removeMember(sessionId) {
     const existed = this.members.delete(sessionId);
+    this.loadProgress.delete(sessionId);
     // 房主离开：转移给最早加入的车手（全是观赛者时退而取最早成员；新房东同样免准备就绪）
     if (existed && this.hostId === sessionId && this.members.size > 0) {
       this.hostId = this.racers()[0]?.session.id || this.members.keys().next().value;

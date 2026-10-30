@@ -137,8 +137,30 @@ function raceStartPayload(room, spectate = false) {
 
 // ================= 开赛核心（房主手动开赛 / AFK 自动开赛共用） =================
 // 返回 { ok } 或 { ok:false, code, msg }，由调用方决定是回 error 还是只记日志。
+
+function checkRoomLoadingComplete(room) {
+  if (!room || room.state !== "loading" || !room.sim) return;
+  const racers = room.racers();
+  const allLoaded = racers.length > 0 && racers.every(m => {
+    return (room.loadProgress.get(m.session.id) || 0) >= 100;
+  });
+  const timeout = room.loadingStartedAt && (Date.now() - room.loadingStartedAt > 30000);
+  if (allLoaded || timeout) {
+    if (timeout && !allLoaded) {
+      console.warn("[gateway] 房间 " + room.id + " 加载超时，强制开始倒计时发车");
+    }
+    room.state = "countdown";
+    room.sim.race.state = "countdown";
+    // 广播进入倒计时
+    broadcastRoom(room, "race_countdown", {
+      countdown: room.sim.race.countdown,
+      countdownTotal: room.sim.race.countdownTotal,
+    });
+  }
+}
+
 function startRaceCore(room, lapsOpt) {
-  if (room.state === "racing" || room.state === "countdown") return { ok: false, code: "already_racing" };
+  if (room.state === "racing" || room.state === "countdown" || room.state === "loading") return { ok: false, code: "already_racing" };
   // 校验：观赛者不参与（不在参赛名单里，也不该挡住开赛）；
   //      参赛车手必须已选车，除房主外都必须"准备就绪"（房主随时可开赛）
   const members = room.racers();
@@ -161,7 +183,10 @@ function startRaceCore(room, lapsOpt) {
       carId: m.carId,
     }));
     room.sim = new RaceSim(room, humans);
-    room.state = "countdown";
+    room.state = "loading";
+    room.loadProgress.clear();
+    for (const h of humans) room.loadProgress.set(h.sid, 0);
+    room.loadingStartedAt = Date.now();
     room.autoStartAt = 0;          // 已经开了：自动开赛倒计时作废
     ensureSimLoop();
     // 参赛名单顺序 = 客户端发车格顺序（人类在前、AI 补位在后）
@@ -357,7 +382,8 @@ function simLoop() {
       const sim = room.sim;
       if (!sim || sim.destroyed) continue;
       try {
-        sim.tick(SIM_DT, now);
+        if (room.state === "loading") checkRoomLoadingComplete(room);
+sim.tick(SIM_DT, now);
         // 房间状态跟随模拟器（倒计时结束 → racing），离开房间判定/大厅展示都依赖它
         if (sim.race.state === "racing" && room.state !== "racing") room.state = "racing";
         // 不足 2 名真人的比赛：真人全部冲线后，剩下的 AI 直接无渲染快进到终局，
@@ -779,6 +805,23 @@ function route(session, msg) {
 
     case "rtc_ice": {
       session.rtc?.handleCandidate(msg.candidate, msg.mid);
+      break;
+    }
+
+    
+    case "load_progress": {
+      const room = findRoomOf(session.id);
+      if (!room || room.state !== "loading") break;
+      const progress = Math.max(0, Math.min(100, Math.round(Number(msg.progress) || 0)));
+      room.loadProgress.set(session.id, progress);
+      const list = room.racers().map(m => ({
+        id: m.session.id,
+        nickname: m.session.player?.nickname || "车手",
+        carId: m.carId,
+        progress: room.loadProgress.get(m.session.id) || 0,
+      }));
+      broadcastRoom(room, "load_progress", { players: list });
+      checkRoomLoadingComplete(room);
       break;
     }
 

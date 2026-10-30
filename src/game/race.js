@@ -48,9 +48,17 @@ export let simClock = 0;   // 毫秒
 export function resetSimClock(v = 0) { simClock = v; }
 export function advanceSimClock(ms) { if (ms > 0) simClock += ms; }
 
-export function resetRace(r = race) {
+export function startRaceCountdown(r = race) {
   const total = rollStartCountdown();
   r.state = "countdown";
+  r.countdown = total;
+  r.countdownTotal = total;
+  r.lights = 0;
+}
+
+export function resetRace(r = race) {
+  const total = rollStartCountdown();
+  r.state = "loading";
   r.countdown = total;
   r.countdownTotal = total;
   r.lights = 0;

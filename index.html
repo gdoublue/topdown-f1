@@ -55,6 +55,14 @@
         <span id="pitchVal">俯视角 90°</span>
         <button id="pitchReset" class="vt-mini" title="一键回到垂直俯视（90°）">垂直俯视</button>
       </div>
+      <div class="vt-row">
+        <span class="vt-name">环绕旋转</span>
+        <input id="yawRange" type="range" min="-180" max="180" step="1" value="0" title="3D 俯瞰机位以赛车为中心环绕旋转视角（-180° ~ 180°）" />
+      </div>
+      <div class="vt-row vt-val">
+        <span id="yawVal">正向 0°</span>
+        <button id="yawReset" class="vt-mini" title="一键恢复正向朝向">正向</button>
+      </div>
       <div class="vt-row" id="speedRow">
         <span class="vt-name">比赛倍速</span>
         <div id="speedChips" class="speed-chips" title="快进比赛（在线对战不受影响）· 快捷键 + / -"></div>
@@ -158,6 +166,33 @@
         <small>操作说明</small>
       </div>
       <div id="helpBody">J 油门　K 轻刹　L 重刹/倒车<br>← → 或 A D 转向　R 重开　M 静音</div>
+    </div>
+    <!-- 比赛加载进度遮罩 -->
+    <div id="raceLoadingOverlay" class="race-loading-overlay hidden">
+      <div class="race-loading-card">
+        <div class="race-loading-header">
+          <div class="race-loading-spinner"></div>
+          <div class="race-loading-titles">
+            <h3 id="raceLoadingTitle" class="race-loading-title">正在加载赛车模型…</h3>
+            <p id="raceLoadingSub" class="race-loading-sub">等待当场比赛模型准备完毕</p>
+          </div>
+        </div>
+        <!-- 单人/对战 AI 本地加载进度条 -->
+        <div id="singleLoadingWrap" class="single-loading-wrap">
+          <div class="race-progress-track">
+            <div id="singleProgressBar" class="race-progress-fill" style="width: 0%"></div>
+          </div>
+          <div class="race-progress-info">
+            <span id="singleProgressText">0%</span>
+            <span id="singleProgressDesc">准备中…</span>
+          </div>
+        </div>
+        <!-- 联机模式全员进度列表 -->
+        <div id="multiLoadingWrap" class="multi-loading-wrap hidden">
+          <div class="multi-loading-head">全员加载进度 (等待所有人就绪)</div>
+          <div id="multiLoadingList" class="multi-loading-list"></div>
+        </div>
+      </div>
     </div>
     <div id="startLights" class="start-lights"></div>
     <div id="msg"><span id="msgMain"></span><span id="msgSub"></span></div>
@@ -359,30 +394,71 @@
         </div>
         <button id="closeAutopilotModal" class="track-close-btn">✕</button>
       </div>
-      <p class="track-modal-desc">
-        开启后由算法接管你的赛车（单人计时 / 对战 AI / 在线练习 / 在线房间全部生效）。
-        代码里必须定义 <code>driver(car, out, dt, otherCars)</code>（<b>函数名固定叫 driver</b>，不用叫 superDriver），
-        通过 <code>out.up</code> / <code>out.brake</code> / <code>out.steer</code> 输出控制量。
-        完整的可读字段、可写字段与工具函数见「📖 参数说明」。
-      </p>
-      <p class="track-modal-desc">
-        停止输入约 <b>0.4 秒</b>后自动编译，<b>编译通过后下一个物理步就生效</b>，不用重开赛；
-        失败时状态栏显示 <code>✗</code>，车会继续用上一次编译成功的算法。
-        单人 / 对战 AI 打开本面板时比赛真的暂停，可以边跑边改；<b>在线房间里服务器对局不会暂停</b>，自车会停在赛道上。
-      </p>
-      <p class="track-modal-desc">
-        只能通过 <code>out</code> 控制车辆：<code>car</code> 与 <code>otherCars</code> 是只读视图，
-        改 <code>car.x</code> / <code>car.speed</code> / <code>car.perf</code> 之类的写入会被引擎直接丢弃（控制台提示一次），
-        想存自己的状态请挂在 <code>car._xxx</code> 上。
-      </p>
-      <label class="autopilot-switch">
-        <input type="checkbox" id="autopilotToggle">
-        <span>开启自动驾驶（开关状态自动保存到本机）</span>
-      </label>
-      <textarea id="autopilotCode" class="autopilot-code" spellcheck="false" autocomplete="off"></textarea>
+
+      <!-- 开关与快捷文档 -->
+      <div class="autopilot-top-row">
+        <label class="autopilot-switch">
+          <input type="checkbox" id="autopilotToggle">
+          <span>开启自动驾驶（算法接管自车，单人 / 在线 / 房间全模式生效）</span>
+        </label>
+        <a class="vt-mini autopilot-doc-link" href="./autopilot-doc.html" target="_blank" rel="noopener">📖 开发参数文档</a>
+      </div>
+
+      <!-- 算法选择与导入导出栏 -->
+      <div class="autopilot-selector-bar">
+        <div class="autopilot-select-wrap">
+          <label for="autopilotAlgoSelect" class="autopilot-field-label">驾驶算法：</label>
+          <select id="autopilotAlgoSelect" class="autopilot-algo-select">
+            <option value="superDriver">⚡ superDriver (内置·推荐极速 / F1出弯最强)</option>
+            <option value="geminiDriver">🎯 geminiDriver (内置·双前瞻弯心释放)</option>
+            <option value="apexHunter">🏎️ apexHunter (内置·激进贴内切弯)</option>
+            <option value="vectorPursuit">📐 vectorPursuit (内置·几何纯追踪)</option>
+            <option value="classicBaseline">🏁 classicBaseline (内置·经典单点前瞻)</option>
+            <option value="smoothCruiser">🚗 smoothCruiser (内置·重车平滑巡航)</option>
+            <option value="custom">✍️ 自定义手写算法 (自己编写完整代码)</option>
+          </select>
+        </div>
+        <div class="autopilot-io-btns">
+          <input type="file" id="autopilotFileInput" accept=".js,.ts,.txt,.json" style="display:none">
+          <button id="autopilotImportBtn" class="vt-mini">📁 导入算法</button>
+          <button id="autopilotExportBtn" class="vt-mini">📤 导出算法</button>
+        </div>
+      </div>
+
+      <!-- 内置算法展示卡片（选择内置算法时展示，默认即此，无需长篇代码，直接使用） -->
+      <div id="autopilotBuiltinView" class="autopilot-builtin-card">
+        <div class="builtin-card-header">
+          <div class="builtin-title-wrap">
+            <span id="builtinAlgoBadge" class="builtin-badge">推荐最速</span>
+            <span id="builtinAlgoTitle" class="builtin-title">superDriver</span>
+          </div>
+          <span class="builtin-ready-tag">✓ 开箱即用 · 直接生效</span>
+        </div>
+        <p id="builtinAlgoDesc" class="builtin-desc">
+          2026 最新优化成果：平滑赛车线 + 紧凑不对称弯心释放（Apex-Release）+ 3D 坡度下压力补偿，全油门早开，各赛道速度最快且 0 草地率违规。
+        </p>
+        <div class="builtin-actions">
+          <button id="builtinEditBtn" class="vt-mini">✏️ 基于此算法手写修改</button>
+          <button id="builtinCopyBtn" class="vt-mini">📋 复制调用代码</button>
+        </div>
+      </div>
+
+      <!-- 自定义手写算法编辑区（选择“自定义手写算法”才显示，自己写才需要写完整） -->
+      <div id="autopilotCustomView" class="autopilot-custom-section" style="display: none;">
+        <div class="custom-header">
+          <span class="custom-tip">
+            必须定义 <code>driver(car, out, dt, otherCars)</code>，通过 <code>out.up / brake / steer</code> 输出。修改 0.4s 后自动编译生效。
+          </span>
+          <div class="custom-actions">
+            <button id="autopilotLoadTemplateBtn" class="vt-mini">📋 载入 superDriver 模板</button>
+            <button id="autopilotReset" class="vt-mini">重置代码</button>
+          </div>
+        </div>
+        <textarea id="autopilotCode" class="autopilot-code" spellcheck="false" autocomplete="off" placeholder="// 在此编写 driver(car, out, dt, otherCars) 函数..."></textarea>
+      </div>
+
+      <!-- 底部状态条与完成按钮 -->
       <div class="autopilot-bar">
-        <button id="autopilotReset" class="vt-mini">恢复默认 superDriver</button>
-        <a class="vt-mini autopilot-doc-link" href="./autopilot-doc.html" target="_blank" rel="noopener">📖 参数说明</a>
         <span id="autopilotStatus" class="autopilot-status"></span>
         <button id="autopilotDone" class="results-btn primary autopilot-done">完成</button>
       </div>

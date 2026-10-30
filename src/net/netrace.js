@@ -429,7 +429,7 @@ function onPeerState(msg) {
 // 比赛状态只允许单向前进：快照现在走 DataChannel（无序、不重传），
 // 迟到的旧快照若把状态从 racing 拽回 countdown，那一帧 stepCar 会被跳过
 // （自车冻一帧再弹出去），屏幕上还会再闪一次倒计时。
-const STATE_RANK = { countdown: 0, racing: 1, finished: 2 };
+const STATE_RANK = { loading: -1, countdown: 0, racing: 1, finished: 2 };
 const stateRank = (s) => STATE_RANK[s] ?? -1;
 
 function onSnapshot(msg) {

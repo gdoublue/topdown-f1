@@ -19,6 +19,8 @@ const TOP_ORBIT_DIST = 78;
 const TOP_PITCH_MIN = 40;
 const TOP_PITCH_MAX = 90;
 let topPitchDeg = TOP_PITCH_MAX;
+const TOP_YAW_MAX = 180;
+let topYawDeg = 0;
 
 let _pitchDirty = false;      // 滑杆刚改过：下一帧直接吸附，拖动就是实时的
 
@@ -34,6 +36,20 @@ export function setTopPitchDeg(v) {
 
 export function getTopPitchDeg() {
   return topPitchDeg;
+}
+
+export function setTopYawDeg(v) {
+  const n = Number(v);
+  const next = clamp(Number.isFinite(n) ? n : 0, -TOP_YAW_MAX, TOP_YAW_MAX);
+  if (next !== topYawDeg) {
+    topYawDeg = next;
+    _pitchDirty = true;
+  }
+  return topYawDeg;
+}
+
+export function getTopYawDeg() {
+  return topYawDeg;
 }
 
 // 俯瞰机位按当前俯视角度换算实际机位参数；其余机位原样返回
@@ -116,7 +132,9 @@ export function update3DCamera(car, dt) {
 
   // 航向平滑（最短弧插值），避免过弯时镜头横甩
   _heading += shortestArc(car.angle - _heading) * Math.min(1, dt * 6.5);
-  const hx = Math.cos(_heading), hz = Math.sin(_heading);
+  const yawRad = (m.id === "top" ? (topYawDeg * Math.PI) / 180 : 0);
+  const viewHeading = _heading + yawRad;
+  const hx = Math.cos(viewHeading), hz = Math.sin(viewHeading);
 
   const roadY = car.visY ?? car.roadY ?? 0;
   const want = new THREE.Vector3(

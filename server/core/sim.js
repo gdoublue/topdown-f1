@@ -31,6 +31,7 @@ export class RaceSim {
     // 发车时刻（服务器 perf 时钟）：倒计时锚在它上面，客户端用它把"灯灭"对齐到同一个
     // 绝对时刻，而不是各自等自己收到 racing 包（那样每个人都晚一个单程时延，房主先窜出去）。
     this.goWallMs = 0;
+    this.race.state = "loading";
     this.ended = false;
     this.endBroadcast = false;
     this.maxLaps = room.laps || this.trackCtx.track?.laps || TOTAL_LAPS;
@@ -247,6 +248,9 @@ export class RaceSim {
     setRaceLaps(this.maxLaps);        // 房间自定义圈数：AI 计圈必须按房间设定（否则会多跑/少跑）
     this.simMs += dt * 1000;          // 逻辑时钟：AI 样本时间戳 = 这个均匀步进的时钟
 
+    if (this.race.state === "loading") {
+      return;
+    }
     if (this.race.state === "countdown") {
       // 倒计时【锚在真实时钟上】而不是"每 tick 减 dt"：
       // goWall 一经确定就不再变化，剩余时间 = goWall - now。

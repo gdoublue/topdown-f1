@@ -65,11 +65,11 @@ function normalizeSu7Template(root) {
   return wrapped;
 }
 
-function getSu7Template() {
+function getSu7Template(onProgress) {
   if (!su7TemplatePromise) {
     const loader = new GLTFLoader();
     loader.setMeshoptDecoder(MeshoptDecoder);
-    su7TemplatePromise = loader.loadAsync(su7ModelUrl()).then(gltf =>
+    su7TemplatePromise = loader.loadAsync(su7ModelUrl(), onProgress).then(gltf =>
       normalizeSu7Template(gltf.scene)
     ).catch(err => {
       console.warn("[render3d] SU7 模型加载失败，回退程序化车体", err);
@@ -78,6 +78,10 @@ function getSu7Template() {
     });
   }
   return su7TemplatePromise;
+}
+
+export function preload(onProgress) {
+  return getSu7Template(onProgress);
 }
 
 function buildSu7Instance(template, car) {

@@ -63,10 +63,10 @@ function normalizeTemplate(scene) {
   return holder;
 }
 
-function loadTemplate() {
+function loadTemplate(onProgress) {
   if (!templatePromise) {
     const loader = new GLTFLoader();
-    templatePromise = loader.loadAsync(modelUrl())
+    templatePromise = loader.loadAsync(modelUrl(), onProgress)
       .then(gltf => normalizeTemplate(gltf.scene))
       .catch(err => {
         console.warn("[render3d] 仰望 U9 模型加载失败，回退占位车体", err);
@@ -75,6 +75,10 @@ function loadTemplate() {
       });
   }
   return templatePromise;
+}
+
+export function preload(onProgress) {
+  return loadTemplate(onProgress);
 }
 
 /* 实例化：材质逐车克隆（车漆换色 / 幽灵淡出需要独立材质），

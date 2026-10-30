@@ -53,3 +53,46 @@ export function disposeCarMesh(root) {
 export { isSu7Car } from "./su7.js";
 export { isOffroadCar } from "./offroad.js";
 export { isYangwangCar } from "./yangwang.js";
+
+export async function preloadCars(cars, onProgress) {
+  const needed = new Set();
+  for (const car of (cars || [])) {
+    if (!car) continue;
+    const m = matchModel(car);
+    if (m && typeof m.preload === "function") {
+      needed.add(m);
+    }
+  }
+  const models = Array.from(needed);
+  if (!models.length) {
+    if (onProgress) onProgress(1);
+    return;
+  }
+  const progressMap = new Map();
+  models.forEach(m => progressMap.set(m, 0));
+  const update = () => {
+    let sum = 0;
+    for (const v of progressMap.values()) sum += v;
+    if (onProgress) onProgress(sum / models.length);
+  };
+  await Promise.all(models.map(m => {
+    return m.preload((event) => {
+      let p = 0;
+      if (event && event.total > 0) {
+        p = event.loaded / event.total;
+      } else if (event && event.loaded) {
+        p = 0.5;
+      }
+      progressMap.set(m, Math.min(1, p));
+      update();
+    }).then(() => {
+      progressMap.set(m, 1);
+      update();
+    }).catch(err => {
+      console.warn("[render3d] preloadCars model load err:", err);
+      progressMap.set(m, 1);
+      update();
+    });
+  }));
+  if (onProgress) onProgress(1);
+}
