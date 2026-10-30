@@ -63,7 +63,7 @@ export function ribbonGeometry(idxList, oA, oB, y, colorAt, vRepeat = 8) {
   return g;
 }
 
-export function quadSegmentsGeometry(segPairs, oA, oB, y, colorAt) {
+export function quadSegmentsGeometry(segPairs, oA, oB, y, colorAt, vRepeat = 8) {
   const n = segPairs.length;
   const pos = new Float32Array(n * 4 * 3);
   const col = new Float32Array(n * 4 * 3);
@@ -78,7 +78,7 @@ export function quadSegmentsGeometry(segPairs, oA, oB, y, colorAt) {
     const c = colorAt ? colorAt(i, u) : [1, 1, 1];
     col[vp] = c[0]; col[vp + 1] = c[1]; col[vp + 2] = c[2];
     uv[up] = u;
-    uv[up + 1] = (cumDist[i] ?? 0) / 8;
+    uv[up + 1] = (cumDist[i] ?? 0) / vRepeat;
     vp += 3; up += 2;
   };
   for (let s = 0; s < n; s++) {
@@ -171,21 +171,27 @@ export function asphaltTextures() {
         + (nMid(u, v) - 0.5) * 0.18
         + (nFine(u, v) - 0.5) * 0.22
         + (Math.random() - 0.5) * 0.30;
-      // 中央车辙：橡胶沉积 + 骨料被磨平（σ≈6% 路宽，约 ±0.8m 的两条轮迹合成一条柔带）
-      const band = Math.exp(-((u - 0.5) * (u - 0.5)) / (2 * 0.06 * 0.06));
-      lum -= band * 0.13;
-      // 路面最外侧（靠近白线/路肩）积灰，略微发白
-      lum += Math.min(1, Math.max(0, (Math.abs(u - 0.5) - 0.43) / 0.07)) * 0.05;
+      // 中央赛车线与双轮迹橡胶沉积（Rubbered-in racing groove）：橡胶附着 + 骨料被磨平
+      const bandCenter = Math.exp(-((u - 0.5) * (u - 0.5)) / (2 * 0.11 * 0.11));
+      const bandL = Math.exp(-((u - 0.39) * (u - 0.39)) / (2 * 0.045 * 0.045));
+      const bandR = Math.exp(-((u - 0.61) * (u - 0.61)) / (2 * 0.045 * 0.045));
+      const band = Math.min(1.0, bandCenter * 0.65 + (bandL + bandR) * 0.55);
+      lum -= band * 0.16;
+      // 摊铺机纵向接缝微痕（u ≈ 0.25 / 0.50 / 0.75）
+      const seam = Math.exp(-Math.pow((u * 4 - Math.round(u * 4)) * 38, 2));
+      lum -= seam * 0.04;
+      // 路面最外侧（靠近白线/路肩）积灰与胎屑（marbles），略微发灰白
+      lum += Math.min(1, Math.max(0, (Math.abs(u - 0.5) - 0.42) / 0.08)) * 0.065;
 
-      const d = (lum - 0.5) * 36;
+      const d = (lum - 0.5) * 38;
       const p = (y * S + x) * 4;
-      cd[p] = 59 + d;
-      cd[p + 1] = 62 + d;
-      cd[p + 2] = 69 + d;
+      cd[p] = 56 + d;
+      cd[p + 1] = 59 + d;
+      cd[p + 2] = 66 + d;
       cd[p + 3] = 255;
 
-      // 车辙处只轻微抛光（差值太大时中央会被高光反成一条亮带，反而不像沥青）
-      const rv = Math.max(0, Math.min(1, 0.84 + (lum - 0.5) * 0.18 - band * 0.07));
+      // 赛车线轮迹处橡胶抛光，粗糙度更低（迎光有真实沥青微反光）
+      const rv = Math.max(0.48, Math.min(0.96, 0.85 + (lum - 0.5) * 0.20 - band * 0.14));
       const r = rv * 255;
       rd[p] = r; rd[p + 1] = r; rd[p + 2] = r; rd[p + 3] = 255;
     }
@@ -339,6 +345,7 @@ export function makeGroundSampler() {
     return Math.min(y, cap);
   };
 }
+
 export function checkerTexture(c1, c2) {
   const cv = document.createElement("canvas");
   cv.width = 160; cv.height = 32;
@@ -353,4 +360,89 @@ export function checkerTexture(c1, c2) {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.magFilter = THREE.NearestFilter;
   return tex;
+}
+
+/* ================= FIA 红白锯齿路缘石贴图（颜色 + 凹凸） =================
+   u=0 为外沿（草地侧），u=1 为内沿（紧贴沥青侧）；v 沿赛道每 2.4m 循环一次（含一红一白两块 1.2m 石块）。
+   绘制：
+     1. 清晰锐利的红 (#c42420) / 白 (#ecece6) 预制混凝土块，彻底告别旧版顶点色跨 3.7m 的模糊渐变
+     2. 每块内部带 3 道 FIA 锯齿阶梯斜面阴影（Rumble strips），产生立体锯齿起伏感
+     3. 块间深色水泥伸缩缝 + 内侧（u ∈ 0.65..0.96）真实的 F1 轮胎黑色橡胶碾压擦痕 */
+export function kerbTextures() {
+  const W = 256, H = 512;
+  const colCv = document.createElement("canvas");
+  colCv.width = W; colCv.height = H;
+  const cc = colCv.getContext("2d");
+
+  const bumpCv = document.createElement("canvas");
+  bumpCv.width = W; bumpCv.height = H;
+  const bc = bumpCv.getContext("2d");
+
+  const blocks = [
+    { base: [198, 36, 32] },     // FIA 路肩红
+    { base: [236, 236, 230] },   // 路肩象牙白
+  ];
+
+  const colImg = cc.createImageData(W, H);
+  const cd = colImg.data;
+  const bumpImg = bc.createImageData(W, H);
+  const bd = bumpImg.data;
+
+  for (let y = 0; y < H; y++) {
+    const blk = y < H / 2 ? blocks[0] : blocks[1];
+    const localV = (y % (H / 2)) / (H / 2); // 0..1 within one block
+    // 块间水泥横缝（首尾各 2.2%）
+    const isJoint = localV < 0.022 || localV > 0.978;
+    // 每块内 3 级 FIA 锯齿阶梯波纹（Rumble tooth profile）
+    const toothPhase = (localV * 3) % 1;
+    const toothShade = isJoint ? -0.35 : (0.08 - toothPhase * 0.16);
+    const toothBump = isJoint ? 0.15 : (0.35 + (1 - toothPhase) * 0.55);
+
+    for (let x = 0; x < W; x++) {
+      const u = x / W; // 0 = 外沿草地侧, 1 = 内沿沥青侧
+      // 内外倒角立面阴影：靠近沥青侧 (u > 0.88) 为斜坡倒角，靠近草地侧 (u < 0.08) 为外沿排水槽
+      let bevel = 0;
+      if (u > 0.88) bevel = (u - 0.88) / 0.12 * 0.12;
+      else if (u < 0.08) bevel = -((0.08 - u) / 0.08) * 0.22;
+
+      // 轮胎压路肩留下的黑色橡胶擦痕（集中在内侧 u=0.58..0.95）
+      const scuffZone = Math.exp(-Math.pow((u - 0.80) / 0.14, 2));
+      const streak = 0.5 + 0.5 * Math.sin(y * 0.19 + x * 0.07) * Math.cos(y * 0.05 - x * 0.13);
+      const rubberScuff = scuffZone * (0.14 + 0.16 * streak);
+
+      const grain = (Math.random() - 0.5) * 14;
+      const mult = Math.max(0.25, (1 + toothShade + bevel) * (1 - rubberScuff));
+
+      const p = (y * W + x) * 4;
+      if (isJoint) {
+        cd[p] = 52 + grain * 0.5;
+        cd[p + 1] = 54 + grain * 0.5;
+        cd[p + 2] = 58 + grain * 0.5;
+      } else {
+        cd[p] = Math.min(255, Math.max(0, blk.base[0] * mult + grain));
+        cd[p + 1] = Math.min(255, Math.max(0, blk.base[1] * mult + grain));
+        cd[p + 2] = Math.min(255, Math.max(0, blk.base[2] * mult + grain));
+      }
+      cd[p + 3] = 255;
+
+      const bh = Math.min(255, Math.max(0, (toothBump + bevel * 0.5) * 255 + grain * 0.6));
+      bd[p] = bh; bd[p + 1] = bh; bd[p + 2] = bh; bd[p + 3] = 255;
+    }
+  }
+
+  cc.putImageData(colImg, 0, 0);
+  bc.putImageData(bumpImg, 0, 0);
+
+  const map = new THREE.CanvasTexture(colCv);
+  map.wrapS = THREE.ClampToEdgeWrapping;
+  map.wrapT = THREE.RepeatWrapping;
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.anisotropy = maxAniso;
+
+  const bumpMap = new THREE.CanvasTexture(bumpCv);
+  bumpMap.wrapS = THREE.ClampToEdgeWrapping;
+  bumpMap.wrapT = THREE.RepeatWrapping;
+  bumpMap.anisotropy = maxAniso;
+
+  return { map, bumpMap };
 }

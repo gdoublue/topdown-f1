@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { cam } from "../game/camera.js";
 import { clamp } from "../utils.js";
 import { terrainAt } from "../track/geometry.js";
+import { sampleGroundMeshY } from "./track/props.js";
 
 export const CAMERA_MODES = [
   { id: "chase", label: "追尾视角", dist: 13.5, height: 5.4, look: 11, fov: 60 },
@@ -90,9 +91,11 @@ export function useTopCameraMode() {
 
 // 焦点车切换 / 重开时由外部调用：镜头立即吸附，不做跨场平滑
 export function snapCamera3D(car) {
-  const ry = car.roadY || 0;
+  const ry = car.visY ?? car.roadY ?? 0;
   const m = modeSpec(CAMERA_MODES[modeIdx]);
-  const floor = terrainAt ? terrainAt(cam.x, cam.y) + 1.2 : -Infinity;
+  const gFloor = sampleGroundMeshY(cam.x, cam.y);
+  const tFloor = terrainAt ? terrainAt(cam.x, cam.y) : -Infinity;
+  const floor = Math.max(gFloor, tFloor) + 1.2;
   _pos.set(cam.x, Math.max(ry + m.height, floor), cam.y);
   _look.set(car.x, ry + 1.1, car.y);
   _heading = car.angle;
@@ -115,7 +118,7 @@ export function update3DCamera(car, dt) {
   _heading += shortestArc(car.angle - _heading) * Math.min(1, dt * 6.5);
   const hx = Math.cos(_heading), hz = Math.sin(_heading);
 
-  const roadY = car.roadY || 0;
+  const roadY = car.visY ?? car.roadY ?? 0;
   const want = new THREE.Vector3(
     cam.x - hx * m.dist * s,
     roadY + m.height * s,                 // 相对路面抬高：真实 100m 落差下不悬空/贴地
@@ -136,7 +139,9 @@ export function update3DCamera(car, dt) {
     _pos.lerp(want, Math.min(1, dt * 4.5));
     _look.lerp(wantLook, Math.min(1, dt * 7));
   }
-  const camFloor = terrainAt ? terrainAt(_pos.x, _pos.z) + 1.2 : -Infinity;
+  const gFloor = sampleGroundMeshY(_pos.x, _pos.z);
+  const tFloor = terrainAt ? terrainAt(_pos.x, _pos.z) : -Infinity;
+  const camFloor = Math.max(gFloor, tFloor) + 1.2;
   _pos.y = Math.max(_pos.y, roadY + 1.15, camFloor);
 
   // 草地/碰撞抖动

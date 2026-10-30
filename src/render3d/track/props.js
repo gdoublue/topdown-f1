@@ -3,16 +3,44 @@
 // 与各赛道 decorate 钩子（track/tracks/<id>.js）注入。
 import * as THREE from "three";
 import {
-  pts, N, nor, tan, hw, kerbFlag, cumDist, curvS, isLinear, roadElev, bridges, indexAtDistance, LAP_LENGTH
+  pts, N, nor, tan, hw, kerbFlag, cumDist, curvS, isLinear, roadElev, roadAt, grade as roadGrade, bridges, indexAtDistance, LAP_LENGTH
 } from "../../track/geometry.js";
 import {
   hash01, sampleIndices, ribbonGeometry, quadSegmentsGeometry,
-  asphaltTextures, grassTexture, checkerTexture, maxAniso, makeGroundSampler
+  asphaltTextures, grassTexture, checkerTexture, kerbTextures, maxAniso, makeGroundSampler
 } from "./shared.js";
 import { layoutTrees } from "./treeLayout.js";
 
 let groundAt = null;   // 每次 buildTrackScene 重建；buildXXX 里取地面高度用
+let _nearGridY = null; // 近处 256×256 精细草地网格顶点高度缓存（供车辆/镜头精确三角形插值）
+let _nearCx = 0, _nearCz = 0, _nearSpan = 1, _nearSeg = 256;
+
 export function prepareGroundSampler() { groundAt = makeGroundSampler(); return groundAt; }
+
+/* 精确采样 3D 草地三角形网格在世界坐标 (x, z) 处的实际渲染高度：
+   与 THREE.PlaneGeometry(near, near, SEG, SEG) 的三角剖分（fx + fz <= 1 左上三角 / > 1 右下三角）
+   100% 同构，确保赛车冲出赛道进入草坪时轮胎严格贴合草地网格表面，绝不陷入草坪以下。 */
+export function sampleGroundMeshY(x, z) {
+  if (_nearGridY) {
+    const u = ((x - _nearCx) / _nearSpan + 0.5) * _nearSeg;
+    const v = ((z - _nearCz) / _nearSpan + 0.5) * _nearSeg;
+    if (u >= 0 && u < _nearSeg && v >= 0 && v < _nearSeg) {
+      const ix = u | 0, iz = v | 0;
+      const fx = u - ix, fz = v - iz;
+      const row = _nearSeg + 1;
+      const base = iz * row + ix;
+      const y00 = _nearGridY[base];
+      const y10 = _nearGridY[base + 1];
+      const y01 = _nearGridY[base + row];
+      const y11 = _nearGridY[base + row + 1];
+      if (fx + fz <= 1) {
+        return y00 + fx * (y10 - y00) + fz * (y01 - y00);
+      }
+      return y11 + (1 - fx) * (y01 - y11) + (1 - fz) * (y10 - y11);
+    }
+  }
+  return groundAt ? groundAt(x, z) : 0;
+}
 
 export function buildGround() {
   let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
@@ -28,12 +56,15 @@ export function buildGround() {
      从外侧高点斜切到内侧低点，看上去就是草地盖住了弯道内侧。 */
   const near = span + 260;
   const SEG = 256;
+  _nearCx = cx; _nearCz = cz; _nearSpan = near; _nearSeg = SEG;
+  _nearGridY = new Float32Array((SEG + 1) * (SEG + 1));
+
   const farSize = span + 2200;
   const strip = (farSize - near) / 2;   // 远景四条带，与精细网格拼成整块草地（不重叠）
   const tex = grassTexture();           // 同一张草皮：UV 按世界尺寸 9m 一格
   const mat = new THREE.MeshLambertMaterial({ map: tex });
   const group = new THREE.Group();
-  const addPatch = (w, d, x, z, segX, segY) => {
+  const addPatch = (w, d, x, z, segX, segY, isNear = false) => {
     const g = new THREE.PlaneGeometry(w, d, segX, segY);
     g.rotateX(-Math.PI / 2);            // 先平铺到 xz 平面，再按世界坐标抬升
     const pos = g.attributes.position;
@@ -42,7 +73,9 @@ export function buildGround() {
       uv.setXY(i, (pos.getX(i) + x) / 9, (pos.getZ(i) + z) / 9);  // 世界坐标 UV → 拼缝处纹路连续
     }
     for (let i = 0; i < pos.count; i++) {
-      pos.setY(i, groundAt(pos.getX(i) + x, pos.getZ(i) + z));
+      const wy = groundAt(pos.getX(i) + x, pos.getZ(i) + z);
+      pos.setY(i, wy);
+      if (isNear) _nearGridY[i] = wy;
     }
     g.computeVertexNormals();
     const m = new THREE.Mesh(g, mat);
@@ -50,7 +83,7 @@ export function buildGround() {
     m.receiveShadow = true;
     group.add(m);
   };
-  addPatch(near, near, cx, cz, SEG, SEG);
+  addPatch(near, near, cx, cz, SEG, SEG, true);
   addPatch(farSize, strip, cx, cz - (near + strip) / 2, 40, 12);
   addPatch(farSize, strip, cx, cz + (near + strip) / 2, 40, 12);
   addPatch(strip, near, cx - (near + strip) / 2, cz, 12, 40);
@@ -77,7 +110,7 @@ export function buildAsphalt() {
   const mat = new THREE.MeshStandardMaterial({
     map: tex.map,
     roughnessMap: tex.roughnessMap,
-    roughness: 1.0,          // 实际粗糙度全部由 roughnessMap 给（约 0.6~0.95）
+    roughness: 1.0,          // 实际粗糙度全部由 roughnessMap 给（约 0.48~0.95）
     metalness: 0.0,
   });
   const mesh = new THREE.Mesh(geo, mat);
@@ -89,14 +122,21 @@ export function buildAsphalt() {
 export function buildEdgeLines() {
   const list = sampleIndices();
   const group = new THREE.Group();
-  // 受光的漆面而不是自发光纯白：跟着太阳/阴影明暗走，不再像贴上去的白条
-  const mat = new THREE.MeshStandardMaterial({ color: 0xd8dbdf, roughness: 0.84, metalness: 0.0 });
+  // 紧贴 0.05m 沥青表面（+4mm），配合 polygonOffset 杜绝悬空感与深度闪烁
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xdce0e5,
+    roughness: 0.80,
+    metalness: 0.0,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  });
   for (const side of [1, -1]) {
     const geo = ribbonGeometry(
       list,
-      i => side * (hw[i] - 0.18),
-      i => side * (hw[i] - 0.48),
-      0.085,
+      i => side * (hw[i] - 0.16),
+      i => side * (hw[i] - 0.46),
+      0.054,
       () => [1, 1, 1]
     );
     const line = new THREE.Mesh(geo, mat);
@@ -106,17 +146,19 @@ export function buildEdgeLines() {
   return group;
 }
 
-/* ================= 红白路缘石（kerbFlag 路段两侧；直线赛道全程） ================= */
+/* ================= 红白路缘石（kerbFlag 路段两侧；直线赛道全程） =================
+   使用高分辨率 FIA 锯齿阶梯贴图 + 凹凸贴图（每 2.4m 重复一红一白两块预制路肩石），
+   消除旧版跨采样段顶点色线性插值造成的红白模糊渐变，并呈现橡胶碾压痕迹与锯齿立面。 */
 export function buildKerbs() {
   const group = new THREE.Group();
-  // 顶点色按线性空间插值：用 THREE.Color 做 sRGB→线性转换，ACES 下不发白
-  const RED = new THREE.Color("#c22a24");
-  const WHITE = new THREE.Color("#e8e8e6");
-  const colorAt = (i) => {
-    const c = Math.floor((cumDist[i] ?? 0) / 2.6) % 2 ? WHITE : RED;
-    return [c.r, c.g, c.b];
-  };
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.0 });
+  const kTex = kerbTextures();
+  const mat = new THREE.MeshStandardMaterial({
+    map: kTex.map,
+    bumpMap: kTex.bumpMap,
+    bumpScale: 0.024,
+    roughness: 0.68,
+    metalness: 0.0,
+  });
   for (const side of [1, -1]) {
     const segPairs = [];
     for (let i = 0; i < N; i++) {
@@ -128,46 +170,133 @@ export function buildKerbs() {
     if (!segPairs.length) continue;
     const geo = quadSegmentsGeometry(
       segPairs,
-      i => side * (hw[i] + 1.5),
+      i => side * (hw[i] + 1.55),
       i => side * hw[i],
-      0.075,
-      colorAt
+      0.068,
+      null,
+      2.4
     );
-    group.add(new THREE.Mesh(geo, mat));
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    group.add(mesh);
   }
   return group;
 }
+
+/* ================= 起终点方格线 + FIA F1 标准发车格白框 =================
+   严格跟随赛道在起终点处的真实高程（如上海赛道起点高程 +2.38m）、纵向坡度与横坡，
+   修复旧版固定 y=0.1 导致起跑线在上海等带高程赛道埋入地下不可见的问题。 */
 export function buildStartLine() {
   const group = new THREE.Group();
   const makeLine = (sampleIdx, tint) => {
-    const w = hw[sampleIdx] + 1.2;
+    const w = hw[sampleIdx] + 0.2;
     const p = pts[sampleIdx], nn = nor[sampleIdx];
     const tx = -nn.y, ty = nn.x;   // 沿赛道方向
     const cx = p.x, cz = p.y;
-    const L = 2.6;
-    const corners = [
-      [cx + nn.x * w + tx * L / 2, cz + nn.y * w + ty * L / 2],
-      [cx - nn.x * w + tx * L / 2, cz - nn.y * w + ty * L / 2],
-      [cx - nn.x * w - tx * L / 2, cz - nn.y * w - ty * L / 2],
-      [cx + nn.x * w - tx * L / 2, cz + nn.y * w - ty * L / 2],
+    const L = 2.4;
+    const gSlope = (roadGrade && roadGrade[sampleIdx]) || 0;
+    const cornerDefs = [
+      { lat: w, along: L / 2, u: 0, v: 1 },
+      { lat: -w, along: L / 2, u: 1, v: 1 },
+      { lat: -w, along: -L / 2, u: 1, v: 0 },
+      { lat: w, along: -L / 2, u: 0, v: 0 },
     ];
     const posArr = new Float32Array(12);
     const uvArr = new Float32Array(8);
-    corners.forEach((c, i) => {
-      posArr[i * 3] = c[0]; posArr[i * 3 + 1] = 0.1; posArr[i * 3 + 2] = c[1];
-      uvArr[i * 2] = i === 0 || i === 3 ? 0 : 1;
-      uvArr[i * 2 + 1] = i < 2 ? 1 : 0;
+    cornerDefs.forEach((c, i) => {
+      posArr[i * 3] = cx + nn.x * c.lat + tx * c.along;
+      posArr[i * 3 + 1] = roadElev(sampleIdx, c.lat) + gSlope * c.along + 0.056;
+      posArr[i * 3 + 2] = cz + nn.y * c.lat + ty * c.along;
+      uvArr[i * 2] = c.u;
+      uvArr[i * 2 + 1] = c.v;
     });
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.BufferAttribute(posArr, 3));
     g.setAttribute("uv", new THREE.BufferAttribute(uvArr, 2));
     g.setIndex([0, 1, 2, 0, 2, 3]);
     g.computeVertexNormals();
-    const mat = new THREE.MeshLambertMaterial({ map: checkerTexture("#111318", tint) });
-    group.add(new THREE.Mesh(g, mat));
+    const mat = new THREE.MeshStandardMaterial({
+      map: checkerTexture("#111318", tint),
+      roughness: 0.78,
+      metalness: 0.0,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    const m = new THREE.Mesh(g, mat);
+    m.receiveShadow = true;
+    group.add(m);
   };
   makeLine(0, "#f2f3f5");
   if (isLinear) makeLine(N - 1, "#ffd166");   // 直线竞速终点线（黄白格）
+
+  // 环形赛道绘制 10 个交错 FIA F1 发车格（与 physics.js 中 POLE_OFFSET_M=12, GRID_INTERVAL_M=8, lateral=±1.7 完全对齐）
+  if (!isLinear && LAP_LENGTH > 200) {
+    const gridPosArr = [];
+    const gridColArr = [];
+    const gridIdxArr = [];
+    const white = [0.92, 0.94, 0.96];
+    const yellow = [0.96, 0.78, 0.18];
+    let vCount = 0;
+
+    const pushBoxQuad = (sCenter, latCenter, a0, a1, l0, l1, col) => {
+      const sA = (sCenter + a0 + LAP_LENGTH) % LAP_LENGTH;
+      const sB = (sCenter + a1 + LAP_LENGTH) % LAP_LENGTH;
+      const profA = roadAt(sA), profB = roadAt(sB);
+      const iA = profA.i, iB = profB.i;
+      const pA = pts[iA], nA = nor[iA], tA = tan[iA];
+      const pB = pts[iB], nB = nor[iB], tB = tan[iB];
+      const dSA = sA - cumDist[iA], dSB = sB - cumDist[iB];
+      const cxA = pA.x + tA.x * dSA, czA = pA.y + tA.y * dSA;
+      const cxB = pB.x + tB.x * dSB, czB = pB.y + tB.y * dSB;
+      const latL = latCenter + l0, latR = latCenter + l1;
+      const yAL = profA.y + profA.bank * latL + 0.055;
+      const yAR = profA.y + profA.bank * latR + 0.055;
+      const yBL = profB.y + profB.bank * latL + 0.055;
+      const yBR = profB.y + profB.bank * latR + 0.055;
+
+      gridPosArr.push(
+        cxA + nA.x * latL, yAL, czA + nA.y * latL,
+        cxA + nA.x * latR, yAR, czA + nA.y * latR,
+        cxB + nB.x * latR, yBR, czB + nB.y * latR,
+        cxB + nB.x * latL, yBL, czB + nB.y * latL
+      );
+      for (let k = 0; k < 4; k++) gridColArr.push(col[0], col[1], col[2]);
+      gridIdxArr.push(vCount, vCount + 1, vCount + 2, vCount, vCount + 2, vCount + 3);
+      vCount += 4;
+    };
+
+    for (let g = 0; g < 10; g++) {
+      const sSlot = (LAP_LENGTH - (12 + g * 8) + LAP_LENGTH) % LAP_LENGTH;
+      const lat = g % 2 === 0 ? 1.7 : -1.7;
+      const bw = 1.18, frontX = 2.95, sideLen = 2.6, lineW = 0.14;
+      // 前沿白框横线 + 左右侧翼线（U 型发车框）
+      pushBoxQuad(sSlot, lat, frontX - lineW, frontX, -bw, bw, white);
+      pushBoxQuad(sSlot, lat, frontX - sideLen, frontX, -bw, -bw + lineW, white);
+      pushBoxQuad(sSlot, lat, frontX - sideLen, frontX, bw - lineW, bw, white);
+      // 前轮对位黄线（FIA 真实发车格前轮停车参考线）
+      pushBoxQuad(sSlot, lat, 1.70, 1.82, -bw - 0.22, -bw + 0.35, yellow);
+      pushBoxQuad(sSlot, lat, 1.70, 1.82, bw - 0.35, bw + 0.22, yellow);
+    }
+
+    const gGeo = new THREE.BufferGeometry();
+    gGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(gridPosArr), 3));
+    gGeo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(gridColArr), 3));
+    gGeo.setIndex(gridIdxArr);
+    gGeo.computeVertexNormals();
+    const gMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.80,
+      metalness: 0.0,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    const gridMesh = new THREE.Mesh(gGeo, gMat);
+    gridMesh.receiveShadow = true;
+    group.add(gridMesh);
+  }
+
   return group;
 }
 
@@ -228,10 +357,7 @@ export function buildGrandstands() {
     const tierMat = new THREE.MeshLambertMaterial({ color: seatColors[k % seatColors.length] });
     for (let t = 0; t < 3; t++) {
       const tier = new THREE.Mesh(new THREE.BoxGeometry(len, 2.6, 5), tierMat);
-      tier.position.set(0, 1.3 + t * 2.6, t * 2.6 * (side > 0 ? -1 : 1) * -1);
-      // 让退台方向背向赛道：每层往远离赛道一侧平移
-      tier.position.z = -side * t * 2.6;
-      tier.position.y = 1.3 + t * 2.6;
+      tier.position.set(0, 1.3 + t * 2.6, -side * t * 2.6);
       tier.castShadow = true;
       tier.receiveShadow = true;
       stand.add(tier);
@@ -259,23 +385,21 @@ export function buildGrandstands() {
   return group;
 }
 
-/* ================= 天空穹顶 + 灯光 + 雾 ================= */
-/* 天穹网格：相机远平面 3200 < 天穹最远壁（2400+赛道对角），必须让天穹跟随相机
-   XZ 移动（经典 skybox），否则车开到远离球心的角落、朝球心方向看时远壁被远平面
-   裁剪，露出黑色清屏色 —— 即偶发的"多边形黑球"（边界是天穹 24 段棱面与远平面的
-   交线）。渐变只依赖局部 y，跟随 XZ 不改变任何视觉。 */
+/* ================= 起跑发车龙门架（5 组 FIA 红灯 + 横跨桁架） =================
+   整体高度对齐起点路面 roadElev(0, 0)，立柱向下延伸 1.2m 扎入路肩，
+   修复在上海赛道（起点路面 +2.38m）等带高程赛道中龙门架下沉 2.38m 的问题。 */
 export function buildGantry() {
   const group = new THREE.Group();
   const p = pts[0], n0 = nor[0];
   const wSpan = hw[0] + 2.4;
-  const dark = new THREE.MeshStandardMaterial({ color: 0x2b2e35, metalness: 0.5, roughness: 0.5 });
-  const beam = new THREE.Mesh(new THREE.BoxGeometry(wSpan * 2 + 0.6, 0.85, 0.6), dark);
-  beam.position.y = 6.9;
+  const dark = new THREE.MeshStandardMaterial({ color: 0x252830, metalness: 0.55, roughness: 0.45 });
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(wSpan * 2 + 0.8, 0.9, 0.7), dark);
+  beam.position.y = 7.1;
   beam.castShadow = true;
   group.add(beam);
   for (const side of [1, -1]) {
-    const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.5, 7.2, 0.5), dark);
-    pillar.position.set(side * wSpan, 3.6, 0);
+    const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.52, 8.4, 0.52), dark);
+    pillar.position.set(side * wSpan, 3.2, 0);
     pillar.castShadow = true;
     group.add(pillar);
   }
@@ -283,16 +407,16 @@ export function buildGantry() {
   gantryLampMats = [];
   const housing = new THREE.MeshStandardMaterial({ color: 0x101114, roughness: 0.7 });
   for (let k = 0; k < 5; k++) {
-    const lampMat = new THREE.MeshStandardMaterial({ color: 0x1a0b0b, emissive: 0x110505, roughness: 0.4 });
+    const lampMat = new THREE.MeshStandardMaterial({ color: 0x1a0b0b, emissive: 0x110505, roughness: 0.35 });
     gantryLampMats.push(lampMat);
-    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.3), lampMat);
-    lamp.position.set((k - 2) * 0.95, 6.25, 0.1);
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.36, 0.32), lampMat);
+    lamp.position.set((k - 2) * 0.95, 6.45, 0.12);
     group.add(lamp);
-    const h = new THREE.Mesh(new THREE.BoxGeometry(0.44, 1.15, 0.4), housing);
-    h.position.set((k - 2) * 0.95, 6.35, -0.06);
+    const h = new THREE.Mesh(new THREE.BoxGeometry(0.46, 1.18, 0.42), housing);
+    h.position.set((k - 2) * 0.95, 6.55, -0.05);
     group.add(h);
   }
-  group.position.set(p.x, 0, p.y);
+  group.position.set(p.x, roadElev(0, 0), p.y);
   group.rotation.y = Math.atan2(-n0.y, n0.x);   // 局部 +x 对准赛道横向
   return group;
 }
@@ -365,7 +489,6 @@ export function buildBoards(opts = {}) {
   }
   return group;
 }
-
 
 /* ================= 立交桥墩（geometry.bridges 桥位下方） ================= */
 export function buildBridgePiers() {

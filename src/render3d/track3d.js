@@ -4,9 +4,13 @@
 // 世界坐标映射：2D (x, y) → three.js (x, y0, z)，y 轴向上为高度；
 // 赛道几何一律 import 自 src/track/geometry.js 权威数据（与物理判定同源）。
 import * as THREE from "three";
-import { pts, currentTrackId } from "../track/geometry.js";
+import {
+  pts, N, nor, tan, hw, kerbFlag, cumDist, curvS, currentTrackId,
+  h, bank, bridges, roadElev, roadAt, indexAtDistance, isLinear, LAP_LENGTH, terrainAt,
+} from "../track/geometry.js";
 import {
   setMaxAnisotropy as _setMaxAnisotropy,
+  sampleIndices, ribbonGeometry, quadSegmentsGeometry, hash01,
 } from "./track/shared.js";
 import {
   prepareGroundSampler, buildGround, buildAsphalt, buildEdgeLines, buildKerbs,
@@ -15,7 +19,6 @@ import {
 } from "./track/props.js";
 
 export { setGantryLights } from "./track/props.js";
-import { h, bank, bridges, roadElev, roadAt, indexAtDistance, isLinear, LAP_LENGTH, terrainAt } from "../track/geometry.js";
 import TRACK_SCENE_MODULES from "./track/tracks/index.js";
 
 export const SKY_HORIZON = 0xbcd9ea;
@@ -91,6 +94,8 @@ export function buildTrackScene(scene) {
       if (o.material) {
         (Array.isArray(o.material) ? o.material : [o.material]).forEach(mm => {
           if (mm.map) mm.map.dispose();
+          if (mm.bumpMap) mm.bumpMap.dispose();
+          if (mm.roughnessMap) mm.roughnessMap.dispose();
           mm.dispose();
         });
       }
@@ -124,8 +129,10 @@ export function buildTrackScene(scene) {
         THREE,
         group: trackGroup,
         opts,
-        pts, h, bank, bridges, roadElev, roadAt, indexAtDistance, isLinear, LAP_LENGTH,
+        pts, N, nor, tan, hw, kerbFlag, cumDist, curvS,
+        h, bank, bridges, roadElev, roadAt, indexAtDistance, isLinear, LAP_LENGTH,
         groundAt: sampler, terrainAt,
+        sampleIndices, ribbonGeometry, quadSegmentsGeometry, hash01,
       });
     } catch (e) {
       console.error("[track3d] decorate 钩子异常 (" + currentTrackId + ")", e);

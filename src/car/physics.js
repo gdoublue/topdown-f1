@@ -248,17 +248,18 @@ export function updateRoadProfile(car) {
   const aLat = Math.abs(dLat);
   const roadY = prof.y + prof.bank * Math.max(-edge, Math.min(edge, dLat));
   const dth = Math.cos(car.angle - Math.atan2(tan[i].y, tan[i].x));
-  if (!terrainAt) {
-    const onRoad = Math.max(0, Math.min(1, 1 - (aLat - edge) / 6));
-    car.roadY = roadY * onRoad;
-    car.roadPitch = prof.grade * dth * onRoad;
-    car.roadRoll = prof.bank * dth * onRoad;
-    return car;
-  }
+  // 出界后与 3D 地面采样器 (makeGroundSampler) 完全同口径：
+  // 草肩 (hw+7) 内保持路面高度，再经 40m smoothstep 平滑过渡到真实 DEM 地形（无 DEM 赛道落到 0）
   const shoulder = (hw[i] ?? 7) + 7;
   let t = (aLat - shoulder) / 40;
   t = t < 0 ? 0 : t > 1 ? 1 : t;
   const fall = t * t * (3 - 2 * t);
+  if (!terrainAt) {
+    car.roadY = roadY * (1 - fall);
+    car.roadPitch = prof.grade * dth * (1 - fall);
+    car.roadRoll = prof.bank * dth * (1 - fall);
+    return car;
+  }
   const tY = terrainAt(car.x, car.y);
   car.roadY = roadY * (1 - fall) + tY * fall;
   // 离路后附加地形坡度（视觉俯仰/侧倾）；在路面上完全跳过地形采样
@@ -570,7 +571,8 @@ export function stepCar(car, dt, input, fx) {
       car.x - Math.cos(car.angle) * 2.2 + Math.cos(a) * r,
       car.y - Math.sin(car.angle) * 2.2 + Math.sin(a) * r,
       -Math.cos(car.angle) * 9 + Math.cos(a) * 7,
-      -Math.sin(car.angle) * 9 + Math.sin(a) * 7
+      -Math.sin(car.angle) * 9 + Math.sin(a) * 7,
+      car.roadY || 0
     );
   } else {
     car.shake *= Math.pow(0.02, dt);

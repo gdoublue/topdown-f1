@@ -6,7 +6,7 @@ export const dust = [];
 // 8 车同场时峰值产出约是单人的 8 倍，池子上限从 5200 提到 9000：
 // 再多就只剩"挤掉最老的印子"这一个后果（留存时间被压缩），而不是卡帧。
 const MAX_SKIDS = 9000;
-const MAX_DUST = 200;
+const MAX_DUST = 240;
 
 // yA / yB：段两端各自的路面高度。3D 里一个印子段可能跨过纵向坡度或横坡，
 // 两端共用同一高度会让远端扎进沥青（斯帕 14% 坡上 1m 段就差 14cm）。
@@ -24,17 +24,19 @@ export function addSkid(a, b, intensity = 0.5, width = 0.38, yA = 0, yB = yA) {
   if (skids.length > MAX_SKIDS) skids.splice(0, 60);
 }
 
-export function addDust(x, y, vx, vy) {
+export function addDust(x, y, vx, vy, z = 0, isSmoke = false) {
   if (dust.length >= MAX_DUST) return;
   const a = Math.random() * Math.PI * 2;
   dust.push({
     x: x + Math.cos(a) * 0.5,
     y: y + Math.sin(a) * 0.5,
+    z: z || 0,
+    isSmoke: !!isSmoke,
     vx, vy,
-    r: 0.4 + Math.random() * 0.7,
-    life: 0.5 + Math.random() * 0.45,
-    max: 0.95,
-    col: Math.random() > 0.5 ? "160,170,110" : "120,140,90"
+    r: isSmoke ? (0.32 + Math.random() * 0.45) : (0.4 + Math.random() * 0.7),
+    life: isSmoke ? (0.35 + Math.random() * 0.30) : (0.5 + Math.random() * 0.45),
+    max: isSmoke ? 0.65 : 0.95,
+    col: isSmoke ? "215,220,228" : (Math.random() > 0.5 ? "160,170,110" : "120,140,90")
   });
 }
 

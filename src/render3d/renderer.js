@@ -139,13 +139,14 @@ export function render3D(cars, focusIndex, dt, opts = {}) {
   // ---- AI 探测线 ----
   const inp = opts.aiTarget;
   if (opts.showAILine && inp && inp.targetX != null && focusCar) {
+    const ry = focusCar.roadY || 0;
     const p = aiLine.geometry.getAttribute("position");
-    p.setXYZ(0, focusCar.x, 0.5, focusCar.y);
-    p.setXYZ(1, inp.targetX, 0.5, inp.targetY);
+    p.setXYZ(0, focusCar.x, ry + 0.5, focusCar.y);
+    p.setXYZ(1, inp.targetX, ry + 0.5, inp.targetY);
     p.needsUpdate = true;
     aiLine.material.color.set(focusCar.color || "#00ffb4");
     aiTargetRing.material.color.copy(aiLine.material.color);
-    aiTargetRing.position.set(inp.targetX, 0.12, inp.targetY);
+    aiTargetRing.position.set(inp.targetX, ry + 0.14, inp.targetY);
     aiLine.visible = true;
     aiTargetRing.visible = true;
   } else {
@@ -156,9 +157,10 @@ export function render3D(cars, focusIndex, dt, opts = {}) {
   // ---- 镜头（2D cam 已由主循环 updateCamera 推进） ----
   if (focusCar) {
     update3DCamera(focusCar, dt);
-    // 阴影光源跟随焦点车（正交阴影盒 ±95m）
-    sun.position.set(focusCar.x + 130, 210, focusCar.y + 75);
-    sun.target.position.set(focusCar.x, 0, focusCar.y);
+    const ry = focusCar.roadY || 0;
+    // 阴影光源跟随焦点车（含真实赛道高程，正交阴影盒 ±95m）
+    sun.position.set(focusCar.x + 130, ry + 210, focusCar.y + 75);
+    sun.target.position.set(focusCar.x, ry, focusCar.y);
     sun.target.updateMatrixWorld();
     // 天穹跟随相机 XZ：保证穹壁视距恒定 2400m，永不被远平面裁剪（黑球根治）
     updateSkyDome(focusCar.x, focusCar.y);
@@ -167,6 +169,6 @@ export function render3D(cars, focusIndex, dt, opts = {}) {
   // 发车龙门架灯组与 race.lights 联动（倒计时逐组点亮，灯灭发车）
   setGantryLights(race.state === "countdown" ? (race.lights | 0) : 0);
 
-  updateEffects3D();
+  updateEffects3D(cars, dt);
   renderer.render(scene, camera);
 }
