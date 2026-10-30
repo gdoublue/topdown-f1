@@ -5,7 +5,7 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { onTrackChange } from "../track/geometry.js";
 import { race } from "../game/race.js";
 import { buildTrackScene, createSky, setGantryLights, setMaxAnisotropy, updateSkyDome, SKY_HORIZON } from "./track3d.js";
-import { createCarMesh, syncCarMesh, disposeCarMesh } from "./car3d.js";
+import { createCarMesh, syncCarMesh, disposeCarMesh } from "./car/index.js";
 import { initEffects3D, updateEffects3D } from "./effects3d.js";
 import { init3DCamera, update3DCamera, cycleCameraMode, getCamera3DLabel, CAMERA_MODES, setTopPitchDeg, useTopCameraMode } from "./camera3d.js";
 

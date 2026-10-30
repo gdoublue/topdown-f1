@@ -528,7 +528,7 @@ function drawRoadBody(g, car, livery) {
 }
 
 // 越野卡车车体（TRAIL RIG）：高底盘方盒子车身 + 外露块状花纹越野胎。
-// 俯视轮廓与 car3d.js 的卡车模型对应：前机盖 / 封闭座舱 / 后货厢 / 车顶灯排。
+// 俯视轮廓与 render3d/car/offroad.js 的卡车模型对应：前机盖 / 封闭座舱 / 后货厢 / 车顶灯排。
 function drawTruckBody(g, car, livery) {
   const tyre = (cx, cy, w, rot) => {
     g.save();

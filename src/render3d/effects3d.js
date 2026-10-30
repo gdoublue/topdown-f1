@@ -321,7 +321,7 @@ function stepAndEmitCarEffects(cars, dt) {
     }
 
     // 2. F1 赛车底板钛合金滑块摩擦火花（越野车与街车底盘高、无钛合金底板，跳过）
-    const isF1 = car.livery !== "offroad" && car.livery !== "su7ultra";
+    const isF1 = car.livery !== "offroad" && car.livery !== "su7ultra" && car.livery !== "yangwang";
     if (!isF1) continue;
 
     // 触发场景：

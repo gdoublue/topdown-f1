@@ -1,158 +1,21 @@
-// 程序化 F1 赛车 3D 网格：全部用 three.js 曲面放样与翼型几何拼装（F1 车型零外部资源）
-// 小米 SU8 Ultra（livery === "su7ultra"）使用真实 SU7 车模：
-// public/models/su7/（EXT_meshopt glTF，来源 github.com/Yechuanjie/xiaomi-su7）
-// 车头朝局部 +x；挂载到场景时 rotation.y = -car.angle（2D 画布角度 → three 坐标）
+// F1 赛车 3D 视觉体：2024–2026 地面效应赛车架构，全部程序化曲面放样 + 翼型几何（零外部资源）。
+// 车头朝局部 +x；挂载到场景时 rotation.y = -car.angle（2D 画布角度 → three 坐标）。
+// 车身几何与 2D 物理包围盒一致（长 5.6m / 宽 2.0m）；轮位与 physics.js 落印坐标严格对齐，
+// 刹车印才能精确压在轮胎正下方。车体所有底面保持在 y >= 0.09m，避开 y≈0.058m 的刹车印。
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import { CAR_LIVERIES } from "../car/render.js";
-import { roadAt } from "../track/geometry.js";
-import { sampleGroundMeshY } from "./track/props.js";
+import { CAR_LIVERIES } from "../../car/render.js";
+import {
+  _up, _one, mergeBucket, loftRings, makeSuperSection, buildSweptAirfoil,
+  numberTexture, GROUND,
+} from "./shared.js";
 
-// 车身几何与 2D 物理包围盒一致：长 5.6m（车头 +2.8 / 车尾 -2.8）、宽 2.0m。
-// 轮位与 physics.js 落印坐标严格对齐（HALF_BASE 1.75 / TRACK_F 0.77 / TRACK_R 0.79），
-// 刹车印才能精确压在轮胎正下方。车体所有底面保持在 y >= 0.09m，避开 y≈0.058m 的刹车印。
+export const id = "f1";
+
 const WHEEL_R_F = 0.33, WHEEL_R_R = 0.36;
 const WHEEL_FRONT_X = 1.75, WHEEL_REAR_X = -1.75;
 const WHEEL_FRONT_Z = 0.77, WHEEL_REAR_Z = 0.79;
 const WHEEL_FRONT_W = 0.31, WHEEL_REAR_W = 0.42;
-
-const _up = new THREE.Vector3(0, 1, 0);
-const _one = new THREE.Vector3(1, 1, 1);
-
-// 把某材质桶里的几何合并成一个网格几何（全部转非索引再合并，确保属性一致）
-function mergeBucket(bucket) {
-  if (!bucket.length) return new THREE.BufferGeometry();
-  const nonIndexed = bucket.map(g => {
-    const gi = g.index ? g.toNonIndexed() : g;
-    if (!gi.attributes.normal) gi.computeVertexNormals();
-    if (gi.attributes.uv) gi.deleteAttribute("uv");
-    return gi;
-  });
-  const merged = mergeGeometries(nonIndexed, false);
-  nonIndexed.forEach(g => g.dispose());
-  return merged;
-}
-
-/* ================= 通用曲面放样与翼型生成工具 ================= */
-
-// 多截面 3D 放样（Lofting）：给定一系列截面 Ring（每个截面是长度为 M 的 [x,y,z] 点数组），
-// 沿截面序列生成平滑网格（支持闭合环、自动外法线校准与两端封口）
-function loftRings(rawRings, closedRing = true, capStart = false, capEnd = false) {
-  const S = rawRings.length;
-  const M = rawRings[0].length;
-
-  // 自动检测闭合管的环绕方向，确保法线 100% 朝向管体外侧
-  let rings = rawRings;
-  if (closedRing && S >= 2 && M >= 3) {
-    let orientSum = 0;
-    for (let i = 0; i < S - 1; i++) {
-      const r0 = rawRings[i], r1 = rawRings[i + 1];
-      let cx = 0, cy = 0, cz = 0;
-      for (let j = 0; j < M; j++) {
-        cx += r0[j][0] + r1[j][0];
-        cy += r0[j][1] + r1[j][1];
-        cz += r0[j][2] + r1[j][2];
-      }
-      const inv = 1 / (2 * M);
-      cx *= inv; cy *= inv; cz *= inv;
-      for (let j = 0; j < M; j++) {
-        const j1 = (j + 1) % M;
-        const p00 = r0[j], p01 = r0[j1], p10 = r1[j];
-        const ux = p10[0] - p00[0], uy = p10[1] - p00[1], uz = p10[2] - p00[2];
-        const vx = p01[0] - p00[0], vy = p01[1] - p00[1], vz = p01[2] - p00[2];
-        const nx = uy * vz - uz * vy;
-        const ny = uz * vx - ux * vz;
-        const nz = ux * vy - uy * vx;
-        const rx = p00[0] - cx, ry = p00[1] - cy, rz = p00[2] - cz;
-        orientSum += nx * rx + ny * ry + nz * rz;
-      }
-    }
-    if (orientSum < 0) {
-      rings = rawRings.map(r => r.slice().reverse());
-    }
-  }
-
-  const pos = [];
-  const pushTri = (a, b, c) => {
-    pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-  };
-
-  for (let i = 0; i < S - 1; i++) {
-    const r0 = rings[i], r1 = rings[i + 1];
-    const limit = closedRing ? M : M - 1;
-    for (let j = 0; j < limit; j++) {
-      const j1 = (j + 1) % M;
-      const p00 = r0[j], p01 = r0[j1];
-      const p10 = r1[j], p11 = r1[j1];
-      pushTri(p00, p10, p11);
-      pushTri(p00, p11, p01);
-    }
-  }
-
-  if (capStart && closedRing) {
-    const r0 = rings[0];
-    const c = r0.reduce((acc, p) => [acc[0] + p[0] / M, acc[1] + p[1] / M, acc[2] + p[2] / M], [0, 0, 0]);
-    for (let j = 0; j < M; j++) pushTri(c, r0[(j + 1) % M], r0[j]);
-  }
-  if (capEnd && closedRing) {
-    const rN = rings[S - 1];
-    const c = rN.reduce((acc, p) => [acc[0] + p[0] / M, acc[1] + p[1] / M, acc[2] + p[2] / M], [0, 0, 0]);
-    for (let j = 0; j < M; j++) pushTri(c, rN[j], rN[(j + 1) % M]);
-  }
-
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-  g.computeVertexNormals();
-  return g;
-}
-
-// 生成圆角梯形/超椭圆横截面（用于单体壳、鼻锥、引擎盖）
-function makeSuperSection(x, yBot, yTop, wBot, wTop, yMidFrac = 0.45, wMidScale = 1.06, segs = 24) {
-  const pts = [];
-  const h = Math.max(0.004, yTop - yBot);
-  for (let i = 0; i < segs; i++) {
-    const a = (i / segs) * Math.PI * 2; // 0 = 顶中, π/2 = 右(+z), π = 底中, 3π/2 = 左(-z)
-    const ca = Math.cos(a), sa = Math.sin(a);
-    const ny = Math.sign(ca) * Math.pow(Math.abs(ca), 0.78);
-    const u = 0.5 + 0.5 * ny;
-    const y = yBot + u * h;
-
-    const baseW = wBot + (wTop - wBot) * u;
-    const waistBell = Math.sin(u * Math.PI);
-    const w = baseW * (1 + (wMidScale - 1) * waistBell);
-    const nz = Math.sign(sa) * Math.pow(Math.abs(sa), 0.82);
-    const z = nz * w;
-    pts.push([x, y, z]);
-  }
-  return pts;
-}
-
-// 3D 翼型（后掠 + 鸥翼起伏 + 弯度攻角）：用于前翼四层翼片、尾翼勺形主翼、DRS 翼、梁翼
-function buildSweptAirfoil(spanFn, spanSegs = 28, profileSegs = 14) {
-  const rings = [];
-  for (let i = 0; i <= spanSegs; i++) {
-    const v = -1 + (2 * i) / spanSegs;
-    const { x, y, z, chord, thick, angle = 0, camber = 0.08 } = spanFn(v);
-    const ca = Math.cos(angle), sa = Math.sin(angle);
-    const ring = [];
-    for (let j = 0; j < profileSegs; j++) {
-      const theta = (j / profileSegs) * Math.PI * 2;
-      const s = 0.5 * (1 - Math.cos(theta));
-      const upper = theta < Math.PI ? 1 : -1;
-      const yt = 5 * thick * (0.2969 * Math.sqrt(s) - 0.1260 * s - 0.3516 * s * s + 0.2843 * s * s * s - 0.1015 * s * s * s * s);
-      const yc = -camber * chord * 4 * s * (1 - s);
-      const lx = (0.5 - s) * chord;
-      const ly = yc + upper * yt * chord;
-      const wx = x + lx * ca - ly * sa;
-      const wy = y + lx * sa + ly * ca;
-      ring.push([wx, wy, z]);
-    }
-    rings.push(ring);
-  }
-  return loftRings(rings, true, true, true);
-}
 
 /* ================= 车轮与轮胎专用高精细几何 ================= */
 
@@ -1081,515 +944,17 @@ function carbonWeaveTexture() {
   return tex;
 }
 
-// 车号贴图（鼻锥上，按号码+颜色缓存共享）
-const numTexCache = new Map();
-function numberTexture(num, fillColor = "#f5f6f8") {
-  const key = String(num ?? "") + ":" + fillColor;
-  let tex = numTexCache.get(key);
-  if (tex) return tex;
-  const cv = document.createElement("canvas");
-  cv.width = 200; cv.height = 384;
-  const c = cv.getContext("2d");
-  c.clearRect(0, 0, 200, 384);
-  c.textAlign = "center";
-  c.textBaseline = "middle";
-  const str = String(num ?? "1");
-  const fs = Math.min(280, (0.92 * 200) / (0.62 * Math.max(1, str.length)), (0.62 * 384) / 0.72);
-  c.font = `italic 900 ${fs}px Arial, sans-serif`;
-  c.fillStyle = fillColor;
-  c.strokeStyle = "#0b0d12";
-  c.lineWidth = fs * 0.11;
-  c.lineJoin = "round";
-  c.strokeText(str, 100, 192);
-  c.fillText(str, 100, 192);
-  tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  numTexCache.set(key, tex);
-  return tex;
-}
-
-/* 车底地面效应接触暗影贴图（Contact AO Shadow）：
-   绘制文丘里底板暗区 + 前后翼投影 + 四个轮胎接地斑（Contact Patch）深色核心，
-   紧贴沥青表面渲染，彻底消除侧向阳光下底盘与轮胎的“悬浮感”。 */
-function contactShadowTexture() {
-  const W = 256, H = 128;
-  const cv = document.createElement("canvas");
-  cv.width = W; cv.height = H;
-  const c = cv.getContext("2d");
-  c.clearRect(0, 0, W, H);
-
-  const blob = (cx, cy, rx, ry, alpha) => {
-    c.save();
-    c.translate(cx, cy);
-    c.scale(rx, ry);
-    const g = c.createRadialGradient(0, 0, 0, 0, 0, 1);
-    g.addColorStop(0, `rgba(4, 6, 10, ${alpha})`);
-    g.addColorStop(0.55, `rgba(6, 8, 12, ${(alpha * 0.68).toFixed(3)})`);
-    g.addColorStop(1, "rgba(6, 8, 12, 0)");
-    c.fillStyle = g;
-    c.beginPath();
-    c.arc(0, 0, 1, 0, Math.PI * 2);
-    c.fill();
-    c.restore();
-  };
-
-  // 主底板与侧箱文丘里通道核心暗影（x: -2.0..+1.3m）
-  blob(W * 0.45, H * 0.5, W * 0.36, H * 0.35, 0.78);
-  // 鼻锥与前翼下方柔和暗影（x: +1.5..+2.6m）
-  blob(W * 0.80, H * 0.5, W * 0.16, H * 0.40, 0.46);
-  // 尾部扩散器下方暗影（x: -2.5..-1.6m）
-  blob(W * 0.17, H * 0.5, W * 0.15, H * 0.30, 0.55);
-
-  // 四轮接地斑（Tire Contact Patches）高浓度遮蔽黑斑
-  const fx = W * (0.5 + 1.75 / 5.7), rx = W * (0.5 - 1.75 / 5.7);
-  const fz = H * (0.355), rz = H * (0.365);
-  blob(fx, H * 0.5 - fz, W * 0.085, H * 0.13, 0.88);
-  blob(fx, H * 0.5 + fz, W * 0.085, H * 0.13, 0.88);
-  blob(rx, H * 0.5 - rz, W * 0.095, H * 0.15, 0.90);
-  blob(rx, H * 0.5 + rz, W * 0.095, H * 0.15, 0.90);
-
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
-const SHARED = {
+// F1 专用贴图（车底接触阴影与卡车共用，走 shared.js 的 GROUND）
+const F1_TEX = {
   sidewall: tireSidewallTexture("#e1251b"),
   tread: tireTreadTexture(),
   carbonWeave: carbonWeaveTexture(),
-  contactShadow: contactShadowTexture(),
-  contactShadowGeo: (() => {
-    const g = new THREE.PlaneGeometry(5.7, 2.22);
-    g.rotateX(-Math.PI / 2);
-    return g;
-  })(),
+  contactShadow: GROUND.contactShadow,
+  contactShadowGeo: GROUND.contactShadowGeo,
 };
 
-/* ================= 小米 SU7 真实车模（仅 su7ultra 涂装使用） =================
-   public/models/su7/sm_car.gltf（EXT_meshopt + webp 贴图）。
-   参考实现确认：车头朝 +x，车轮节点名 Wheel*，其子节点绕本地 z 自转，
-   "body"/"body.001" 为车漆面（可换色），模型单位经包围盒归一化。 */
-let su7TemplatePromise = null;
-
-function su7ModelUrl() {
-  return new URL("models/su7/sm_car.gltf", document.baseURI).href;
-}
-
-function normalizeSu7Template(root) {
-  const box = new THREE.Box3().setFromObject(root);
-  const size = box.getSize(new THREE.Vector3());
-  const k = 5.05 / Math.max(0.01, size.x);
-  root.scale.setScalar(k);
-  box.setFromObject(root);
-  const center = box.getCenter(new THREE.Vector3());
-  root.position.set(-center.x, -box.min.y, -center.z);
-  const wrapped = new THREE.Group();
-  wrapped.add(root);
-  const parts = { spinNodes: [], bodyMats: [], allMats: [] };
-  wrapped.traverse(o => {
-    if (o.isMesh) {
-      o.castShadow = true;
-      const mats = Array.isArray(o.material) ? o.material : [o.material];
-      for (const m of mats) {
-        m.aoMap = null;
-        parts.allMats.push(m);
-        if (o.name === "body" || o.name === "body.001") parts.bodyMats.push(m);
-      }
-    }
-    if (/^Wheel/.test(o.name)) parts.spinNodes.push(...o.children);
-  });
-  wrapped.userData.parts = parts;
-  return wrapped;
-}
-
-function getSu7Template() {
-  if (!su7TemplatePromise) {
-    const loader = new GLTFLoader();
-    loader.setMeshoptDecoder(MeshoptDecoder);
-    su7TemplatePromise = loader.loadAsync(su7ModelUrl()).then(gltf =>
-      normalizeSu7Template(gltf.scene)
-    ).catch(err => {
-      console.warn("[render3d] SU7 模型加载失败，回退程序化车体", err);
-      su7TemplatePromise = null;
-      throw err;
-    });
-  }
-  return su7TemplatePromise;
-}
-
-function buildSu7Instance(template, car) {
-  const inst = template.clone(true);
-  const parts = { spinNodes: [], mats: [] };
-  inst.traverse(o => {
-    if (o.isMesh) {
-      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
-      const mats = Array.isArray(o.material) ? o.material : [o.material];
-      for (const m of mats) {
-        parts.mats.push(m);
-        if (m.name === "Car_body") m.color.set(car.color || "#f5c518");
-      }
-    }
-    if (/^Wheel/.test(o.name)) parts.spinNodes.push(...o.children);
-  });
-  inst.userData.parts = parts;
-  return inst;
-}
-
-export function isSu7Car(car) {
-  return !!car && car.livery === "su7ultra";
-}
-
-function createSu7Mesh(car) {
-  const root = new THREE.Group();
-  root.userData = {
-    isGlb: true, glbReady: false, spinNodes: [], mats: [],
-    spinAngle: 0, lastAlpha: null,
-  };
-  const placeholder = new THREE.Mesh(
-    new THREE.BoxGeometry(5.0, 1.4, 1.96),
-    new THREE.MeshStandardMaterial({ color: 0xf5c518, roughness: 0.35, metalness: 0.5 })
-  );
-  placeholder.position.y = 0.7;
-  placeholder.castShadow = true;
-  placeholder.name = "placeholder";
-  root.add(placeholder);
-  getSu7Template().then(tpl => {
-    const inst = buildSu7Instance(tpl, car);
-    root.add(inst);
-    root.userData.glbReady = true;
-    root.userData.spinNodes = inst.userData.parts.spinNodes;
-    root.userData.mats = inst.userData.parts.mats;
-    root.userData.lastAlpha = null;
-    const ph = root.getObjectByName("placeholder");
-    if (ph) {
-      root.remove(ph);
-      ph.geometry.dispose();
-      ph.material.dispose();
-    }
-  }).catch(() => { /* 占位盒保留 */ });
-  return root;
-}
-
-/* ================= 越野卡车 TRAIL RIG（livery === "offroad"） =================
-   车体移植自外部「3D 车辆物理模拟器」的程序化越野车：梯形大梁、方盒子车身、
-   防滚架、车顶灯排、涉水喉、备胎、螺旋弹簧与大块花纹越野胎（零外部资源）。
-   坐标沿用本项目约定：x 向前（+2.7 车头）、y 向上、z 向右（车身右侧）；
-   轮位与 physics.js 的落印坐标对齐（±1.75 / ±0.8x），刹车印才能压在轮胎正下方。 */
-const TRUCK = {
-  wheelRF: 0.42, wheelRR: 0.44,
-  frontX: 1.75, rearX: -1.75,
-  frontZ: 0.82, rearZ: 0.84,
-  frontW: 0.34, rearW: 0.36,
-};
-
-export function isOffroadCar(car) {
-  return !!car && car.livery === "offroad";
-}
-
-function knobbyTyreGeometry(R, W, lugs) {
-  const g = new THREE.CylinderGeometry(R, R, W, lugs * 4, 5, true);
-  const p = g.attributes.position;
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
-    const ang = Math.atan2(z, x);
-    const seg = Math.round((ang + Math.PI) / (2 * Math.PI) * (lugs * 4));
-    const row = Math.round((y / W + 0.5) * 5);
-    const stag = (row % 2) * 2;
-    const knob = ((seg + stag) % 4 < 2) ? 1 : 0;
-    let sc = 1 + knob * 0.06;
-    if (row === 0 || row === 5) sc *= 0.90;
-    p.setX(i, x * sc); p.setZ(i, z * sc);
-  }
-  g.computeVertexNormals();
-  g.rotateX(Math.PI / 2);
-  return g;
-}
-
-function coilSpringGeometry(height, coilR = 0.058, wireR = 0.011, turns = 6) {
-  const steps = turns * 18;
-  const pts = [];
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps;
-    const a = t * turns * Math.PI * 2;
-    pts.push(new THREE.Vector3(Math.cos(a) * coilR, t * height, Math.sin(a) * coilR));
-  }
-  return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), steps, wireR, 6, false);
-}
-
-function truckRod(push, name, x1, y1, z1, x2, y2, z2, r = 0.028) {
-  const a = new THREE.Vector3(x1, y1, z1);
-  const b = new THREE.Vector3(x2, y2, z2).sub(a);
-  const len = b.length();
-  const g = new THREE.CylinderGeometry(r, r, len, 8);
-  g.applyMatrix4(new THREE.Matrix4().compose(
-    new THREE.Vector3(x1, y1, z1).addScaledVector(b, 0.5),
-    new THREE.Quaternion().setFromUnitVectors(_up, b.normalize()),
-    _one,
-  ));
-  push(name, g);
-}
-
-let truckGeoCache = null;
-function truckPartGeometry() {
-  if (truckGeoCache) return truckGeoCache;
-  const B = { paint: [], paint2: [], dark: [], steel: [], glass: [], lamp: [], tail: [], rubber: [] };
-  const push = (name, geo, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => {
-    const m = new THREE.Matrix4().compose(
-      new THREE.Vector3(x, y, z),
-      new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz)),
-      _one,
-    );
-    geo.applyMatrix4(m);
-    B[name].push(geo);
-  };
-  const box = (name, sx, sy, sz, x, y, z, rx = 0, ry = 0, rz = 0) =>
-    push(name, new THREE.BoxGeometry(sx, sy, sz), x, y, z, rx, ry, rz);
-  const rod = (name, x1, y1, z1, x2, y2, z2, r) =>
-    truckRod(push, name, x1, y1, z1, x2, y2, z2, r);
-
-  /* ---- 梯形大梁 + 横梁 + 前后防撞梁 + 前护板 ---- */
-  for (const z of [-0.62, 0.62]) box("dark", 4.90, 0.14, 0.16, 0, 0.46, z);
-  for (const x of [-1.90, -0.70, 0.60, 1.90]) box("dark", 0.14, 0.12, 1.30, x, 0.46, 0);
-  box("dark", 0.16, 0.24, 1.96, 2.56, 0.72, 0);
-  box("dark", 0.14, 0.22, 1.90, -2.40, 0.70, 0);
-  box("steel", 1.10, 0.06, 1.10, 2.00, 0.38, 0);
-
-  /* ---- 后货厢 + 驾驶舱 + 车顶 + 前机盖 ---- */
-  box("paint2", 1.85, 0.52, 1.92, -1.30, 0.82, 0);
-  box("dark", 1.86, 0.06, 1.94, -1.30, 1.09, 0);
-  box("paint", 2.55, 0.40, 1.86, 0.55, 0.76, 0);
-  box("paint", 1.45, 0.62, 1.78, 0.85, 1.14, 0);
-  box("paint2", 1.38, 0.09, 1.66, 0.82, 1.50, 0);
-  box("paint", 1.00, 0.26, 1.70, 1.95, 0.94, 0);
-
-  /* ---- 前风挡 / 侧窗 / 后窗 ---- */
-  push("glass", new THREE.BoxGeometry(0.05, 0.50, 1.50), 1.60, 1.16, 0, 0, 0, 0.34);
-  for (const z of [-0.895, 0.895]) push("glass", new THREE.BoxGeometry(0.95, 0.30, 0.04), 0.92, 1.24, z);
-  push("glass", new THREE.BoxGeometry(0.04, 0.30, 1.46), 0.13, 1.24, 0, 0, 0, -0.22);
-
-  /* ---- 进气格栅 + 大灯 + 尾灯 ---- */
-  box("dark", 0.06, 0.30, 1.30, 2.44, 0.96, 0);
-  for (const z of [-0.62, 0.62]) {
-    push("dark", new THREE.CylinderGeometry(0.175, 0.175, 0.08, 20), 2.49, 1.02, z, 0, 0, Math.PI / 2);
-    push("lamp", new THREE.CylinderGeometry(0.15, 0.15, 0.10, 20), 2.545, 1.02, z, 0, 0, Math.PI / 2);
-    box("tail", 0.05, 0.16, 0.26, -2.34, 0.96, z * 1.15);
-  }
-
-  /* ---- 轮眉 + 挡泥板 + 侧踏板 ---- */
-  for (const x of [TRUCK.frontX, TRUCK.rearX]) {
-    for (const z of [-1, 1]) {
-      box("paint2", 1.06, 0.10, 0.34, x, 0.94, z * 1.00);
-      box("paint2", 1.06, 0.18, 0.05, x, 0.82, z * 1.16);
-      box("dark", 0.48, 0.24, 0.04, x - 0.55, 0.58, z * 1.04);
-    }
-  }
-  for (const z of [-1.02, 1.02]) box("dark", 3.30, 0.10, 0.10, 0, 0.56, z);
-
-  /* ---- 防滚架 + 车顶行李架 + 灯排 ---- */
-  for (const z of [-0.78, 0.78]) {
-    rod("steel", 0.18, 0.92, z, 0.20, 1.52, z * 0.97, 0.035);
-    rod("steel", 0.18, 1.52, z * 0.97, -0.65, 1.18, z, 0.030);
-  }
-  rod("steel", 0.19, 1.52, -0.76, 0.19, 1.52, 0.76, 0.030);
-  box("dark", 1.20, 0.05, 1.52, 0.82, 1.575, 0);
-  for (const z of [-0.79, 0.79]) box("dark", 1.20, 0.09, 0.06, 0.82, 1.60, z);
-  box("dark", 0.10, 0.12, 1.10, 1.40, 1.66, 0);
-  for (let i = 0; i < 4; i++) {
-    push("lamp", new THREE.CylinderGeometry(0.05, 0.05, 0.05, 12), 1.46, 1.66, -0.36 + i * 0.24, 0, 0, Math.PI / 2);
-  }
-
-  /* ---- 前灯护杠 + 涉水喉 + 排气 ---- */
-  for (const z of [-0.82, 0.82]) rod("steel", 2.58, 0.62, z, 2.58, 1.16, z, 0.030);
-  rod("steel", 2.58, 1.16, -0.82, 2.58, 1.16, 0.82, 0.030);
-  rod("dark", 1.52, 0.98, 0.97, 1.52, 1.70, 0.97, 0.052);
-  rod("dark", 1.52, 1.70, 0.97, 1.28, 1.70, 0.97, 0.052);
-  rod("steel", -2.05, 0.55, 0.42, -2.42, 0.80, 0.55, 0.045);
-
-  /* ---- 备胎 + 固定带 ---- */
-  push("rubber", new THREE.CylinderGeometry(0.42, 0.42, 0.30, 20), -1.45, 1.28, 0);
-  push("steel", new THREE.CylinderGeometry(0.26, 0.26, 0.34, 16), -1.45, 1.28, 0);
-  box("dark", 0.55, 0.05, 0.10, -1.45, 1.44, 0);
-
-  /* ---- 前后桥 ---- */
-  push("steel", new THREE.CylinderGeometry(0.06, 0.06, 1.68, 10),
-    TRUCK.frontX, TRUCK.wheelRF, 0, Math.PI / 2, 0, 0);
-  push("steel", new THREE.CylinderGeometry(0.06, 0.06, 1.72, 10),
-    TRUCK.rearX, TRUCK.wheelRR, 0, Math.PI / 2, 0, 0);
-
-  truckGeoCache = {
-    paint: mergeBucket(B.paint),
-    paint2: mergeBucket(B.paint2),
-    dark: mergeBucket(B.dark),
-    steel: mergeBucket(B.steel),
-    glass: mergeBucket(B.glass),
-    lamp: mergeBucket(B.lamp),
-    tail: mergeBucket(B.tail),
-    rubber: mergeBucket(B.rubber),
-    coil: coilSpringGeometry(0.50),
-  };
-  return truckGeoCache;
-}
-
-const truckWheelGeoCache = new Map();
-function truckWheelGeometry(R, W) {
-  const key = R + ":" + W;
-  let hit = truckWheelGeoCache.get(key);
-  if (hit) return hit;
-  const side = new THREE.CylinderGeometry(R * 0.86, R * 0.78, 0.02, 26);
-  side.rotateX(Math.PI / 2);
-  const rim = new THREE.CylinderGeometry(R * 0.60, R * 0.60, W * 0.66, 20);
-  rim.rotateX(Math.PI / 2);
-  const face = new THREE.CylinderGeometry(R * 0.58, R * 0.58, 0.03, 20);
-  face.rotateX(Math.PI / 2);
-  const cap = new THREE.CylinderGeometry(0.06, 0.06, 0.05, 12);
-  cap.rotateX(Math.PI / 2);
-  hit = {
-    tyre: knobbyTyreGeometry(R, W, 9),
-    side, rim, face,
-    spoke: new THREE.BoxGeometry(0.06, R * 1.05, 0.04),
-    cap, W,
-  };
-  truckWheelGeoCache.set(key, hit);
-  return hit;
-}
-
-function makeTruckWheel(R, W, tyreMat, rimMat, steelMat) {
-  const g = new THREE.Group();
-  const geo = truckWheelGeometry(R, W);
-  const tyre = new THREE.Mesh(geo.tyre, tyreMat);
-  tyre.castShadow = true;
-  g.add(tyre);
-  for (const s of [-1, 1]) {
-    const wall = new THREE.Mesh(geo.side, tyreMat);
-    wall.position.z = s * (W / 2 - 0.012);
-    g.add(wall);
-  }
-  g.add(new THREE.Mesh(geo.rim, rimMat));
-  const face = new THREE.Mesh(geo.face, rimMat);
-  face.position.z = W * 0.36;
-  g.add(face);
-  for (let i = 0; i < 6; i++) {
-    const sp = new THREE.Mesh(geo.spoke, rimMat);
-    sp.position.z = W * 0.30;
-    sp.rotation.z = i * Math.PI / 6;
-    g.add(sp);
-  }
-  const cap = new THREE.Mesh(geo.cap, steelMat);
-  cap.position.z = W * 0.40;
-  g.add(cap);
-  return g;
-}
-
-function createTruckMesh(car) {
-  const baseColor = new THREE.Color(car.color || "#c2551d");
-  const paint = new THREE.MeshStandardMaterial({ color: baseColor, metalness: 0.45, roughness: 0.45 });
-  const paint2 = new THREE.MeshStandardMaterial({
-    color: baseColor.clone().multiplyScalar(0.62), metalness: 0.4, roughness: 0.55,
-  });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x24282d, metalness: 0.55, roughness: 0.55 });
-  const steel = new THREE.MeshStandardMaterial({ color: 0x9aa4ad, metalness: 0.9, roughness: 0.30 });
-  const glass = new THREE.MeshStandardMaterial({
-    color: 0x8fd2ff, metalness: 0.1, roughness: 0.08,
-    transparent: true, opacity: 0.5, side: THREE.DoubleSide,
-  });
-  glass.userData.baseAlpha = 0.5;
-  const lamp = new THREE.MeshStandardMaterial({
-    color: 0xfff6dc, emissive: 0xffeab4, emissiveIntensity: 2.0, metalness: 0.1, roughness: 0.15,
-  });
-  const tailMat = new THREE.MeshStandardMaterial({ color: 0x5a1010, emissive: 0x000000, roughness: 0.4 });
-  const springMat = new THREE.MeshStandardMaterial({ color: 0xc4ccd4, metalness: 0.9, roughness: 0.25 });
-  const rubberMat = new THREE.MeshStandardMaterial({ color: 0x1d2022, metalness: 0.02, roughness: 0.95 });
-  const rimMat = new THREE.MeshStandardMaterial({ color: 0x8e979f, metalness: 0.9, roughness: 0.3 });
-
-  const geo = truckPartGeometry();
-  const root = new THREE.Group();
-  const body = new THREE.Group();
-  root.add(body);
-  const bodyMesh = (g, mat) => {
-    const m = new THREE.Mesh(g, mat);
-    m.castShadow = true;
-    body.add(m);
-    return m;
-  };
-  bodyMesh(geo.paint, paint);
-  bodyMesh(geo.paint2, paint2);
-  bodyMesh(geo.dark, dark);
-  bodyMesh(geo.steel, steel);
-  bodyMesh(geo.glass, glass);
-  bodyMesh(geo.lamp, lamp);
-  bodyMesh(geo.tail, tailMat);
-  bodyMesh(geo.rubber, rubberMat);
-
-  const coils = [];
-  for (const x of [TRUCK.frontX, TRUCK.rearX]) {
-    for (const z of [-0.74, 0.74]) {
-      const coil = new THREE.Mesh(geo.coil, springMat);
-      coil.position.set(x, 0.44, z);
-      coil.castShadow = true;
-      root.add(coil);
-      coils.push({ mesh: coil, x, z });
-    }
-  }
-
-  const wheels = { steer: [], spin: [] };
-  const mkWheel = (x, z, front) => {
-    const R = front ? TRUCK.wheelRF : TRUCK.wheelRR;
-    const W = front ? TRUCK.frontW : TRUCK.rearW;
-    const steer = new THREE.Group();
-    steer.position.set(x, R, z);
-    const spin = new THREE.Group();
-    spin.add(makeTruckWheel(R, W, rubberMat, rimMat, steel));
-    steer.add(spin);
-    root.add(steer);
-    wheels.steer.push({ group: steer, front });
-    wheels.spin.push(spin);
-  };
-  mkWheel(TRUCK.frontX, TRUCK.frontZ, true);
-  mkWheel(TRUCK.frontX, -TRUCK.frontZ, true);
-  mkWheel(TRUCK.rearX, TRUCK.rearZ, false);
-  mkWheel(TRUCK.rearX, -TRUCK.rearZ, false);
-
-  const numMat = new THREE.MeshBasicMaterial({
-    map: numberTexture(car.number), transparent: true, side: THREE.FrontSide,
-  });
-  for (const sgn of [1, -1]) {
-    const plate = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.54), numMat);
-    plate.position.set(-1.30, 0.80, sgn * 0.966);
-    if (sgn < 0) plate.rotation.y = Math.PI;
-    body.add(plate);
-  }
-
-  const allMats = [paint, paint2, dark, steel, glass, lamp, tailMat, springMat, rubberMat, rimMat, numMat];
-  const aoMat = new THREE.MeshBasicMaterial({
-    map: SHARED.contactShadow,
-    transparent: true,
-    opacity: 0.72,
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -2,
-  });
-  aoMat.userData.baseAlpha = 0.72;
-  allMats.push(aoMat);
-  const aoShadow = new THREE.Mesh(SHARED.contactShadowGeo, aoMat);
-  aoShadow.position.y = 0.005;
-  aoShadow.renderOrder = 1;
-  root.add(aoShadow);
-
-  root.userData = {
-    wheels, brakeMat: tailMat, allMats,
-    body, coils, roll: 0, pitch: 0, kerbLift: 0, aoShadow,
-    spinAngle: 0, lastAlpha: null, wheelR: TRUCK.wheelRR,
-  };
-  return root;
-}
-
-/* ================= 创建一辆 F1 / 特种车的 3D 视觉体 ================= */
-export function createCarMesh(car) {
-  if (isSu7Car(car)) return createSu7Mesh(car);
-  if (isOffroadCar(car)) return createTruckMesh(car);
-
+// 创建一辆 F1 的 3D 视觉体（形状跨车共享，材质逐车独立）
+export function create(car) {
   // 解析车队涂装配色表（兼容 car.customLivery、CAR_LIVERIES[car.livery] 与纯色 car.color）
   const preset = (car && car.livery && CAR_LIVERIES[car.livery]) ? CAR_LIVERIES[car.livery] : null;
   const liv = car && car.customLivery ? { ...(preset || {}), ...car.customLivery } : preset;
@@ -1620,7 +985,7 @@ export function createCarMesh(car) {
     clearcoat: 0.80, clearcoatRoughness: 0.14,
   });
   const carbon = new THREE.MeshStandardMaterial({
-    color: 0xffffff, map: SHARED.carbonWeave, metalness: 0.32, roughness: 0.48,
+    color: 0xffffff, map: F1_TEX.carbonWeave, metalness: 0.32, roughness: 0.48,
   });
   const suspMat = new THREE.MeshStandardMaterial({
     color: 0x22262e, metalness: 0.55, roughness: 0.36,
@@ -1708,7 +1073,7 @@ export function createCarMesh(car) {
 
   // 车底地面效应接触暗影（Contact AO Shadow：锚定四轮接地斑与文丘里底板暗区）
   const aoMat = new THREE.MeshBasicMaterial({
-    map: SHARED.contactShadow,
+    map: F1_TEX.contactShadow,
     transparent: true,
     opacity: 0.85,
     depthWrite: false,
@@ -1717,7 +1082,7 @@ export function createCarMesh(car) {
     polygonOffsetUnits: -2,
   });
   aoMat.userData.baseAlpha = 0.85;
-  const aoShadow = new THREE.Mesh(SHARED.contactShadowGeo, aoMat);
+  const aoShadow = new THREE.Mesh(F1_TEX.contactShadowGeo, aoMat);
   aoShadow.position.y = 0.005;
   aoShadow.renderOrder = 1;
   root.add(aoShadow);
@@ -1738,7 +1103,7 @@ export function createCarMesh(car) {
   }
 
   // 四轮总成：steer 组（前轮转向 + 刹车鼓/发光刹车盘/前轮眉翼）→ spin 组（圆肩轮胎 + 18寸轮毂导流罩 + 锁止螺母）
-  const tread = SHARED.tread, sidewall = SHARED.sidewall;
+  const tread = F1_TEX.tread, sidewall = F1_TEX.sidewall;
   const wheels = { steer: [], spin: [] };
   const tireMat = new THREE.MeshStandardMaterial({ map: tread, roughness: 0.86, metalness: 0.06 });
   const wallMat = new THREE.MeshStandardMaterial({ map: sidewall, roughness: 0.78, metalness: 0.06 });
@@ -1824,108 +1189,11 @@ export function createCarMesh(car) {
   return root;
 }
 
-/* 每帧同步：位置 / 朝向 / 车轮滚动与转向 / 刹车灯与刹车盘热辐射 / 悬挂姿态 / 幽灵透明度 */
-export function syncCarMesh(root, car, dt) {
-  const spd = Math.abs(car.speed || 0);
-  const surf = car.surf ?? 0;
-
-  // 双轴多点纵向坡度与拱顶/凹谷桥接采样（上海 T1-T2 爬坡顶 +11.24m 等变坡处防止长鼻锥/扩散器穿模）
-  let roadY = car.roadY || 0;
-  let roadPitch = car.roadPitch || 0;
-  let roadRoll = car.roadRoll || 0;
-  if (car.trackS != null && surf !== 2 && Math.abs(roadPitch) > 0.0005) {
-    const pF = roadAt(car.trackS + 1.75);
-    const pR = roadAt(car.trackS - 1.75);
-    if (pF && pR) {
-      const axleMidY = 0.5 * (pF.y + pR.y);
-      const bankPart = roadY - (roadAt(car.trackS).y || 0);
-      roadY = Math.max(roadY, axleMidY + bankPart);
-      roadPitch = (pF.y - pR.y) / 3.5;
-    }
-  }
-
-  // 沥青表面在 roadElev + 0.050m，路缘石在 roadElev + 0.068m：
-  // 基准抬升 +0.046m 使四轮正好落在 0.050m 沥青面上（带 4mm 真实受载接地扁平量，不再陷入地下 5cm）
+// 车型专属每帧动画：刹车盘热辐射 / 排气回火尾焰 / 底盘气动姿态 / 车手与方向盘
+export function sync(root, car, ctx) {
   const u = root.userData;
-  const stepDt = Math.min(dt || 0.016, 0.05);
-  const targetKerbLift = surf === 1 ? 0.016 : 0;
-  u.kerbLift = (u.kerbLift || 0) + (targetKerbLift - (u.kerbLift || 0)) * Math.min(1, stepDt * 22);
-
-  // 冲出赛道进入草坪 (surf === 2) 时：直接采样 3D 草地三角形网格的精确高度与法向坡度，
-  // 既可平滑贴合草坪起伏，又通过 Math.max 硬下限保证车身与四轮 100% 绝不陷入草地网格以下
-  const gCenter = sampleGroundMeshY(car.x, car.y);
-  const targetOffTrack = surf === 2 ? 1 : 0;
-  u.offTrackBlend = (u.offTrackBlend || 0)
-    + (targetOffTrack - (u.offTrackBlend || 0)) * Math.min(1, stepDt * (surf === 2 ? 6.5 : 14));
-
-  let baseY = roadY + 0.046 + u.kerbLift;
-  if (u.offTrackBlend > 0.001) {
-    const ca = Math.cos(car.angle || 0), sa = Math.sin(car.angle || 0);
-    const gFront = sampleGroundMeshY(car.x + ca * 1.75, car.y + sa * 1.75);
-    const gRear = sampleGroundMeshY(car.x - ca * 1.75, car.y - sa * 1.75);
-    const gLeft = sampleGroundMeshY(car.x - sa * 0.80, car.y + ca * 0.80);
-    const gRight = sampleGroundMeshY(car.x + sa * 0.80, car.y - ca * 0.80);
-    const grassTop = Math.max(gCenter, 0.5 * (gFront + gRear), 0.5 * (gLeft + gRight));
-    const grassPitch = (gFront - gRear) / 3.5;
-    const grassRoll = (gLeft - gRight) / 1.6;
-    const b = u.offTrackBlend;
-    baseY = Math.max(grassTop + 0.024, baseY * (1 - b) + (grassTop + 0.028) * b);
-    roadPitch = roadPitch * (1 - b) + grassPitch * b;
-    roadRoll = roadRoll * (1 - b) + grassRoll * b;
-  } else {
-    baseY = Math.max(baseY, gCenter + 0.020);
-  }
-
-  // 压上 FIA 锯齿路缘石（每块 1.2m）时的高频悬挂跳动与震颤
-  const kerbRumble = surf === 1
-    ? Math.sin((car.trackS || 0) * 5.24) * 0.0048 * Math.min(1, spd / 22)
-    : 0;
-  const grassShake = car.shake > 0.2 ? Math.random() * car.shake * 0.01 : 0;
-
-  const finalY = baseY + kerbRumble + grassShake;
-  car.visY = finalY;
-  root.position.set(car.x, finalY, car.y);
-  // 赛道纵向剖面姿态（YXZ 欧拉：yaw ∘ pitch ∘ roll，小角近似）：
-  //   rotation.z = 沿车头坡度 → 正 = 车头上仰（Rz 正把 +x（车头）抬向 +y）
-  //   rotation.x = -横坡 → roadRoll>0 表示 +nor 侧（车身局部 +z）更高，需负 rx 抬起 +z
-  root.rotation.order = "YXZ";
-  root.rotation.z = Math.atan(roadPitch);
-  root.rotation.x = -Math.atan(roadRoll);
-  root.rotation.y = -car.angle;
-
-  const ghostA = car.retired || car.ghostHidden ? 0 : (car.ghostAlpha == null ? 1 : Math.max(0, car.ghostAlpha));
-
-  // 保持车底接触暗影紧贴沥青/路肩表层，不随悬挂跳动悬空
-  if (u.aoShadow) {
-    u.aoShadow.position.y = Math.max(0.002, 0.006 - u.kerbLift * 0.5 - kerbRumble);
-  }
-
-  // SU7 真实车模分支
-  if (u.isGlb) {
-    u.spinAngle -= (car.speed * dt) / 0.3;
-    for (const n of u.spinNodes) n.rotation.z = u.spinAngle;
-    if (u.glbReady && ghostA !== u.lastAlpha) {
-      root.visible = ghostA > 0.02;
-      for (const m of u.mats) {
-        m.transparent = ghostA < 0.999;
-        m.opacity = ghostA;
-      }
-      u.lastAlpha = ghostA;
-    }
-    return;
-  }
-
-  const spin = (spd * dt) / (u.wheelR || WHEEL_R_R) * (car.speed < 0 ? 1 : -1);
-  u.spinAngle = (u.spinAngle + spin) % (Math.PI * 2);
-  for (const s of u.wheels.spin) s.rotation.z = u.spinAngle;
-  // car.steer 经物理平滑后实际范围 ±0.55，视觉增益放大到满舵 ±27°
-  const steerVis = -car.steer * 0.85;
-  for (const s of u.wheels.steer) if (s.front) s.group.rotation.y = steerVis;
-
-  const braking = !!(car.braking || (car.inBrake > 0 && spd > 0.5));
-  u.brakeMat.emissive.setHex(braking ? 0xff1e1e : 0x000000);
-  u.brakeMat.emissiveIntensity = braking ? 2.2 : 0;
-
+  const dt = ctx.dt ?? 0.016;
+  const { spd, surf, kerbRumble, ghostA, braking } = ctx;
   // F1 碳陶刹车盘热辐射发光（重刹时升温发亮橙红光，松刹后随气流冷却）
   if (u.discMat) {
     const targetHeat = (braking && spd > 8) ? 1 : 0;
@@ -1971,41 +1239,9 @@ export function syncCarMesh(root, car, dt) {
       u.headGroup.rotation.x = (car.steer || 0) * 0.12 + kerbRollJolt * 1.8;
     }
   }
-
-  // 越野卡车悬挂：车身相对车轮侧倾、俯仰与四角弹簧压缩
-  if (u.body) {
-    const latG = Math.max(0, car.gLat || 0);
-    const rollTarget = -Math.sign(car.steer || 0) * Math.min(0.14, latG * 0.07);
-    const pitchTarget = Math.max(-0.055, Math.min(0.045, (car.accel || 0) * 0.004));
-    const k = Math.min(1, dt * 8);
-    u.roll += (rollTarget - u.roll) * k;
-    u.pitch += (pitchTarget - u.pitch) * k;
-    u.body.rotation.x = u.roll;
-    u.body.rotation.z = u.pitch;
-    u.body.position.y = -Math.min(0.035, Math.abs(u.roll) * 0.12 + Math.abs(u.pitch) * 0.12);
-    for (const c of u.coils) {
-      const dy = u.pitch * c.x - u.roll * c.z;
-      c.mesh.scale.y = Math.max(0.6, Math.min(1.3, 1 + dy / 0.5));
-    }
-  }
-
-  if (ghostA !== u.lastAlpha) {
-    root.visible = ghostA > 0.02;
-    for (const m of u.allMats) {
-      const base = m.userData.baseAlpha ?? 1;
-      m.transparent = ghostA < 0.999 || base < 1;
-      m.opacity = ghostA * base;
-    }
-    u.lastAlpha = ghostA;
-  }
 }
 
 /* 释放一辆车的独立材质（共享几何、贴图与模板不释放） */
-export function disposeCarMesh(root) {
-  const u = root.userData;
-  if (u.isGlb) {
-    (u.mats || []).forEach(m => m && m.dispose());
-    return;
-  }
-  (u.allMats || []).forEach(m => m && m.dispose());
+export function dispose(root) {
+  (root.userData.allMats || []).forEach(m => m && m.dispose());
 }

@@ -3,35 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>car3d 车模预览</title>
+<title>3D 车模预览</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; overflow: hidden; background: #0a0e14; font-family: system-ui, sans-serif; }
   canvas { display: block; }
-  #bar {
+  #ui {
     position: fixed; left: 12px; top: 12px; z-index: 10;
-    display: flex; gap: 8px; flex-wrap: wrap; max-width: 70vw;
+    display: flex; flex-direction: column; gap: 8px; max-width: 92vw;
   }
-  #bar button {
+  #cars, #bar { display: flex; gap: 8px; flex-wrap: wrap; }
+  #bar { max-width: 70vw; }
+  #cars button, #bar button {
     background: rgba(15,22,34,.9); color: #cfe3ff; border: 1px solid rgba(140,180,220,.35);
     border-radius: 6px; padding: 7px 12px; font-size: 13px; cursor: pointer;
   }
-  #bar button:hover { background: rgba(40,60,90,.95); }
-  #bar button.on { background: #2f6fd0; color: #fff; border-color: #7fb1ff; }
+  #cars button { border-left-width: 3px; border-left-style: solid; }
+  #cars button:hover, #bar button:hover { background: rgba(40,60,90,.95); }
+  #cars button.on, #bar button.on { background: #2f6fd0; color: #fff; border-color: #7fb1ff; }
   #hud {
     position: fixed; right: 12px; top: 12px; z-index: 10; color: #9fb6d0; font-size: 12px;
-    text-align: right; text-shadow: 0 1px 3px #000;
+    text-align: right; text-shadow: 0 1px 3px #000; line-height: 1.7;
   }
+  #hud b { color: #e8f1ff; }
+  #hud .dim { color: #6b809a; }
 </style>
 </head>
 <body>
-<div id="bar"></div>
-<div id="hud">拖动旋转 · 滚轮缩放<br>car-preview.html</div>
+<div id="ui">
+  <div id="cars"></div>
+  <div id="bar"></div>
+</div>
+<div id="hud"></div>
 <script type="module">
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { createCarMesh, syncCarMesh } from "/src/render3d/car3d.js";
+import { createCarMesh, syncCarMesh, disposeCarMesh } from "/src/render3d/car/index.js";
+import { AI_CONFIGS } from "/src/game/ai.js";
+
+const params = new URLSearchParams(location.search);
+// 调试参数：
+//   ?wheels=45  把轮胎固定转到 45°（验证轮组是否绕轮毂中心自转）
+//   ?steer=0.5  固定方向盘输入（-0.55 ~ 0.55，验证前轮转向）
+//   ?brake=1    持续踩刹车（验证尾灯点亮）
+const wheelsDeg = params.has("wheels") ? Number(params.get("wheels")) : null;
+const steerFixed = params.has("steer") ? Number(params.get("steer")) : null;
+let brakeOn = params.has("brake");
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
@@ -82,13 +100,89 @@ for (const s of [-2.8, 2.8]) {
   scene.add(tick);
 }
 
-// URL 参数切换车模：?car=truck 预览越野卡车 TRAIL RIG
-const car = new URLSearchParams(location.search).get("car") === "truck"
-  ? { number: 23, color: "#c2551d", livery: "offroad" }
-  : { number: 7, color: "#ff3b3b", livery: "f1" };
-const mesh = createCarMesh(car);
-mesh.traverse(o => { if (o.isMesh) o.receiveShadow = false; });
-scene.add(mesh);
+/* ================= 车型列表 =================
+   直接取 AI_CONFIGS（与游戏内可选赛车同源），新增车辆自动出现在这里；
+   3D 车身由 render3d/car/index.js 按 livery 分派：glTF 车模 3 款 + 程序化 F1 / 越野卡车。 */
+const CARS = AI_CONFIGS.map(c => ({
+  id: c.id,
+  label: c.shortName || c.model,
+  model: c.model,
+  livery: c.livery,
+  car: { number: c.number, color: c.color, livery: c.livery },
+}));
+
+// 兼容 URL 简写：?car=u9 / su7 / truck / f1
+const ALIAS = {
+  f1: "apex-hunter",
+  su7: "smooth-cruiser",
+  su7ultra: "smooth-cruiser",
+  u9: "yangwang-u9x",
+  yangwang: "yangwang-u9x",
+  truck: "trail-rig",
+  offroad: "trail-rig",
+};
+
+function modelSource(livery) {
+  if (livery === "su7ultra") return "glTF · public/models/su7/sm_car.gltf";
+  if (livery === "yangwang") return "glTF · public/models/u9/u9.glb";
+  if (livery === "offroad") return "程序化 · render3d/car/offroad.js";
+  return "程序化 · render3d/car/f1.js";
+}
+
+const hudEl = document.getElementById("hud");
+let mesh = null;
+let entry = CARS[0];
+const demoCar = { number: 1, color: "#ff3b3b", x: 0, y: 0, angle: 0, speed: 30, steer: 0 };
+
+function renderHud() {
+  hudEl.innerHTML =
+    `当前车型：<b>${entry.label}</b>（${entry.model}）<br>` +
+    `涂装：${entry.livery} · 车号 #${entry.car.number}<br>` +
+    `3D 来源：${modelSource(entry.livery)}<br>` +
+    `<span class="dim">← → 切换车型 · 拖动旋转 · 滚轮缩放</span>`;
+}
+
+function setCar(idOrAlias, updateUrl = true) {
+  const key = ALIAS[idOrAlias] || idOrAlias;
+  const next = CARS.find(c => c.id === key) || CARS[0];
+  if (mesh) {
+    scene.remove(mesh);
+    // 只释放逐车材质；几何、贴图与 glTF 模板跨车共享，由各自车型模块缓存
+    disposeCarMesh(mesh);
+    mesh = null;
+  }
+  entry = next;
+  mesh = createCarMesh(next.car);
+  mesh.traverse(o => { if (o.isMesh) o.receiveShadow = false; });
+  scene.add(mesh);
+
+  demoCar.color = next.car.color;
+  demoCar.number = next.car.number;
+  for (const b of carBtns) b.classList.toggle("on", b.dataset.id === next.id);
+  renderHud();
+  if (updateUrl) {
+    // 保留 ?low 等其他参数，只替换车型，方便直接分享某个车模的视角
+    const q = new URLSearchParams(location.search);
+    q.set("car", next.id);
+    history.replaceState(null, "", `${location.pathname}?${q}`);
+  }
+  window.__car = next.id;
+}
+
+const carBox = document.getElementById("cars");
+const carBtns = [];
+for (const c of CARS) {
+  const b = document.createElement("button");
+  b.textContent = c.label;
+  b.dataset.id = c.id;
+  b.title = `${c.model} · 涂装 ${c.livery}`;
+  b.style.borderLeftColor = c.car.color;
+  b.onclick = () => setCar(c.id);
+  carBox.appendChild(b);
+  carBtns.push(b);
+}
+
+setCar(new URLSearchParams(location.search).get("car") || CARS[0].id, false);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0.5, 0);
@@ -103,6 +197,7 @@ const VIEWS = {
   "尾翼特写": { pos: [-4.4, 1.5, -2.6], tgt: [-2.5, 0.85, 0] },
   "前翼特写": { pos: [4.6, 1.1, 2.2], tgt: [2.5, 0.3, 0] },
   "座舱特写": { pos: [1.8, 1.3, 2.2], tgt: [0.2, 0.62, 0] },
+  "车轮特写": { pos: [2.6, 0.75, 2.6], tgt: [1.4, 0.36, 0.85] },
 };
 const bar = document.getElementById("bar");
 let activeBtn = null;
@@ -120,10 +215,15 @@ for (const [name, v] of Object.entries(VIEWS)) {
   bar.appendChild(b);
   if (name === "rear-3/4(主视角)") { b.onclick(); }
 }
-// URL ?low=1 用低机位后视角（游戏追尾镜头近似）
+// URL ?low=1 用低机位后视角（游戏追尾镜头近似）；?view=side 按名称直接选机位
 if (location.search.includes("low")) {
   camera.position.set(-9.2, 1.35, -3.2);
   controls.target.set(-0.4, 0.7, 0);
+}
+const viewParam = VIEWS[params.get("view")];
+if (viewParam) {
+  camera.position.set(...viewParam.pos);
+  controls.target.set(...viewParam.tgt);
 }
 
 let spin = false;
@@ -132,13 +232,29 @@ spinBtn.textContent = "转台";
 spinBtn.onclick = () => { spin = !spin; spinBtn.classList.toggle("on", spin); };
 bar.appendChild(spinBtn);
 
-// 转向演示：正弦往复打满方向盘，验证前轮转角增益（±0.55 × 0.85 ≈ ±27°）
+// 转向演示：正弦往复打满方向盘，验证前轮转角增益（±0.55 × 0.85 ≈ ±27°），
+// 同时喂 30m/s 车速让轮胎自转（glTF 车模的轮组 pivot 也走这条路径）
 let steerDemo = false;
 const steerBtn = document.createElement("button");
 steerBtn.textContent = "转向演示";
 steerBtn.onclick = () => { steerDemo = !steerDemo; steerBtn.classList.toggle("on", steerDemo); };
 bar.appendChild(steerBtn);
-const demoCar = { number: 7, color: "#ff3b3b", x: 0, y: 0, angle: 0, speed: 30, steer: 0 };
+
+// 刹车灯：持续踩刹车，验证尾灯点亮（F1/卡车为自发光尾灯，glTF 车模为灯组材质）
+const brakeBtn = document.createElement("button");
+brakeBtn.textContent = "刹车灯";
+brakeBtn.classList.toggle("on", brakeOn);
+brakeBtn.onclick = () => { brakeOn = !brakeOn; brakeBtn.classList.toggle("on", brakeOn); };
+bar.appendChild(brakeBtn);
+
+// 键盘左右方向键切换车型（循环）
+addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  const i = CARS.findIndex(c => c.id === entry.id);
+  const step = e.key === "ArrowRight" ? 1 : CARS.length - 1;
+  setCar(CARS[(i + step) % CARS.length].id);
+});
 
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
@@ -147,13 +263,21 @@ addEventListener("resize", () => {
 });
 
 renderer.setAnimationLoop((tms) => {
-  if (spin) mesh.rotation.y += 0.008;
-  if (steerDemo) {
-    demoCar.steer = Math.sin(tms / 900) * 0.55;
+  if (mesh && spin) mesh.rotation.y += 0.008;
+  if (steerFixed !== null) steerDemo = true;
+  if ((steerDemo || brakeOn) && mesh) {
+    demoCar.steer = steerFixed !== null ? steerFixed : (steerDemo ? Math.sin(tms / 900) * 0.55 : 0);
+    demoCar.braking = brakeOn;
+    demoCar.speed = brakeOn && !steerDemo ? 0 : 30;   // 只看尾灯时车轮不滚，便于观察
     // 给悬挂动画喂 G 值：越野卡车的车身侧倾/俯仰与四角弹簧压缩靠它们驱动
     demoCar.gLat = Math.abs(Math.sin(tms / 900)) * 1.7;
     demoCar.accel = Math.sin(tms / 700) * 8;
     syncCarMesh(mesh, demoCar, 1 / 60);
+  }
+  // 固定轮子转角（验证是否绕轮毂中心自转）：放在 sync 之后覆盖，避免被滚动角度冲掉
+  if (mesh && wheelsDeg !== null) {
+    const a = THREE.MathUtils.degToRad(wheelsDeg);
+    for (const p of mesh.userData.spinNodes || []) p.rotation.z = a;
   }
   controls.update();
   renderer.render(scene, camera);
