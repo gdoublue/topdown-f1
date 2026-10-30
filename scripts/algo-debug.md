@@ -1,14 +1,15 @@
 # 自动驾驶算法调试流程（固定套路）
 
-调一个新算法不再需要现写探针脚本。三个工具各管一件事，串起来就是固定流程：
+调一个新算法不再需要现写探针脚本。四个工具各管一件事，串起来就是固定流程：
 
 | 步骤 | 工具 | 回答的问题 | 典型耗时 |
 |---|---|---|---|
+| 0 验赛道 | `scripts/track-debug.mjs`（`npm run track:debug`） | 改完赛道后：树有没有压路？车会不会卡死？弯/直道数据对不对？ | 5~40s |
 | 1 初筛 | `scripts/autopilot-bench.mjs`（`npm run algo:bench`） | 能不能跑完？圈速多少？和内置差多少？ | 1~30s |
 | 2 定位 | `scripts/algo-doctor.mjs`（`npm run algo:doctor`） | **慢在哪一段**？纵向通道怎么用的？转向吃满了吗？ | 2~5s |
 | 3 验收 | `scripts/algo-check.mjs`（`npm run algo:check`） | 全赛道 × 全车型能不能收？有没有回归？ | 1~3min |
 
-三个工具共用同一套底座：`scripts/lib/algo-harness.mjs`（编译注入、物理步循环、遥测钩子），
+四个工具共用同一套底座：`scripts/lib/algo-harness.mjs`（编译注入、物理步循环、遥测钩子），
 与游戏内 `src/ui/autopilot.js` 的编译工厂、`src/game/driverSandbox.js` 的只读视图是同一份实现。
 
 > 写脚本的语法约定、注入 API、与游戏内的差异：见 `scripts/autopilot-bench.md`。
@@ -18,6 +19,9 @@
 ## 0. 30 秒上手
 
 ```powershell
+# 0) 改完赛道：几何 + 树木净空 + 无头跑一圈
+npm run track:debug -- --track=shanghai
+
 # 1) 初筛：能完赛吗、圈速多少
 npm run algo:bench -- --algo=my.js --track=monza --car=apex-hunter --laps=3
 
@@ -208,6 +212,30 @@ CI 里检查算法改动：
 npm run algo:check -- --algo=userscripts/我的算法.js --laps=2 --save=accept.json
 if ($LASTEXITCODE -ne 0) { exit 1 }
 ```
+
+---
+
+## 3.5 改完赛道先跑 `track-debug`
+
+改 `src/track/tracks/<id>.js`、中心线/宽度/高程，或新增赛道后，先不开浏览器：
+
+```powershell
+node scripts/track-debug.mjs --track=shanghai             # 几何 + 树 + 跑一圈
+node scripts/track-debug.mjs --track=all --json=out.json  # 全赛道留档
+node scripts/track-debug.mjs --track=spa --no-race        # 只查几何/树
+```
+
+三项检查各自对应一类"画面里看不出来"的故障：
+
+| 输出 | 含义 | 处理 |
+|---|---|---|
+| `✗ 卡死 s=... idx=...` | 车在某点持续 <1.5m/s 超过 2.5s | 看同行的 `目标弯速`：接近 0 = 走线折叠（`buildAIData` 走廊），正常 = 物理/几何顶住 |
+| `✗ N 棵 · 最小离路净空 ...` | 树长进路面（要求 ≥8m，与渲染共用 `treeLayout`） | 调整树密度/净空，别用抽样近似 |
+| `⚠ 半宽 ≥ 原始转弯半径` | 弯太急而路太宽，内侧边线越过曲率中心、路面自交 | 收窄该弯 `hwWide`，或把中心线该处半径改大 |
+| `⚠ 中心线点距不均` | Catmull-Rom 后点距 0.4~20m，AI 仍按均匀 `DS` 算前瞻/刹车 | 检查控制点分布；必要时按弧长重采样 |
+| `⚠ 同高度路段沥青重叠` | 两段路在 3m 高差内且净空 < 0（真交叉应进 `bridges`） | 校对中心线数据，确认不是路径重复 |
+
+退出码：完赛 + 无卡死 + 树全部 ≥ 净空 = 0，否则 1（可接 CI）。
 
 ---
 

@@ -13,10 +13,14 @@
     "algo:bench:traffic": "node scripts/autopilot-bench.mjs --mode=vs --track=all --car=all --laps=2",
     "algo:doctor": "node scripts/algo-doctor.mjs",
     "algo:check": "node scripts/algo-check.mjs",
+    "track:debug": "node scripts/track-debug.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
     "vite": "^7.3.7"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
   }
 }

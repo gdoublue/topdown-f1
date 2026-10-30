@@ -21,8 +21,8 @@
 //    - 远端车受击时叠加微量平滑弹性排斥（Visual Pushback），带接触火花扬尘、车身震动与碰撞音效
 // 4. 比赛时钟（倒计时/开赛/结束）由服务器权威驱动
 import { switchTrack, LAP_LENGTH, isLinear, indexAtDistance, hw, kerbFlag } from "../track/geometry.js";
-import { setRaceLaps } from "../config.js";
-import { createCar, stepCar, finishedCarInput, getCarDistance, nearestIndex } from "../car/physics.js";
+import { setRaceLaps, PHYS } from "../config.js";
+import { createCar, stepCar, finishedCarInput, getCarDistance, nearestIndex, updateRoadProfile } from "../car/physics.js";
 import { getRandomPartLivery } from "../car/render.js";
 import { updateCarLap } from "../game/race.js";
 import { applyCarConfig, AI_CONFIGS, driveAI, createAIInput } from "../game/ai.js";
@@ -553,11 +553,13 @@ function onSnapshot(msg) {
  * 这里用【正在显示的位姿】反推同样的两个物理量：
  *   a_lon ≈ Δv / Δt        （v 已经是样条速度 + 80ms 平滑，稳态下导数不失真）
  *   a_lat ≈ v · Δθ / Δt    （航向角差分 = 横摆角速度，再 × v）
- * 阈值与本地同源（本地：accel < -11.5 m/s²、gLat > 3.8），但差分量噪声更大，故：
- *   · 纵向：慢车 60Hz 重采样 + 0.1m/s 量化 → 先做 50ms 指数平滑；
+ * 阈值与本地同源（本地：制动力用到本车刹车上限的 55% / 侧向极限的 90%），但差分量噪声更大，故：
+ *   · 纵向：慢车 60Hz 重采样 + 0.1m/s 量化 → 先做 50ms 指数平滑，
+ *     锁胎判定按"本车制动能力的 55%"换算（F1 ≈3.5g、街车 ≈1g），开闸点再放宽 12% 抵消平滑；
  *     inBrake（30Hz 快照，且【不】随播放缓冲延后）只当"提前开闸"用，不作为必要条件，
  *     否则闸门会比车身早关 80ms，把印子的尾巴削掉一截。
- *   · 横向：阈值抬到 3.7G，并要求连续 2 帧成立才起印，消掉单帧噪声的假印。
+ *   · 横向：阈值抬到本车侧向极限的 95%，且必须弯中带刹或压路肩才起印（纯转向过弯不留印），
+ *     并要求连续 2 帧成立，消掉单帧噪声的假印。
  * 落印点用与 physics.js 完全相同的轴距/轮距/阿克曼半径差几何，
  * 因此四条痕迹与"画出来的车轮"严格重合（车和印都由同一个位姿得出，视觉不会错位）。
  */
@@ -608,18 +610,31 @@ function emitRemoteSkid(e, dt, fx) {
   sk.ang = c.angle;
   sk.accel += (accelRaw - sk.accel) * (1 - Math.exp(-dt / SKID_ACCEL_TAU));
   sk.glat += (Math.abs(c.speed * yawRate) / 9.81 - sk.glat) * (1 - Math.exp(-dt / SKID_GLAT_TAU));
+  // 供 3D 车模悬挂动画使用（远端车没有本地物理，用位姿反推的 G 值代替）
+  c.accel = sk.accel;
+  c.gLat = sk.glat;
 
   let target = 0, frontBias = 1.0, rearBias = 1.0;
   if (spd > 3.5) {
-    // 1. 制动工况：闸门取 -14（此时只可能是真的在踩刹车，滑行只有 0.23g）
-    const gate = c.inBrake > 0 ? -9.5 : -14;
-    if (sk.accel < gate) {
-      target = clamp((-sk.accel - 9.5) / 36, 0.18, 0.95);
-      frontBias = 1.0; rearBias = 0.88;      // 重心前移：前轮印更深（与本地一致）
-    } else if (sk.glat > 3.7) {
-      // 2. 极限过弯侧滑：后轴先失稳，后轮印更深
-      target = clamp((sk.glat - 3.7) / 1.1, 0.15, 0.65);
-      frontBias = 0.88; rearBias = 1.0;
+    // 阈值按远端车自己的制动/侧向能力换算，与 physics.js 同源
+    const brakeCap = PHYS.brake * (c.perf?.brakeMult ?? 1);
+    const lockDecel = brakeCap * 0.55;
+    const latLimitG = (c.perf?.latGrip ?? PHYS.latGrip) / 9.81;
+    const scrubG = latLimitG * 0.95;
+    // 1. 制动锁胎：差分平滑会削低峰值，开闸点放宽 12%（有 inBrake 时再稍早）
+    const gate = lockDecel * (c.inBrake > 0 ? 0.88 : 1.0);
+    if (sk.accel < -gate) {
+      const over = clamp((-sk.accel - lockDecel) / Math.max(1, brakeCap - lockDecel), 0, 1);
+      target = (0.28 + 0.62 * over) * (0.82 + 0.18 * Math.min(1, spd / 45));
+      frontBias = 1.0; rearBias = 0.86;      // 重心前移：前轮印更深（与本地一致）
+    }
+    if (target === 0 && sk.glat > scrubG) {
+      // 2. 极限侧滑搓胎：与本地同源 —— 转向之外还要有额外负载（弯中带刹 / 压路肩），
+      //    纯转向过弯不留印，避免远端车每个弯都拖四条深印
+      if (c.inBrake > 0 || remoteSurface(c) === 1) {
+        target = clamp((sk.glat - scrubG) / Math.max(0.05, latLimitG * 0.15), 0.10, 0.32);
+        frontBias = 0.86; rearBias = 1.0;
+      }
     }
   }
 
@@ -653,10 +668,12 @@ function emitRemoteSkid(e, dt, fx) {
   const bx = cosA * SKID_HALF_BASE, by = sinA * SKID_HALF_BASE;
   const latFL = SKID_TRACK_F + offF, latFR = -SKID_TRACK_F + offF;
   const latRL = SKID_TRACK_R + offR, latRR = -SKID_TRACK_R + offR;
-  const fl = { x: c.x + bx + pxPerp * latFL, y: c.y + by + pyPerp * latFL };
-  const fr = { x: c.x + bx + pxPerp * latFR, y: c.y + by + pyPerp * latFR };
-  const rl = { x: c.x - bx + pxPerp * latRL, y: c.y - by + pyPerp * latRL };
-  const rr = { x: c.x - bx + pxPerp * latRR, y: c.y - by + pyPerp * latRR };
+  // 各轮路面高度（与 physics.js 同式：中心 + 纵坡×轴距 + 横坡×轮距）
+  const wY = (along, lat) => (c.roadY || 0) + (c.roadPitch || 0) * along + (c.roadRoll || 0) * lat;
+  const fl = { x: c.x + bx + pxPerp * latFL, y: c.y + by + pyPerp * latFL, h: wY(SKID_HALF_BASE, latFL) };
+  const fr = { x: c.x + bx + pxPerp * latFR, y: c.y + by + pyPerp * latFR, h: wY(SKID_HALF_BASE, latFR) };
+  const rl = { x: c.x - bx + pxPerp * latRL, y: c.y - by + pyPerp * latRL, h: wY(-SKID_HALF_BASE, latRL) };
+  const rr = { x: c.x - bx + pxPerp * latRR, y: c.y - by + pyPerp * latRR, h: wY(-SKID_HALF_BASE, latRR) };
 
   const prev = sk.wheels;
   if (!prev) {
@@ -673,10 +690,10 @@ function emitRemoteSkid(e, dt, fx) {
   if (moved < Math.max(SKID_STEP_MIN, spd * SKID_STEP_SEC)) return;
 
   if (active && sk.i > 0.06 && fx && typeof fx.addSkid === "function" && remoteSurface(c) !== 2) {
-    fx.addSkid(prev.fl, fl, sk.i * frontBias, 0.32);
-    fx.addSkid(prev.fr, fr, sk.i * frontBias, 0.32);
-    fx.addSkid(prev.rl, rl, sk.i * rearBias, 0.42);
-    fx.addSkid(prev.rr, rr, sk.i * rearBias, 0.42);
+    fx.addSkid(prev.fl, fl, sk.i * frontBias, 0.32, prev.fl.h, fl.h);
+    fx.addSkid(prev.fr, fr, sk.i * frontBias, 0.32, prev.fr.h, fr.h);
+    fx.addSkid(prev.rl, rl, sk.i * rearBias, 0.42, prev.rl.h, rl.h);
+    fx.addSkid(prev.rr, rr, sk.i * rearBias, 0.42, prev.rr.h, rr.h);
   }
   sk.wheels = { fl, fr, rl, rr };
 }
@@ -871,7 +888,10 @@ function interpolateRemoteCars(dt, fx) {
       if (Math.abs(e.pushY) < 0.001) e.pushY = 0;
     }
 
-    // ---- 4. 轮胎印：用最终显示位姿本地推算（必须在微平滑/弹开之后，否则印子会离车轮几厘米）----
+    // ---- 4. 路面高度 + 轮胎印：用最终显示位姿本地推算（必须在微平滑/弹开之后，否则印子会离车轮几厘米）----
+    // roadY / roadPitch / roadRoll 每帧刷新：3D 车模与刹车印都靠它贴合起伏路面，
+    // 否则有真实落差的赛道（斯帕 102m）上远端车会整场贴在 y=0 平面。
+    updateRoadProfile(c);
     emitRemoteSkid(e, dt, fx);
   }
 }

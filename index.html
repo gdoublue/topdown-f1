@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>SHANGHAI GP · 俯视 F1</title>
+<title>F1 3D GP · three.js 程序化赛道</title>
 <link rel="stylesheet" href="./src/style.css">
 </head>
 <body>
@@ -46,6 +46,14 @@
       <div class="vt-row">
         <span class="vt-name">视野缩放</span>
         <input id="zoomRange" type="range" min="0.1" max="3.5" step="0.05" value="1" title="手动调节镜头远近（越大越近）" />
+      </div>
+      <div class="vt-row">
+        <span class="vt-name">俯瞰角度</span>
+        <input id="pitchRange" type="range" min="40" max="90" step="1" value="90" title="3D 俯瞰机位（V 键切换）的俯视角度：90° = 垂直向下，40° = 高空斜视" />
+      </div>
+      <div class="vt-row vt-val">
+        <span id="pitchVal">俯视角 90°</span>
+        <button id="pitchReset" class="vt-mini" title="一键回到垂直俯视（90°）">垂直俯视</button>
       </div>
       <div class="vt-row" id="speedRow">
         <span class="vt-name">比赛倍速</span>
@@ -182,7 +190,7 @@
     <div class="track-modal-card start-modal-card">
       <div class="track-modal-header">
         <div class="modal-title-wrap">
-          <span class="f1-badge">FORMULA 1 · TOP DOWN GP</span>
+          <span class="f1-badge">FORMULA 1 · 3D GP</span>
           <h2 class="modal-title" id="startTitle">选择玩法模式 (SELECT MODE)</h2>
         </div>
         <button id="backToModeBtn" class="track-close-btn start-back-btn hidden" title="返回上一步重新选模式">←</button>
@@ -240,7 +248,7 @@
       <div class="start-footer" aria-hidden="true">
         <span><b>J</b> 油门 <b>K</b> 轻刹 <b>L</b> 重刹/倒车</span>
         <span><b>← →</b> 转向 <b>B</b> 自动驾驶 <b>T</b> 切换赛道</span>
-        <span class="start-footer-brand">TOP DOWN GP · 2026</span>
+        <span class="start-footer-brand">F1 3D GP · 2026</span>
         <span class="start-footer-credits">Audio: engine loops by domasx2 (CC0) · F1 recordings by Edvvc (CC BY-SA 3.0) · tire squeal by audible-edge (CC BY 3.0)</span>
       </div>
 

@@ -5,7 +5,7 @@
 // 3. Classic Baseline（完整保留原基准算法）
 // 4. Smooth Cruiser Pro（时间最优闭环纵向规划 + 双前瞻融合转向 + 主动防撞脱困）
 
-import { N, pts, nor, hw, tan, curvS, cumDist, onTrackChange, LAP_LENGTH, isLinear, currentTrackId } from "../track/geometry.js";
+import { N, pts, nor, hw, tan, curvS, cumDist, onTrackChange, LAP_LENGTH, isLinear, currentTrackId, bank, grade } from "../track/geometry.js";
 import { PHYS } from "../config.js";
 import { clamp } from "../utils.js";
 import { CAR_LENGTH, CAR_WIDTH, getCarDistance } from "../car/physics.js";
@@ -37,6 +37,8 @@ export function buildCarVTarget(perf = {}, opts = {}, data = null) {
   const _N = data ? data.N : N;
   const _DS = data ? data.DS : DS;
   const _rcurvS = data ? data.rcurvS : rcurvS;
+  const _bank = data ? data.bank : bank;
+  const _grade = data ? data.grade : grade;
   const topSpeed = perf.maxSpeed ? perf.maxSpeed[0] : PHYS.maxSpeed[0];
   const latGrip = perf.latGrip ?? PHYS.latGrip;
   const maxOmega = perf.maxOmega ?? PHYS.maxOmega;
@@ -44,6 +46,21 @@ export function buildCarVTarget(perf = {}, opts = {}, data = null) {
   const A_LAT = latGrip
     * Math.min(1.0, (opts.gripFactor ?? 0.78) * (perf.cornerGripMult ?? 1));
   const vt = new Float32Array(_N);
+
+  // 逐点有效侧向能力 / 制动能力：
+  //  · 横坡（bank）与曲率同向（弯内侧低）时，重力提供 g·sinφ 的横向分量 → 弯速更高；
+  //    同时法向载荷按 cosφ 略降。
+  //  · 纵向坡度：下坡（grade<0）重力抵消制动，规划减速度变小 → 刹车点自动提前；
+  //    上坡反之。线性赛道（grade 全 0）与原行为完全一致。
+  const aLatArr = new Float32Array(_N);
+  const brakeArr = new Float32Array(_N);
+  for (let i = 0; i < _N; i++) {
+    const b = _bank && _bank.length ? (_bank[i] || 0) : 0;
+    const cosPhi = 1 / Math.sqrt(1 + b * b);
+    aLatArr[i] = A_LAT * cosPhi + 9.81 * Math.abs(b) * cosPhi;
+    const gHere = _grade && _grade.length ? (_grade[i] || 0) : 0;
+    brakeArr[i] = Math.max(brakePlan * 0.3, brakePlan + 9.81 * gHere);
+  }
 
   const w = Math.max(1, Math.round(30 / Math.max(0.1, _DS)));
   for (let i = 0; i < _N; i++) {
@@ -54,7 +71,7 @@ export function buildCarVTarget(perf = {}, opts = {}, data = null) {
     }
     const R = k > 1e-5 ? 1 / k : 1e6;
     // 弯道极限速度：横向抓地上限 + 低速转向角速度上限（发卡弯）
-    const vGrip = Math.sqrt(A_LAT * R);
+    const vGrip = Math.sqrt(aLatArr[i] * R);
     const vOmega = k > 1e-5 ? maxOmega / k : Infinity;
     vt[i] = Math.min(topSpeed, vGrip, vOmega);
   }
@@ -64,7 +81,7 @@ export function buildCarVTarget(perf = {}, opts = {}, data = null) {
     for (let pass = 0; pass < 2; pass++) {
       for (let i = _N - 1; i >= 0; i--) {
         const j = (i + 1) % _N;
-        const v = Math.sqrt(vt[j] * vt[j] + 2 * brakePlan * _DS);
+        const v = Math.sqrt(vt[j] * vt[j] + 2 * brakeArr[j] * _DS);
         if (v < vt[i]) vt[i] = v;
       }
     }
@@ -106,11 +123,35 @@ export function buildAIData(ctx) {
   const cLineY = new Float32Array(cN);
   const cLineYaw = new Float32Array(cN);
   const corridor = new Float32Array(cN);
+  const corridorIn = new Float32Array(cN);   // 向弯心一侧的最大偏移（受局部半径限制）
+  const insideSign = new Int8Array(cN);
+
+  // 中心线原始（3 点、未平滑）曲率：平滑曲率会掩盖发夹弯的真实尖点，
+  // 走线向弯心偏移一旦接近当地半径，曲线收缩会把相邻点折到曲率圆心上
+  // （相邻点重合 → 曲率爆炸 → 弯速≈0，车停在弯前，像撞到一堵透明墙）。
+  const rawK = new Float32Array(cN);
+  for (let i = 0; i < cN; i++) {
+    const a = (i - 1 + cN) % cN, b = (i + 1) % cN;
+    const v1x = cPts[i].x - cPts[a].x, v1y = cPts[i].y - cPts[a].y;
+    const v2x = cPts[b].x - cPts[i].x, v2y = cPts[b].y - cPts[i].y;
+    const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+    rawK[i] = Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y)
+      / ((l1 + l2) * 0.5 || 1);
+  }
 
   for (let i = 0; i < cN; i++) {
     cLineX[i] = cPts[i].x;
     cLineY[i] = cPts[i].y;
     corridor[i] = Math.max(0, cHw[i] - 3.4);
+    // 局部半径取邻域最小值（±2 点 ≈ ±7m），单点噪声不能放过尖点
+    let minR = Infinity;
+    for (let d = -2; d <= 2; d++) {
+      const k = Math.abs(rawK[(i + d + cN) % cN]);
+      const r = k > 1e-5 ? 1 / k : 1e6;
+      if (r < minR) minR = r;
+    }
+    corridorIn[i] = Math.max(0, Math.min(corridor[i], minR * 0.6));
+    insideSign[i] = Math.sign(rawK[i]) || 0;
   }
 
   for (let it = 0; it < 900; it++) {
@@ -118,8 +159,10 @@ export function buildAIData(ctx) {
       const a = (i - 1 + cN) % cN, b = (i + 1) % cN;
       const mx = (cLineX[a] + cLineX[b]) * 0.5;
       const my = (cLineY[a] + cLineY[b]) * 0.5;
-      const off = clamp((mx - cPts[i].x) * cNor[i].x + (my - cPts[i].y) * cNor[i].y,
-        -corridor[i], corridor[i]);
+      let off = (mx - cPts[i].x) * cNor[i].x + (my - cPts[i].y) * cNor[i].y;
+      if (insideSign[i] > 0) off = clamp(off, -corridor[i], corridorIn[i]);
+      else if (insideSign[i] < 0) off = clamp(off, -corridorIn[i], corridor[i]);
+      else off = clamp(off, -corridor[i], corridor[i]);
       cLineX[i] = cPts[i].x + cNor[i].x * off;
       cLineY[i] = cPts[i].y + cNor[i].y * off;
     }
@@ -149,7 +192,9 @@ export function buildAIData(ctx) {
 
   const bundle = {
     DS: cDS, lineX: cLineX, lineY: cLineY, lineYaw: cLineYaw, rcurv: cRcurv, rcurvS: cRcurvS,
-    vTarget: buildCarVTarget({}, {}, { N: cN, DS: cDS, rcurvS: cRcurvS }),
+    vTarget: buildCarVTarget({}, {}, {
+      N: cN, DS: cDS, rcurvS: cRcurvS, bank: ctx.bank, grade: ctx.grade
+    }),
   };
   _aiDataCache.set(ctx.id, bundle);
   return bundle;
@@ -158,7 +203,7 @@ export function buildAIData(ctx) {
 export function rebuildAITrack() {
   if (N <= 0) return;
   const b = buildAIData({
-    id: currentTrackId, N, pts, nor, hw, cumDist, LAP_LENGTH, isLinear
+    id: currentTrackId, N, pts, nor, hw, cumDist, LAP_LENGTH, isLinear, bank, grade
   });
   DS = b.DS;
   lineX = b.lineX;
@@ -650,7 +695,10 @@ export function driveSmoothCruiser(car, out, dt, otherCars) {
      逐帧扫描前方可达速度包络：对前方每个弯中限速点 j，
      求恰好能以可用减速度减速到该限速的当前最大车速，取最小值。
      等价于"最晚刹车点"的连续解，比离散步长的查表规划更贴近时间最优。 */
-  const brakeCap = PHYS.brake * (perf.brakeMult ?? 1.0);  // 真实重刹减速度 ≈66.5 m/s²（全场最强）
+  // 当前坡度修正：下坡（grade<0）重力抵消制动 → 规划/兜底减速度变小（刹车点提前）；
+  // 上坡相反。坡度只影响纵向能力，横向抓地仍由 cornerCap 的 bank 项处理。
+  const baseBrake = PHYS.brake * (perf.brakeMult ?? 1.0);  // 真实重刹减速度 ≈66.5 m/s²（全场最强）
+  const brakeCap = Math.max(baseBrake * 0.5, baseBrake + 9.81 * (grade[idx] || 0));
   const lightCap = brakeCap * PHYS.lightBrakeFactor;      // 轻刹减速度 ≈29.9 m/s²
   // 预瞄窗口自适应：极速越高、制动越弱的车需要看得越远
   // （Vmax 496km/h 的电车从尾速刹到弯速需 460m+，固定 320m 会导致高速末段刹车规划失真）
@@ -668,7 +716,9 @@ export function driveSmoothCruiser(car, out, dt, otherCars) {
       if (req > aReq) aReq = req;
     }
     const r1 = Math.sqrt(cap * cap + 2 * lightCap * d);
-    const r2 = Math.sqrt(cap * cap + 2 * brakeCap * 0.98 * d);
+    // 全刹兜底包络按【目标点】坡度修正：跑到下坡段时制动能力下降，包络自然收窄
+    const brakeJ = Math.max(baseBrake * 0.5, baseBrake + 9.81 * (grade[j] || 0));
+    const r2 = Math.sqrt(cap * cap + 2 * brakeJ * 0.98 * d);
     if (r1 < env1) env1 = r1;
     if (r2 < env2) env2 = r2;
   }
@@ -859,7 +909,9 @@ export function superDriver(car, out, dt, otherCars) {
   out.right = out.steer > 0.05;
 
   /* ---- 纵向：时间最优闭环刹车规划 ---- */
-  const brakeCap = PHYS.brake * (perf.brakeMult ?? 1.0);
+  const baseBrake = PHYS.brake * (perf.brakeMult ?? 1.0);
+  // 坡度修正：下坡可用制动变小、上坡叠加重力制动（与 Smooth Cruiser 同口径）
+  const brakeCap = Math.max(baseBrake * 0.5, baseBrake + 9.81 * (grade[idx] || 0));
   const lightCap = brakeCap * PHYS.lightBrakeFactor;
   const scanCapM = Math.max(320, v * v / (2 * brakeCap) + 80);
   const scanSteps = Math.min(Math.round((v * v / (2 * lightCap) + 80) / DS), Math.round(scanCapM / DS));
@@ -875,7 +927,9 @@ export function superDriver(car, out, dt, otherCars) {
       if (req > aReq) aReq = req;
     }
     const r1 = Math.sqrt(cap * cap + 2 * lightCap * d);
-    const r2 = Math.sqrt(cap * cap + 2 * brakeCap * 0.98 * d);
+    // 全刹兜底包络按【目标点】坡度修正：跑到下坡段时制动能力下降，包络自然收窄
+    const brakeJ = Math.max(baseBrake * 0.5, baseBrake + 9.81 * (grade[j] || 0));
+    const r2 = Math.sqrt(cap * cap + 2 * brakeJ * 0.98 * d);
     if (r1 < env1) env1 = r1;
     if (r2 < env2) env2 = r2;
   }
@@ -1120,6 +1174,33 @@ export const AI_CONFIGS = [
       launchAccel: 14.6,
       brakeMult: 0.32,
       steerRate: 9.5
+    }
+  },
+  {
+    // 车模移植自外部「3D 车辆物理模拟器」的越野卡车（TRAIL RIG）：
+    // 高底盘 + 大行程悬挂 + 球状越野胎，直道上不慢但大抓地/低横摆极限，
+    // 弯道必须早刹；草地极速远高于 F1，冲线后/脱困更从容。
+    id: "trail-rig",
+    name: "越野卡车 #23 (TRAIL RIG · 4×4 高底盘全地形)",
+    shortName: "越野卡车 #23",
+    team: "越野工坊",
+    model: "TRAIL RIG",
+    color: "#c2551d",
+    livery: "offroad",
+    number: "23",
+    driverName: "越野手 (TRK #23)",
+    driverShort: "越野手",
+    driverCode: "TRK",
+    driver: geminiDriver,
+    perf: {
+      maxSpeed: [63.0, 52.0, 38.0],
+      latGrip: 16.8,
+      maxOmega: 2.90,
+      powerKW: 340,
+      massKg: 1950,
+      launchAccel: 9.8,
+      brakeMult: 0.45,
+      steerRate: 8.2
     }
   }
 ];

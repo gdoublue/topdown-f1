@@ -1,6 +1,6 @@
 // 赛车物理：加减速、转向（抓地极限模型）、路面判定、轮胎印与粒子
 import { PHYS } from "../config.js";
-import { WORLD, pts, N, nor, tan, hw, cumDist, LAP_LENGTH, isLinear, kerbFlag } from "../track/geometry.js";
+import { WORLD, pts, N, nor, tan, hw, cumDist, LAP_LENGTH, isLinear, kerbFlag, roadAt, terrainAt } from "../track/geometry.js";
 import { clamp } from "../utils.js";
 
 // 沿赛道中心线计算发车格精确坐标：
@@ -76,7 +76,7 @@ export function createCar(gridPos = 0) {
     trackS0 = (LAP_LENGTH - distBehindStart + LAP_LENGTH) % LAP_LENGTH;
   }
 
-  return {
+  const car = {
     x: slot.x,
     y: slot.y,
     angle: slot.angle,
@@ -90,8 +90,15 @@ export function createCar(gridPos = 0) {
     gridPos,
     raceDist: raceDist0,
     trackS: trackS0,
-    prevWheels: null
+    skidI: 0,           // 轮胎印强度状态（起印/收印渐变，0 = 无）
+    prevWheels: null,
+    slideV: 0           // 草坡侧滑速度（m/s，+ = 车身左侧；仅离路陡坡生效）
   };
+  // 停车状态也要有路面高度/坡度：roadY 平时由 stepCar 每帧刷新，
+  // 但发车倒计时期间物理不推进，缺了它车体在 3D 里会停在 y=0，
+  // 被有海拔的赛道（上海起跑区 +2.3m、斯帕更高）整台埋进沥青路面里。
+  updateRoadProfile(car);
+  return car;
 }
 
 function distToSegmentSquared(px, py, ax, ay, bx, by) {
@@ -225,6 +232,48 @@ export function estimateStraightTimeMs(perf, distance) {
   return t * 1000;
 }
 
+/* ============ 赛道纵向剖面（P1 起伏 / banking） ============
+   由 trackS 弧长采样中心线高度/坡度/横坡，叠加横向偏移的 banking 分量。
+   写入 car.roadY（渲染高度）、car.roadPitch（沿车头等效坡度，+ = 上坡）、
+   car.roadRoll（等效横坡，+ = 车身 +nor 侧更高）。
+   出界后与地面采样器同口径：草肩 (hw+7) 内保持路面高度，40m 内落到
+   真实 DEM 地形；无地形数据的赛道落到 0。 */
+export function updateRoadProfile(car) {
+  if (car.trackS == null) { car.roadY = 0; car.roadPitch = 0; car.roadRoll = 0; return car; }
+  const prof = roadAt(car.trackS);
+  const i = prof.i;
+  const dx = car.x - pts[i].x, dy = car.y - pts[i].y;
+  const dLat = dx * nor[i].x + dy * nor[i].y;
+  const edge = (hw[i] ?? 7) + 2;
+  const aLat = Math.abs(dLat);
+  const roadY = prof.y + prof.bank * Math.max(-edge, Math.min(edge, dLat));
+  const dth = Math.cos(car.angle - Math.atan2(tan[i].y, tan[i].x));
+  // 出界后与 3D 地面采样器 (makeGroundSampler) 完全同口径：
+  // 草肩 (hw+7) 内保持路面高度，再经 40m smoothstep 平滑过渡到真实 DEM 地形（无 DEM 赛道落到 0）
+  const shoulder = (hw[i] ?? 7) + 7;
+  let t = (aLat - shoulder) / 40;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const fall = t * t * (3 - 2 * t);
+  if (!terrainAt) {
+    car.roadY = roadY * (1 - fall);
+    car.roadPitch = prof.grade * dth * (1 - fall);
+    car.roadRoll = prof.bank * dth * (1 - fall);
+    return car;
+  }
+  const tY = terrainAt(car.x, car.y);
+  car.roadY = roadY * (1 - fall) + tY * fall;
+  // 离路后附加地形坡度（视觉俯仰/侧倾）；在路面上完全跳过地形采样
+  let gF = 0, gL = 0;
+  if (fall > 0) {
+    const ca = Math.cos(car.angle), sa = Math.sin(car.angle);
+    gF = (terrainAt(car.x + ca * 5, car.y + sa * 5) - terrainAt(car.x - ca * 5, car.y - sa * 5)) / 10;
+    gL = (terrainAt(car.x - sa * 3, car.y + ca * 3) - terrainAt(car.x + sa * 3, car.y - ca * 3)) / 6;
+  }
+  car.roadPitch = prof.grade * dth * (1 - fall) + gF * fall;
+  car.roadRoll = prof.bank * dth * (1 - fall) + gL * fall;
+  return car;
+}
+
 export function stepLongitudinal(car, dt, input, surf) {
   const perf = car.perf || {};
   const maxSpeed = perf.maxSpeed ? perf.maxSpeed[surf] : PHYS.maxSpeed[surf];
@@ -263,6 +312,11 @@ export function stepLongitudinal(car, dt, input, surf) {
     if (Math.abs(car.speed) <= dv) car.speed = 0;
     else car.speed -= Math.sign(car.speed) * dv;
   }
+
+  // 坡度重力（P2）：roadPitch = 沿车头方向的等效坡度（+ = 上坡），上坡减速/下坡加速。
+  // 解析式赛道 ≤4% → ±0.4 m/s²；斯帕真实 DEM 最大 ~15% → ±1.5 m/s²，
+  // 下坡制动距离明显变长（AI 的刹车规划已按 grade 同步修正）。
+  car.speed -= 9.81 * (car.roadPitch || 0) * dt;
 
   if (car.speed > maxSpeed) car.speed = Math.max(maxSpeed, car.speed - 120 * dt);
 
@@ -359,7 +413,21 @@ export function stepCar(car, dt, input, fx) {
   // 轻刹（45%）仍保留 ~89% 横向抓地，不会破坏循迹刹车手感。
   const longMax = PHYS.brake * (perf.brakeMult ?? 1);
   const usedLong = Math.min(1, Math.abs(car.accel) / Math.max(1, longMax));
-  const latAvail = latGrip * Math.sqrt(Math.max(PHYS.frictionLatFloor, 1 - usedLong * usedLong));
+  const latFriction = latGrip * Math.sqrt(Math.max(PHYS.frictionLatFloor, 1 - usedLong * usedLong));
+
+  // 弯道横坡（banking）：路面沿车侧倾斜时，重力有一个沿路面向下的分量。
+  // 赛道横坡由曲率导出（弯内侧低），正常过弯时重力指向转向侧 → 帮助过弯；
+  // 反打方向时则与转向相反 → 抓地减损。等效横向能力 = latGrip·cosφ − s·g·roadRoll：
+  //   φ 为横坡角（roadRoll = tanφ），s = ±1 为当前转向侧（倒车时取反）。
+  // roadRoll 已含车头与赛道切线的夹角余弦，可直接当作"沿车身左侧的坡度"。
+  // 离路（草地）不叠加：那里已由地形坡度驱动侧滑，避免重复计算。
+  const bankSlope = surf === 2 ? 0 : clamp(car.roadRoll || 0, -0.28, 0.28);
+  const bankCos = 1 / Math.sqrt(1 + bankSlope * bankSlope);
+  const steerSide = (steerIn >= 0 ? 1 : -1) * (car.speed < -1 ? -1 : 1);
+  const latAvail = Math.max(
+    latGrip * 0.5,
+    latFriction * bankCos - steerSide * 9.81 * bankSlope
+  );
 
   // 抓地极限转向：最大侧向加速度 latAvail → ω = latAvail / v（低速另有上限）
   // 必须有速度才能转向：0→3 m/s 线性生效，原地无法转向
@@ -377,8 +445,24 @@ export function stepCar(car, dt, input, fx) {
   car.gLat = (car.gLat || 0) + (curGLat - (car.gLat || 0)) * Math.min(1, dt * 16);
   car.gTotal = (car.gTotal || 0) + (curGTotal - (car.gTotal || 0)) * Math.min(1, dt * 16);
 
-  car.x += Math.cos(car.angle) * car.speed * dt;
-  car.y += Math.sin(car.angle) * car.speed * dt;
+  // 草坡侧滑：横向坡度（roadRoll）超过草地静摩擦时，车辆沿下坡方向滑移；
+  // 沥青/路肩抓地远大于坡度分量，不做侧滑。滑移只是位置偏移，不改变车头朝向。
+  if (surf === 2) {
+    const slope = car.roadRoll || 0;
+    const drive = -9.81 * slope;                        // 沿车身左侧的重力分量
+    const hold = PHYS.grassSideFriction * 9.81;         // 草地静摩擦能顶住的最大坡度分量
+    if (Math.abs(drive) > hold) {
+      car.slideV = (car.slideV || 0) + (drive - Math.sign(drive) * hold) * dt;
+    } else {
+      car.slideV = (car.slideV || 0) * Math.max(0, 1 - dt * 8);
+    }
+    car.slideV = clamp(car.slideV, -6, 6);
+  } else {
+    car.slideV = (car.slideV || 0) * Math.max(0, 1 - dt * 8);
+  }
+
+  car.x += Math.cos(car.angle) * car.speed * dt - Math.sin(car.angle) * (car.slideV || 0) * dt;
+  car.y += Math.sin(car.angle) * car.speed * dt + Math.cos(car.angle) * (car.slideV || 0) * dt;
   car.x = clamp(car.x, 10, WORLD.w - 10);
   car.y = clamp(car.y, 10, WORLD.h - 10);
 
@@ -386,6 +470,7 @@ export function stepCar(car, dt, input, fx) {
   const nearNow = nearestIndex(car.x, car.y, near.i);
   car.nearIdx = nearNow.i;
   car.trackS = nearNow.s;
+  updateRoadProfile(car);   // roadY / roadPitch / roadRoll（下一帧坡度重力与本帧渲染用）
 
   if (isLinear) {
     // 线性赛道：里程就是沿直线的物理进度，无圈数/半程概念
@@ -423,45 +508,114 @@ export function stepCar(car, dt, input, fx) {
   const fxBase = cosA * HALF_BASE, fyBase = sinA * HALF_BASE;
   const latFL = TRACK_F + offF, latFR = -TRACK_F + offF;
   const latRL = TRACK_R + offR, latRR = -TRACK_R + offR;
-  const fl = { x: car.x + fxBase + pxPerp * latFL, y: car.y + fyBase + pyPerp * latFL };
-  const fr = { x: car.x + fxBase + pxPerp * latFR, y: car.y + fyBase + pyPerp * latFR };
-  const rl = { x: car.x - fxBase + pxPerp * latRL, y: car.y - fyBase + pyPerp * latRL };
-  const rr = { x: car.x - fxBase + pxPerp * latRR, y: car.y - fyBase + pyPerp * latRR };
+  // 各轮所在路面的高度：中心高度 + 纵向坡度 × 前后轴距 + 横坡 × 轮距
+  // （roadPitch / roadRoll 已是沿车头/车侧方向的等效坡度，前后轮差在 14% 坡上约 0.5m）
+  const wY = (along, lat) => car.roadY + (car.roadPitch || 0) * along + (car.roadRoll || 0) * lat;
+  const fl = { x: car.x + fxBase + pxPerp * latFL, y: car.y + fyBase + pyPerp * latFL, h: wY(HALF_BASE, latFL) };
+  const fr = { x: car.x + fxBase + pxPerp * latFR, y: car.y + fyBase + pyPerp * latFR, h: wY(HALF_BASE, latFR) };
+  const rl = { x: car.x - fxBase + pxPerp * latRL, y: car.y - fyBase + pyPerp * latRL, h: wY(-HALF_BASE, latRL) };
+  const rr = { x: car.x - fxBase + pxPerp * latRR, y: car.y - fyBase + pyPerp * latRR, h: wY(-HALF_BASE, latRR) };
 
-  /* 轮胎印：由刹车制动强度或极限弯道侧滑产生，前后四轮完全独立记录与呈现，起步加速不留印 */
+  /* 四轮独立物理滑移与热惯性留印系统：
+     1. 纵/横耦合摩擦圆（Trail Braking / 点刹入弯）：直道需重刹（≥54% 制动极限）才锁胎；
+        弯中横向载荷已占用抓地力时，锁胎阈值随侧向 G 自动降低（最低至 32%），因此入弯点刹（轻刹 45%）也会真实触发内侧前轮优先抱死留印。
+     2. 载荷转移（Weight Transfer）：制动+转向时重心前移且压向弯外，弯内侧前轮因垂向卸载最先锁死留深印，
+        重刹到底时四轮全面抱死；极限侧滑搓胎时则由重载的弯外侧前后轮主导留印。
+     3. 滑移热惯性迟滞（Hysteresis ~85ms）+ 首尾梭形包络：过滤 1~3 帧的临界抖动（杜绝碎麻点），
+        同时让真实的人为点刹呈现“浅入→深印→浅出”的连续梭形（纺锤形）轮胎印。 */
+  const wTarget = { fl: 0, fr: 0, rl: 0, rr: 0 };
   if (car.prevWheels && surf !== 2 && spd > 3.5) {
-    let skidIntensity = 0;
-    let frontBias = 1.0, rearBias = 1.0;
-    // 1. 刹车制动工况（减速度大于约 1.2G 开始显痕，重刹越狠印越深）
-    if (car.braking && car.accel < -11.5) {
-      skidIntensity = clamp((-car.accel - 11.5) / 36, 0.18, 0.95);
-      frontBias = 1.0; rearBias = 0.88;     // 重刹重心前移：前轮先锁死，印更深
-    }
-    // 2. 弯道极限离心力侧向滑动 (侧向 G 超过 3.8G 且在转弯)
-    else if (car.gLat > 3.8 && Math.abs(car.steer) > 0.22) {
-      skidIntensity = clamp((car.gLat - 3.8) / 1.1, 0.15, 0.65);
-      frontBias = 0.88; rearBias = 1.0;     // 极限过弯：后轴先失稳，后轮印更深
+    const brakeCap = PHYS.brake * (perf.brakeMult ?? 1);
+    const latLimitG = Math.max(0.5, latGrip / 9.81);
+    const latRatio = clamp((car.gLat || 0) / latLimitG, 0, 1.15);
+    const steerMag = clamp(Math.abs(car.steer || 0) / 0.32, 0, 1);
+    // turnSign > 0（右转）时 fl/rl 为弯内侧轮、fr/rr 为弯外侧轮
+    const flIsInside = turnSign >= 0;
+
+    if (car.braking) {
+      // 弯中带刹（循迹刹车/点刹）时横向力已消耗摩擦圆，纵向起印阈值随之下降
+      const lockDecel = brakeCap * (0.54 - 0.22 * clamp(latRatio, 0, 1));
+      if (car.accel < -lockDecel) {
+        const over = clamp((-car.accel - lockDecel) / Math.max(1, brakeCap - lockDecel), 0, 1);
+        const baseI = (0.24 + 0.68 * over) * (0.80 + 0.20 * Math.min(1, spd / 42));
+        // 弯内前轮卸载最易抱死；弯外前轮与后轮随制动加深逐步加入锁胎
+        const inFront = baseI * (1.0 + 0.16 * steerMag);
+        const outFront = baseI * clamp((over - 0.16 * steerMag) / Math.max(0.2, 1 - 0.16 * steerMag), 0, 1);
+        const inRear = baseI * 0.84 * clamp((over - 0.08 * steerMag) / 0.92, 0, 1);
+        const outRear = baseI * 0.80 * clamp((over - 0.20 * steerMag) / 0.80, 0, 1);
+        wTarget.fl = clamp(flIsInside ? inFront : outFront, 0, 1);
+        wTarget.fr = clamp(flIsInside ? outFront : inFront, 0, 1);
+        wTarget.rl = clamp(flIsInside ? inRear : outRear, 0, 1);
+        wTarget.rr = clamp(flIsInside ? outRear : inRear, 0, 1);
+      }
     }
 
-    if (skidIntensity > 0) {
-      // 前轮窄胎 0.32m、后轮宽胎 0.42m：四条痕迹的宽度、深浅与半径各不相同
-      fx.addSkid(car.prevWheels.fl, fl, skidIntensity * frontBias, 0.32);
-      fx.addSkid(car.prevWheels.fr, fr, skidIntensity * frontBias, 0.32);
-      fx.addSkid(car.prevWheels.rl, rl, skidIntensity * rearBias, 0.42);
-      fx.addSkid(car.prevWheels.rr, rr, skidIntensity * rearBias, 0.42);
+    // 极限侧滑搓胎：横向载荷 ≥ 侧向极限 93%，且有带刹减速或压路肩负载时，重载的弯外侧车轮留下搓胎印
+    if (wTarget.fl === 0 && wTarget.fr === 0 && Math.abs(car.steer) > 0.20 && spd > 9) {
+      const extraLoad = car.braking || car.accel < -brakeCap * 0.26 || surf === 1;
+      if (extraLoad && latRatio > 0.93) {
+        const scrubI = clamp((latRatio - 0.93) / 0.16, 0.12, 0.38);
+        const outF = scrubI * 0.88, inF = scrubI * 0.38;
+        const outR = scrubI * 1.00, inR = scrubI * 0.45;
+        wTarget.fl = flIsInside ? inF : outF;
+        wTarget.fr = flIsInside ? outF : inF;
+        wTarget.rl = flIsInside ? inR : outR;
+        wTarget.rr = flIsInside ? outR : inR;
+      }
     }
   }
-  car.prevWheels = { fl, fr, rl, rr };
 
-  /* 草地尘土与抖动 */
-  if (surf === 2 && spd > 8) {
-    car.shake = Math.min(5, spd * 0.06);
+  if (!car.wSkid) {
+    car.wSkid = { fl: 0, fr: 0, rl: 0, rr: 0 };
+    car.wHold = { fl: 0, fr: 0, rl: 0, rr: 0 };
+    car.wPeak = { fl: 0, fr: 0, rl: 0, rr: 0 };
+  }
+  const wSkid = car.wSkid, wHold = car.wHold, wPeak = car.wPeak;
+  const curWheels = { fl, fr, rl, rr };
+  let maxWheelSkid = 0;
+
+  for (const k of ["fl", "fr", "rl", "rr"]) {
+    const rawT = wTarget[k];
+    if (rawT > 0) {
+      wHold[k] = 0.085; // 85ms 热迟滞窗口：桥接 1~4 帧的阈值微抖，防止印迹碎裂成麻点
+      wPeak[k] = rawT;
+    } else if (wHold[k] > 0) {
+      wHold[k] = Math.max(0, wHold[k] - dt);
+    }
+    const effTarget = rawT > 0
+      ? rawT
+      : (wHold[k] > 0 ? wPeak[k] * (wHold[k] / 0.085) * 0.72 : 0);
+
+    const prevI = wSkid[k] || 0;
+    // 起印升温快（~45ms），松刹回滚平滑（~95ms），天然形成两端尖、中间深的梭形点刹印
+    let nextI = effTarget > prevI
+      ? prevI + (effTarget - prevI) * Math.min(1, dt / 0.045)
+      : prevI + (effTarget - prevI) * Math.min(1, dt / 0.095);
+    if (nextI < 0.025 && effTarget === 0) nextI = 0;
+    wSkid[k] = nextI;
+    if (nextI > maxWheelSkid) maxWheelSkid = nextI;
+
+    // 只要上一帧或本帧有滑移（prevI > 0 或 nextI > 0），就补全过渡段（确保收印末端平滑归零）
+    if ((nextI > 0 || prevI > 0) && car.prevWheels && surf !== 2 && spd > 1) {
+      const w = (k === "fl" || k === "fr") ? 0.32 : 0.42;
+      const pw = car.prevWheels[k];
+      const cw = curWheels[k];
+      fx.addSkid(pw, cw, nextI, w, pw.h, cw.h, prevI);
+    }
+  }
+  car.skidI = maxWheelSkid;
+  car.prevWheels = curWheels;
+
+  /* 草地尘土与抖动（横向侧滑时即使车速不高也会扬尘） */
+  if (surf === 2 && (spd > 8 || Math.abs(car.slideV || 0) > 1.5)) {
+    car.shake = Math.min(5, Math.max(spd * 0.06, Math.abs(car.slideV || 0) * 0.25));
     const a = Math.random() * Math.PI * 2, r = 0.8 + Math.random() * 1.4;
     fx.addDust(
       car.x - Math.cos(car.angle) * 2.2 + Math.cos(a) * r,
       car.y - Math.sin(car.angle) * 2.2 + Math.sin(a) * r,
       -Math.cos(car.angle) * 9 + Math.cos(a) * 7,
-      -Math.sin(car.angle) * 9 + Math.sin(a) * 7
+      -Math.sin(car.angle) * 9 + Math.sin(a) * 7,
+      car.roadY || 0
     );
   } else {
     car.shake *= Math.pow(0.02, dt);

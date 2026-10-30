@@ -71,6 +71,7 @@ const CAR_ALIASES = {
   cyber: "AiMotor",
   su7ultra: "smooth-cruiser",
   yangwang: "yangwang-u9x",
+  offroad: "trail-rig",
 };
 
 function resolveCarId(carId) {
@@ -753,7 +754,7 @@ function renderRoom() {
     : !myCarId
       ? "先选择你的赛车"
       : (waitingNames.length ? `等待 ${waitingNames.join("、")} 就绪` : "全员就绪，开赛！");
-  // AI 补位数量与服务器一致：maxPlayers - 真人车手数量（最多 7 台，AI_CONFIGS 只有 7 套配置）
+  // AI 补位数量与服务器一致：maxPlayers - 真人车手数量（不超过 AI_CONFIGS 的车型数量）
   const aiCount = room.fillAI
     ? Math.max(0, Math.min(AI_CONFIGS.length, (room.maxPlayers || 8) - racers.length))
     : 0;

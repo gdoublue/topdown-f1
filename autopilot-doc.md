@@ -253,6 +253,7 @@ if (geo.gapFrontRear < 0 && geo.gapLateral < 0) { /* 已经贴上，赶紧减速
 | `nor[i]` | `{x, y}` 该点单位法向（指向行进方向右侧）。横向偏移 = `pts[i] + nor[i] × off`。 |
 | `hw[i]` | 该点赛道半宽（米）。路面内 0 ~ hw，外侧是路肩 / 草地。 |
 | `curvS[i]` | 平滑后的有符号曲率（1/m，±9 点滑动平均）。`Math.abs(curvS) > 1/110` 就是系统判定“要铺路缘石”的弯道，可直接拿来做弯道阈值；半径 = `1 / Math.abs(curvS)`。 |
+| `grade[i]` | 该点纵向坡度 `dh/ds`（+ = 上坡，- = 下坡）。可用 `9.81 * grade[i]` 修正制动能力：下坡制动距离更长、上坡更短。 |
 | `lineX[i]` / `lineY[i]` | 预计算的最优赛车线：横向被限制在 ±(hw - 3.4) 内（即离沥青边缘至少 3.4m），弯中贴内侧。跟这条线通常最快。 |
 | `DS` | **平均**采样间距（米）。采样点按曲线参数均匀、不是按米均匀（直道一段可能是弯道的两倍长），所以 `idx + 距离 / DS` 只是近似——精确换算请用 `track.idxAt(米)`。直线冲刺赛道的 DS 按整条沥青（11km）算，不等于 `track.length / N`。 |
 | `PHYS` | 全局物理常量：`brake`(61.6)、`lightBrakeFactor`(0.45)、`latGrip`、`maxOmega`、`maxSpeed`、`accelCurve` 等。 |

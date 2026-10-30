@@ -274,6 +274,16 @@ export const CAR_LIVERIES = {
     num: "55",
     numColor: "#fe8096"
   },
+  offroad: {         // 越野卡车 TRAIL RIG · 高底盘方盒子车体
+    body: "truck",
+    grad: ["#e08a4a", "#c2551d", "#6b2f10"],
+    side: "#8a3d13",
+    wing: "#2c3238",
+    stripe: "rgba(240,240,240,.9)",
+    helmet: "#ffd166",
+    num: "23",
+    numColor: "#f5f6f8"
+  },
 };
 
 export function drawCar(g, car, liveryKey = "ferrari") {
@@ -297,6 +307,12 @@ export function drawCar(g, car, liveryKey = "ferrari") {
   // 街车车体（量产电车超跑）：封闭座舱、贯穿式尾灯，与 F1 开放式车体明显区分
   if (livery.body === "road") {
     drawRoadBody(g, car, livery);
+    g.restore();
+    return;
+  }
+  // 越野卡车：高底盘方盒子车体 + 外露越野胎
+  if (livery.body === "truck") {
+    drawTruckBody(g, car, livery);
     g.restore();
     return;
   }
@@ -509,4 +525,102 @@ function drawRoadBody(g, car, livery) {
   g.textBaseline = "middle";
   g.fillText(car.number || livery.num, 0, 1.1);
   g.restore();
+}
+
+// 越野卡车车体（TRAIL RIG）：高底盘方盒子车身 + 外露块状花纹越野胎。
+// 俯视轮廓与 render3d/car/offroad.js 的卡车模型对应：前机盖 / 封闭座舱 / 后货厢 / 车顶灯排。
+function drawTruckBody(g, car, livery) {
+  const tyre = (cx, cy, w, rot) => {
+    g.save();
+    g.translate(cx, cy);
+    g.rotate(rot || 0);
+    g.fillStyle = "#1a1c1f";
+    rrect(g, -0.34, -w / 2, 0.68, w, 0.14); g.fill();
+    g.fillStyle = "#2b2f34";                       // 块状花纹（前后胎肩各一排）
+    for (let i = -1; i <= 1; i++) {
+      rrect(g, i * 0.22 - 0.06, -w / 2 - 0.03, 0.12, 0.06, 0.02); g.fill();
+      rrect(g, i * 0.22 - 0.06, w / 2 - 0.03, 0.12, 0.06, 0.02); g.fill();
+    }
+    g.restore();
+  };
+  tyre(-1.75, -0.84, 0.54, 0);
+  tyre(-1.75, 0.84, 0.54, 0);
+  tyre(1.75, -0.82, 0.52, car.steer * 0.5);
+  tyre(1.75, 0.82, 0.52, car.steer * 0.5);
+
+  // 前后钢制保险杠
+  g.fillStyle = "#23262b";
+  rrect(g, 2.40, -0.98, 0.22, 1.96, 0.06); g.fill();
+  rrect(g, -2.60, -0.94, 0.18, 1.88, 0.06); g.fill();
+
+  // 主车身（方盒子）
+  const grad = g.createLinearGradient(0, -1.05, 0, 1.05);
+  grad.addColorStop(0, livery.grad[0]);
+  grad.addColorStop(0.45, livery.grad[1]);
+  grad.addColorStop(1, livery.grad[2]);
+  g.fillStyle = grad;
+  rrect(g, -2.35, -0.96, 4.70, 1.92, 0.16); g.fill();
+  g.strokeStyle = "rgba(0,0,0,.45)";
+  g.lineWidth = 0.045;
+  g.stroke();
+
+  // 前机盖（略窄，露出轮眉）
+  g.fillStyle = livery.side;
+  rrect(g, 1.40, -0.82, 1.05, 1.64, 0.12); g.fill();
+  // 进气格栅 + 前大灯
+  g.fillStyle = "#15181c";
+  rrect(g, 2.26, -0.62, 0.16, 1.24, 0.05); g.fill();
+  g.fillStyle = "rgba(255,246,220,.95)";
+  rrect(g, 2.20, -0.82, 0.18, 0.26, 0.08); g.fill();
+  rrect(g, 2.20, 0.56, 0.18, 0.26, 0.08); g.fill();
+
+  // 后货厢（外露防滚架围栏）
+  g.fillStyle = "#1d2024";
+  rrect(g, -2.02, -0.80, 1.55, 1.60, 0.10); g.fill();
+  g.strokeStyle = livery.wing;
+  g.lineWidth = 0.07;
+  g.strokeRect(-2.02, -0.80, 1.55, 1.60);
+
+  // 封闭式玻璃座舱
+  g.fillStyle = "rgba(12,18,24,.92)";
+  rrect(g, -0.40, -0.76, 1.50, 1.52, 0.14); g.fill();
+  g.strokeStyle = "rgba(255,255,255,.16)";
+  g.lineWidth = 0.03;
+  g.stroke();
+
+  // 车顶灯排
+  g.fillStyle = "#2c3238";
+  rrect(g, 0.50, -0.62, 0.16, 1.24, 0.05); g.fill();
+  g.fillStyle = "rgba(255,246,220,.95)";
+  for (let i = 0; i < 4; i++) {
+    rrect(g, 0.55, -0.50 + i * 0.26, 0.07, 0.16, 0.03); g.fill();
+  }
+
+  // 尾灯（刹车高亮）
+  const braking = car.braking || car.inBrake > 0;
+  if (braking) {
+    g.fillStyle = "rgba(255,42,26,.30)";
+    rrect(g, -2.66, -0.90, 0.42, 1.80, 0.12); g.fill();
+  }
+  g.fillStyle = braking ? "#ff453a" : "#8a1414";
+  rrect(g, -2.50, -0.84, 0.14, 0.34, 0.05); g.fill();
+  rrect(g, -2.50, 0.50, 0.14, 0.34, 0.05); g.fill();
+
+  // 侧面拉花
+  g.fillStyle = livery.stripe;
+  rrect(g, -1.95, -1.0, 1.35, 0.10, 0.04); g.fill();
+  rrect(g, -1.95, 0.90, 1.35, 0.10, 0.04); g.fill();
+
+  // 车身号码（货厢两侧，从车侧读正）
+  for (const sgn of [1, -1]) {
+    g.save();
+    g.translate(-1.25, sgn * 0.72);
+    g.rotate(sgn * Math.PI / 2);
+    g.fillStyle = livery.numColor;
+    g.font = "bold 0.42px sans-serif";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(car.number || livery.num, 0, 0);
+    g.restore();
+  }
 }
