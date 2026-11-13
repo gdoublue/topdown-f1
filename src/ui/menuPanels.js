@@ -72,7 +72,8 @@ export function showCarStep(m) {
   setBackBtn(true, "返回上一步：重新选择玩法模式");
   setTitle(
     "选择你的赛车 · SELECT CAR",
-    m === "solo" ? "单人计时：独自上赛道刷出最快圈速" : "你驾驶选中的赛车，其余车手全部由 AI 驾驶"
+    m === "solo" ? "单人计时：独自上赛道刷出最快圈速"
+      : "每款车型各出 2 台：你驾驶选中车型的其中一台，同场其余车手全部由 AI 驾驶"
   );
   renderCarCards();
 }

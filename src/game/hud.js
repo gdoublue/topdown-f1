@@ -84,6 +84,7 @@ function rowRefs(row) {
     rank: row.querySelector(".standing-rank"),
     bar: row.querySelector(".standing-color-bar"),
     name: row.querySelector(".standing-name"),
+    seat: row.querySelector(".standing-seat"),
     code: row.querySelector(".standing-code"),
     you: row.querySelector(".standing-you-tag"),
     cam: row.querySelector(".standing-cam-tag"),
@@ -233,6 +234,7 @@ function ensureStandingRows(count) {
         <div class="standing-main">
           <div class="standing-top">
             <span class="standing-name">DRIVER</span>
+            <span class="standing-seat"></span>
             <span class="standing-code"></span>
             <span class="standing-you-tag">YOU</span>
             <span class="standing-cam-tag">● CAM</span>
@@ -334,6 +336,13 @@ export function updateAIHUD(cars, focusIndex, onSelectCar) {
     const model = carModelLabel(c);
     setText(r.name, name);
     setAttr(r.name, "title", `${name} · ${model}`);
+    // 一号车 / 二号车标：vs 模式同队双车一眼分清主将与队友（观战/在线单车参赛时 seat = 0，不显示）
+    const seatText = c.seat === 1 ? "1号" : c.seat === 2 ? "2号" : "";
+    setText(r.seat, seatText);
+    r.seat?.classList.toggle("second", c.seat === 2);
+    // 显示时清空行内 display，让窄屏媒体查询能把它藏掉（行内样式会盖过 CSS）
+    setDisplay(r.seat, seatText ? "" : "none");
+    if (seatText) setAttr(r.seat, "title", c.seat === 1 ? "一号车（车队主将）" : "二号车（同队队友）");
     setText(r.code, c.retired ? "OUT" : (driverCode(c) || carNumberLabel(c)));
     setDisplay(r.you, c.isPlayer ? "inline-block" : "none");
     setDisplay(r.cam, isFocus ? "inline-block" : "none");

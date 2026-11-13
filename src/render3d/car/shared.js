@@ -3,8 +3,9 @@
 // 新增车型只需建 car/<id>.js 并在 car/index.js 的注册表里登记。
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { roadAt } from "../../track/geometry.js";
+import { roadAt, pts, nor, tan } from "../../track/geometry.js";
 import { sampleGroundMeshY } from "../track/props.js";
+import { nearestIndex } from "../../car/physics.js";
 
 export const _up = new THREE.Vector3(0, 1, 0);
 export const _one = new THREE.Vector3(1, 1, 1);
@@ -233,23 +234,54 @@ export function syncCarPose(root, car, dt) {
   const spd = Math.abs(car.speed || 0);
   const surf = car.surf ?? 0;
 
-  // 双轴多点纵向坡度与拱顶/凹谷桥接采样（上海 T1-T2 爬坡顶 +11.24m 等变坡处防止长鼻锥/扩散器穿模）
+  // 四轮多点接触面物理高度采样与姿态拟合：
+  // 采样 FL (+1.75, +0.77), FR (+1.75, -0.77), RL (-1.75, +0.79), RR (-1.75, -0.79) 四点触地高度，
+  // 彻底解决急弯超高变换区、凹谷/马鞍坡处车轮陷进沥青或悬空的几何缺陷
   let roadY = car.roadY || 0;
   let roadPitch = car.roadPitch || 0;
   let roadRoll = car.roadRoll || 0;
-  if (car.trackS != null && surf !== 2 && Math.abs(roadPitch) > 0.0005) {
-    const pF = roadAt(car.trackS + 1.75);
-    const pR = roadAt(car.trackS - 1.75);
-    if (pF && pR) {
-      const axleMidY = 0.5 * (pF.y + pR.y);
-      const bankPart = roadY - (roadAt(car.trackS).y || 0);
-      roadY = Math.max(roadY, axleMidY + bankPart);
-      roadPitch = (pF.y - pR.y) / 3.5;
-    }
+  if (car.trackS != null && surf !== 2) {
+    const nearI = car.nearIdx || 0;
+    const ca = Math.cos(car.angle || 0), sa = Math.sin(car.angle || 0);
+    const lx = -sa, lz = ca;
+
+    const sampleWheelSurf = (ax, lat) => {
+      const wx = car.x + ca * ax + lx * lat;
+      const wz = car.y + sa * ax + lz * lat;
+      const near = nearestIndex(wx, wz, nearI);
+      const pNear = roadAt(near.s);
+      const idx = near.i;
+      const p = pts[idx] || { x: 0, y: 0 }, n = nor[idx] || { x: 0, y: 1 };
+      const dx = wx - p.x, dz = wz - p.y;
+      const off = dx * n.x + dz * n.y;
+      return pNear.y + pNear.bank * off;
+    };
+
+    const yFL = sampleWheelSurf(1.75, 0.77);
+    const yFR = sampleWheelSurf(1.75, -0.77);
+    const yRL = sampleWheelSurf(-1.75, 0.79);
+    const yRR = sampleWheelSurf(-1.75, -0.79);
+
+    const frontY = (yFL + yFR) * 0.5;
+    const rearY = (yRL + yRR) * 0.5;
+    const leftY = (yFL + yRL) * 0.5;
+    const rightY = (yFR + yRR) * 0.5;
+
+    roadPitch = (frontY - rearY) / 3.5;
+    roadRoll = (leftY - rightY) / 1.56;
+    const midY = (frontY + rearY) * 0.5;
+
+    // 四轮硬防下陷支撑：凹谷/马鞍形扭曲路面上抬高底盘，确保四轮任一轮都不低于沥青面
+    const pFL = midY + 1.75 * roadPitch + 0.77 * roadRoll;
+    const pFR = midY + 1.75 * roadPitch - 0.77 * roadRoll;
+    const pRL = midY - 1.75 * roadPitch + 0.79 * roadRoll;
+    const pRR = midY - 1.75 * roadPitch - 0.79 * roadRoll;
+    const maxPen = Math.max(0, yFL - pFL, yFR - pFR, yRL - pRL, yRR - pRR);
+    roadY = midY + maxPen;
   }
 
   // 沥青表面在 roadElev + 0.050m，路缘石在 roadElev + 0.068m：
-  // 基准抬升 +0.046m 使四轮正好落在 0.050m 沥青面上（带 4mm 真实受载接地扁平量，不再陷入地下 5cm）
+  // 基准抬升 +0.054m 使四轮微压 4mm 贴紧 0.050m 沥青表面，全赛道四轮绝不穿透
   const u = root.userData;
   const stepDt = Math.min(dt || 0.016, 0.05);
   const targetKerbLift = surf === 1 ? 0.016 : 0;
@@ -262,7 +294,7 @@ export function syncCarPose(root, car, dt) {
   u.offTrackBlend = (u.offTrackBlend || 0)
     + (targetOffTrack - (u.offTrackBlend || 0)) * Math.min(1, stepDt * (surf === 2 ? 6.5 : 14));
 
-  let baseY = roadY + 0.046 + u.kerbLift;
+  let baseY = roadY + 0.054 + u.kerbLift;
   if (u.offTrackBlend > 0.001) {
     const ca = Math.cos(car.angle || 0), sa = Math.sin(car.angle || 0);
     const gFront = sampleGroundMeshY(car.x + ca * 1.75, car.y + sa * 1.75);

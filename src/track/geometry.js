@@ -2,16 +2,125 @@
 import { MARGIN } from "../config.js";
 import { getTrack, DEFAULT_TRACK_ID, TRACKS } from "./tracks.js";
 
-function catmullRom(p0, p1, p2, p3, t) {
-  const t2 = t * t, t3 = t2 * t;
+// 向心 Catmull-Rom 样条（α=0.5）：按弦长平方根参数化，彻底消除控制点间距突变处的样条过冲与尖刺
+function catmullRom(p0, p1, p2, p3, u) {
+  const d01 = Math.pow(Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), 0.5) || 1e-4;
+  const d12 = Math.pow(Math.hypot(p2[0] - p1[0], p2[1] - p1[1]), 0.5) || 1e-4;
+  const d23 = Math.pow(Math.hypot(p3[0] - p2[0], p3[1] - p2[1]), 0.5) || 1e-4;
+  const t0 = 0, t1 = d01, t2 = t1 + d12, t3 = t2 + d23;
+  const t = t1 + u * d12;
+
+  const a1x = p0[0] + (p1[0] - p0[0]) * ((t - t0) / (t1 - t0));
+  const a1y = p0[1] + (p1[1] - p0[1]) * ((t - t0) / (t1 - t0));
+  const a2x = p1[0] + (p2[0] - p1[0]) * ((t - t1) / (t2 - t1));
+  const a2y = p1[1] + (p2[1] - p1[1]) * ((t - t1) / (t2 - t1));
+  const a3x = p2[0] + (p3[0] - p2[0]) * ((t - t2) / (t3 - t2));
+  const a3y = p2[1] + (p3[1] - p2[1]) * ((t - t2) / (t3 - t2));
+
+  const b1x = a1x + (a2x - a1x) * ((t - t0) / (t2 - t0));
+  const b1y = a1y + (a2y - a1y) * ((t - t0) / (t2 - t0));
+  const b2x = a2x + (a3x - a2x) * ((t - t1) / (t3 - t1));
+  const b2y = a2y + (a3y - a2y) * ((t - t1) / (t3 - t1));
+
   return {
-    x: 0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t
-      + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
-      + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
-    y: 0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t
-      + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
-      + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+    x: b1x + (b2x - b1x) * ((t - t1) / (t2 - t1)),
+    y: b1y + (b2y - b1y) * ((t - t1) / (t2 - t1))
   };
+}
+
+// 急弯最小转弯半径导角保护（Corner Fillet）：
+// 真实 FIA 一级赛道发卡弯中心线最小半径约 17~30m。若 OSM 折线或局部采样存在 <rMin 的锐角折点，
+// 当半宽加宽至 hwWide (9.5~10m) 时内侧路缘 (R - hw) 会倒折自交、将弯心路面掐窄。
+// 这里仅对局部曲率超标的急弯窗口做弧长重分布与圆弧松弛，直道与常规弯道完全保持原样。
+function filletSharpCorners(pts, rMin = 17.5) {
+  const N = pts.length;
+  if (N < 8) return;
+  const kMax = 1 / rMin;
+  const active = new Uint8Array(N);
+  const curvAt = (i) => {
+    const a = pts[(i - 1 + N) % N], b = pts[i], c = pts[(i + 1) % N];
+    const v1x = b.x - a.x, v1y = b.y - a.y, v2x = c.x - b.x, v2y = c.y - b.y;
+    const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+    return Math.abs(Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y)) / ((l1 + l2) * 0.5 || 1);
+  };
+
+  for (let i = 0; i < N; i++) {
+    const k = curvAt(i);
+    if (k > kMax) {
+      active[i] = 1;
+      const winM = Math.min(130, Math.max(48, (k / kMax) * 52));
+      for (const dir of [-1, 1]) {
+        let dist = 0, curr = i;
+        while (dist < winM) {
+          const nxt = (curr + dir + N) % N;
+          dist += Math.hypot(pts[nxt].x - pts[curr].x, pts[nxt].y - pts[curr].y);
+          active[nxt] = 1;
+          curr = nxt;
+        }
+      }
+    }
+  }
+
+  const ranges = [];
+  let start = 0;
+  while (start < N && active[start]) start++;
+  for (let step = 0; step < N;) {
+    const i = (start + step) % N;
+    if (!active[i]) { step++; continue; }
+    const idxs = [];
+    while (step < N && active[(start + step) % N]) {
+      idxs.push((start + step) % N);
+      step++;
+    }
+    if (idxs.length >= 3) ranges.push(idxs);
+  }
+
+  for (const idxs of ranges) {
+    const m = idxs.length;
+    const buf = idxs.map(idx => ({ x: pts[idx].x, y: pts[idx].y }));
+    const next = buf.map(p => ({ x: p.x, y: p.y }));
+    const cum = new Float64Array(m);
+    for (let pass = 0; pass < 28; pass++) {
+      cum[0] = 0;
+      for (let k = 1; k < m; k++) {
+        cum[k] = cum[k - 1] + Math.hypot(buf[k].x - buf[k - 1].x, buf[k].y - buf[k - 1].y);
+      }
+      const total = cum[m - 1] || 1;
+      let seg = 0;
+      for (let k = 1; k < m - 1; k++) {
+        const target = (k * total) / (m - 1);
+        while (seg < m - 2 && cum[seg + 1] < target) seg++;
+        const f = (target - cum[seg]) / ((cum[seg + 1] - cum[seg]) || 1e-6);
+        next[k].x = buf[seg].x + (buf[seg + 1].x - buf[seg].x) * f;
+        next[k].y = buf[seg].y + (buf[seg + 1].y - buf[seg].y) * f;
+      }
+      for (let k = 1; k < m - 1; k++) { buf[k].x = next[k].x; buf[k].y = next[k].y; }
+
+      let maxK = 0;
+      for (let k = 1; k < m - 1; k++) {
+        const a = buf[k - 1], b = buf[k], c = buf[k + 1];
+        const v1x = b.x - a.x, v1y = b.y - a.y, v2x = c.x - b.x, v2y = c.y - b.y;
+        const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+        const ck = Math.abs(Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y)) / ((l1 + l2) * 0.5 || 1);
+        if (ck > maxK) maxK = ck;
+      }
+      if (maxK <= kMax) break;
+
+      for (let iter = 0; iter < 16; iter++) {
+        for (let k = 1; k < m - 1; k++) {
+          const u = Math.sin((Math.PI * k) / (m - 1));
+          const w = 0.44 * u;
+          next[k].x = buf[k].x + ((buf[k - 1].x + buf[k + 1].x) * 0.5 - buf[k].x) * w;
+          next[k].y = buf[k].y + ((buf[k - 1].y + buf[k + 1].y) * 0.5 - buf[k].y) * w;
+        }
+        for (let k = 1; k < m - 1; k++) { buf[k].x = next[k].x; buf[k].y = next[k].y; }
+      }
+    }
+    for (let k = 0; k < m; k++) {
+      pts[idxs[k]].x = buf[k].x;
+      pts[idxs[k]].y = buf[k].y;
+    }
+  }
 }
 
 function buildCenterline(ctrl, sub) {
@@ -107,6 +216,16 @@ export function createTrackContext(trackId = DEFAULT_TRACK_ID) {
   const raw = ctxIsLinear
     ? buildLinearCenterline(track.ctrl, track.sub || 8)
     : buildCenterline(track.ctrl, track.sub || 8);
+  if (!ctxIsLinear) {
+    let LInit = 0;
+    for (let i = 0; i < raw.length; i++) {
+      const q = raw[(i + 1) % raw.length];
+      LInit += Math.hypot(q.x - raw[i].x, q.y - raw[i].y);
+    }
+    const KInit = ctxLAP_LENGTH / (LInit || 1);
+    const rMinMeters = Math.max(17.5, (ctxHW_WIDE || ctxHW) * 1.75);
+    filletSharpCorners(raw, rMinMeters / KInit);
+  }
   let L0 = 0;
   for (let i = 0; i < raw.length - 1; i++) {
     L0 += Math.hypot(raw[i + 1].x - raw[i].x, raw[i + 1].y - raw[i].y);
@@ -203,21 +322,6 @@ export function createTrackContext(trackId = DEFAULT_TRACK_ID) {
     }
   }
 
-  // 变宽度（最紧弯心前后 ±110m 动态加宽；线性赛道全宽恒定）
-  const segLen = ctxLAP_LENGTH / N;
-  let iApex = 0;
-  for (let i = 0; i < N; i++) {
-    if (Math.abs(curvS[i]) > Math.abs(curvS[iApex])) iApex = i;
-  }
-  const hw = new Float32Array(N);
-  for (let i = 0; i < N; i++) {
-    if (ctxIsLinear) { hw[i] = ctxHW; continue; }
-    const d = Math.min(Math.abs(i - iApex), N - Math.abs(i - iApex)) * segLen;
-    const f = Math.max(0, 1 - d / 110);
-    const s = f * f * (3 - 2 * f);
-    hw[i] = ctxHW + (ctxHW_WIDE - ctxHW) * s;
-  }
-
   // 累计沿赛道中心线物理里程数组 (米，从起终点线 0 开始；线性赛道不回绕)
   const cumDist = new Float32Array(N + 1);
   cumDist[0] = 0;
@@ -227,7 +331,47 @@ export function createTrackContext(trackId = DEFAULT_TRACK_ID) {
     const dy = pts[next].y - pts[i].y;
     cumDist[i + 1] = cumDist[i] + Math.hypot(dx, dy);
   }
-  if (ctxIsLinear) cumDist[N] = ctxLAP_LENGTH;
+  cumDist[N] = ctxLAP_LENGTH;
+
+  // 多弯道动态加宽：所有中低速弯道（半径 < 140m）按曲率与前后 ±95m 进出弯包络平滑加宽至 hwWide；
+  // 同时限制当地半宽不超过局部转弯半径的 62%，确保内侧路缘保留充足圆弧半径、绝不自交缩窄。
+  const hw = new Float32Array(N);
+  if (ctxIsLinear) {
+    hw.fill(ctxHW);
+  } else {
+    const k0 = 1 / 140, k1 = 1 / 38, WIDE_SPAN = 95;
+    const u0 = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const k = Math.max(Math.abs(curvS[i]), Math.abs(curv[i]) * 0.75);
+      u0[i] = Math.max(0, Math.min(1, (k - k0) / (k1 - k0)));
+    }
+    const env = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      if (u0[i] <= 0) continue;
+      const peak = u0[i];
+      if (peak > env[i]) env[i] = peak;
+      for (const dir of [-1, 1]) {
+        let curr = i, dist = 0;
+        while (dist < WIDE_SPAN) {
+          const nxt = (curr + dir + N) % N;
+          dist += Math.hypot(pts[nxt].x - pts[curr].x, pts[nxt].y - pts[curr].y);
+          if (dist >= WIDE_SPAN) break;
+          const f = 1 - dist / WIDE_SPAN;
+          const s = f * f * (3 - 2 * f);
+          if (peak * s > env[nxt]) env[nxt] = peak * s;
+          curr = nxt;
+        }
+      }
+    }
+    for (let i = 0; i < N; i++) {
+      let sum = 0;
+      for (let k = -4; k <= 4; k++) sum += env[(i + k + N) % N];
+      const s = sum / 9;
+      const wTarget = ctxHW + (ctxHW_WIDE - ctxHW) * s;
+      const rLocal = 1 / (Math.abs(curv[i]) || 1e-6);
+      hw[i] = Math.max(ctxHW, Math.min(wTarget, rLocal * 0.62));
+    }
+  }
 
   /* ================= 纵向剖面：规律的起伏 + 弯道外高（banking） =================
      剖面全部建立在弧长 cumDist 上（采样点按参数均匀、非等距，不能按下标换算）。
@@ -348,13 +492,17 @@ export function createTrackContext(trackId = DEFAULT_TRACK_ID) {
     bankSm[i] = (s / 13) * taperArr[i];   // 发车区压平，与 h 同一渐入窗
   }
   /* ---- 弯道内缘抬升（LIFT）----
-     横坡让内缘比中心线低 |bank|·hw。若中心线本身接近草地基线（0），
-     内缘就会沉到 0 以下，起伏地面的三角形会从外侧高点斜切过整条下沉路面，
-     草地直接盖在弯道内侧上。因此把整幅路面抬高 |bank|·hw，
-     使内缘恰好回到原中心线高度（≥0.6m·taper）：只有弯道外侧升高，
-     任何路面点都不低于草地基线。 */
-  for (let i = 0; i < N; i++) {
-    hArr[i] += Math.abs(bankSm[i]) * hw[i];
+     横坡让内缘比中心线低 |bank|·hw。
+     注意：对于带真实海拔剖面（elev）的赛道（如斯帕、上海），elev 本身已是真实绝对地势，
+     不得叠加 |bank|·hw，否则会在出入弯与 S 弯折返点产生巨大人工 V 型下陷坑与坡度断层；
+     对于程序化起伏赛道，使用 C2 平滑函数 smoothAbs 代替尖锐折角的 Math.abs，消除变坡点的折角硬棱。 */
+  if (!Array.isArray(track.elev) || track.elev.length <= 1) {
+    const EPS = 0.02;
+    for (let i = 0; i < N; i++) {
+      const b = bankSm[i];
+      const smoothB = Math.sqrt(b * b + EPS * EPS) - EPS;
+      hArr[i] += smoothB * hw[i];
+    }
   }
   // 纵向坡度：中心差分（抬升后再算；用相邻采样点的真实弧长间距，线性赛道端点单侧差分）
   for (let i = 0; i < N; i++) {
@@ -420,12 +568,21 @@ export function switchTrack(trackId) {
 // 弧长 s → { i, f, y, grade, bank }：中心线高度与坡度/横坡的弧长线性插值。
 // y 为中心线高度；横向偏移处的路面高度 = y + bank·dLat（调用方叠加，见 roadElev）。
 export function roadAt(s) {
-  const i = indexAtDistance(s);
-  const j = isLinear ? Math.min(i + 1, N - 1) : (i + 1) % N;
-  let ds = cumDist[j] - cumDist[i];
-  if (!isLinear && ds <= 0) ds += LAP_LENGTH;         // 最后一段跨起终点线
-  ds = Math.max(0.5, ds);
-  const f = Math.max(0, Math.min(1, ((Number(s) || 0) - cumDist[i]) / ds));
+  const n = N;
+  if (n <= 0) return { i: 0, f: 0, y: 0, grade: 0, bank: 0 };
+  const L = LAP_LENGTH || (cumDist && cumDist[n]) || 1;
+  const sm = isLinear
+    ? Math.max(0, Math.min((cumDist && cumDist[n - 1]) || 0, Number(s) || 0))
+    : (((Number(s) || 0) % L) + L) % L;
+  const i = indexAtDistance(sm);
+  const j = isLinear ? Math.min(i + 1, n - 1) : (i + 1) % n;
+  const d0 = cumDist[i] ?? 0;
+  const d1 = (!isLinear && i === n - 1)
+    ? (cumDist[n] || L)
+    : (cumDist && cumDist.length > i + 1 ? cumDist[i + 1] : d0 + 1);
+  const segLen = d1 - d0;
+  const ds = Math.max(0.1, segLen);
+  const f = Math.max(0, Math.min(1, (sm - d0) / ds));
   return {
     i, f,
     y: h[i] * (1 - f) + h[j] * f,
@@ -458,12 +615,12 @@ export function indexAtDistance(meters) {
   }
   const L = LAP_LENGTH || cumDist[n] || 1;
   const t = ((m % L) + L) % L;
-  let lo = 0, hi = n;                      // cumDist[0] = 0 … cumDist[N] = L
+  let lo = 0, hi = n - 1;                      // cumDist[0] = 0 … cumDist[N-1] <= t < L
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
     if (cumDist[mid] <= t) lo = mid; else hi = mid - 1;
   }
-  return lo % n;
+  return lo;
 }
 
 // 模块加载时立即初始化当前赛道

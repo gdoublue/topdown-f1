@@ -101,6 +101,22 @@
   letter-spacing: 0.06em;
   flex-shrink: 0;
 }
+/* 一号车 / 二号车标：金色 = 车队主将，灰蓝 = 同队二号车 */
+.rr-seat {
+  font-style: normal;
+  font-size: 8px;
+  font-weight: 900;
+  color: #ffd75e;
+  background: rgba(255, 205, 60, 0.16);
+  border-radius: 2px;
+  padding: 1px 4px;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+.rr-seat.second {
+  color: #b9c8da;
+  background: rgba(150, 172, 200, 0.18);
+}
 .rr-ai {
   font-size: 8px;
   font-weight: 800;

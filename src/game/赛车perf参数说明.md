@@ -1,6 +1,6 @@
 # 赛车 perf 参数说明
 
-`AI_CONFIGS`（本文件同目录 `ai.js`）里每辆车的 `perf` 就是这辆车的全部物理性能。
+`AI_CONFIGS`（本文件同目录 `carConfigs.js`，由 `ai.js` 转导出）里每辆车的 `perf` 就是这辆车的全部物理性能。
 装配时 `applyCarConfig()` 会给每辆车复制一份独立的 `perf`（`car.perf = { ...cfg.perf }`），
 所以实时调校只影响本车，不会污染配置表。
 
@@ -15,10 +15,10 @@
 | --- | --- | --- |
 | 纵向物理（油门 / 刹车 / 滑行） | `src/car/physics.js` `stepLongitudinal()` | `maxSpeed` `accelMult` `highSpeedAccel` `brakeMult` `powerKW` `massKg` `launchAccel` `naturalVmax` |
 | 转向物理（抓地极限转向 + 摩擦圆） | `src/car/physics.js` `stepCar()` | `latGrip` `maxOmega` `brakeMult` `steerRate` |
-| 内置 AI 弯速表（**当前唯一在用的 AI 算法**） | `src/game/geminiDriver.js` `getApexReleaseCap()` | `maxSpeed` `latGrip` `maxOmega` `cornerGripMult` |
+| 内置 AI 弯速表（单机/在线的主力 AI 算法） | `src/game/geminiDriver.js` `getApexReleaseCap()` | `maxSpeed` `latGrip` `maxOmega` `cornerGripMult` |
 | 内置 AI 刹车规划 | `src/game/geminiDriver.js` | `brakeMult` |
 | `car.vTarget`（给玩家脚本 / 旧算法的目标速度表） | `src/game/ai.js` `buildCarVTarget()` | `maxSpeed` `latGrip` `maxOmega` `brakeMult` `cornerGripMult` |
-| 旧算法（已不再被任何车使用） | `driveApexHunter` / `driveVectorPursuit` / `driveSmoothCruiser` | `car.vTarget`（间接吃上表字段） |
+| 旧算法：`driveApexHunter` / `driveVectorPursuit` / `driveSmoothCruiser` 已不再用于正式车手；`superDriver` 现用于 vs 模式同队二号车（见 `secondSeatConfig()`） | `src/game/ai.js` | `superDriver` 读 `brakeMult` / `latGrip` / `maxOmega`；老旧算法读 `car.vTarget`（间接吃上表字段） |
 | 车卡面板 / 实时调校 | `src/ui/menuPanels.js`、`src/game/tuner.js` | `maxSpeed` `latGrip` + 调校项 |
 | 服务端圈速校验（理论下限） | `server/services/lapValidation.js` → `estimateStraightTimeMs()` | `maxSpeed` `accelMult` `highSpeedAccel` `powerKW` `massKg` `launchAccel` `naturalVmax` |
 

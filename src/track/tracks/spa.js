@@ -22,5 +22,5 @@ export default {
   ctrl: SPA_CTRL,                   // OSM 真实赛道几何（280 个控制点 @25m，单圈 7004m）
   elev: SPA_ELEV,                   // 真实海拔剖面：落差 102m，起终点归一化到 0
   terrain: SPA_TERRAIN,             // 周边 DEM 地形网格（草地/山坡跟随真实地势）
-  sub: 4
+  sub: 8
 };

@@ -59,7 +59,7 @@ export function buildGround() {
   _nearCx = cx; _nearCz = cz; _nearSpan = near; _nearSeg = SEG;
   _nearGridY = new Float32Array((SEG + 1) * (SEG + 1));
 
-  const farSize = span + 2200;
+  const farSize = span + 6800;
   const strip = (farSize - near) / 2;   // 远景四条带，与精细网格拼成整块草地（不重叠）
   const tex = grassTexture();           // 同一张草皮：UV 按世界尺寸 9m 一格
   const mat = new THREE.MeshLambertMaterial({ map: tex });
@@ -106,13 +106,17 @@ export function buildAsphalt() {
     null,
     16
   );
+  geo.computeTangents();
   const tex = asphaltTextures();
   const mat = new THREE.MeshStandardMaterial({
     map: tex.map,
+    normalMap: tex.normalMap,
+    normalScale: new THREE.Vector2(0.85, 0.85),
     roughnessMap: tex.roughnessMap,
-    roughness: 1.0,          // 实际粗糙度全部由 roughnessMap 给（约 0.48~0.95）
-    metalness: 0.0,
+    roughness: 1.0,          // 粗糙度由贴图控制：赛车线橡胶 0.40，外侧干燥 0.86
+    metalness: 0.04,
   });
+
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   return mesh;
@@ -190,8 +194,8 @@ export function buildStartLine() {
   const group = new THREE.Group();
   const makeLine = (sampleIdx, tint) => {
     const w = hw[sampleIdx] + 0.2;
-    const p = pts[sampleIdx], nn = nor[sampleIdx];
-    const tx = -nn.y, ty = nn.x;   // 沿赛道方向
+    const p = pts[sampleIdx], nn = nor[sampleIdx], tt = tan[sampleIdx];
+    const tx = tt.x, ty = tt.y;   // 沿赛道权威前进方向（+tan，消除旧反向切线导致的翘曲台阶）
     const cx = p.x, cz = p.y;
     const L = 2.4;
     const gSlope = (roadGrade && roadGrade[sampleIdx]) || 0;
@@ -205,7 +209,7 @@ export function buildStartLine() {
     const uvArr = new Float32Array(8);
     cornerDefs.forEach((c, i) => {
       posArr[i * 3] = cx + nn.x * c.lat + tx * c.along;
-      posArr[i * 3 + 1] = roadElev(sampleIdx, c.lat) + gSlope * c.along + 0.056;
+      posArr[i * 3 + 1] = roadElev(sampleIdx, c.lat) + gSlope * c.along + 0.053;
       posArr[i * 3 + 2] = cz + nn.y * c.lat + ty * c.along;
       uvArr[i * 2] = c.u;
       uvArr[i * 2 + 1] = c.v;
@@ -220,8 +224,8 @@ export function buildStartLine() {
       roughness: 0.78,
       metalness: 0.0,
       polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+      polygonOffsetFactor: -1.5,
+      polygonOffsetUnits: -1.5,
     });
     const m = new THREE.Mesh(g, mat);
     m.receiveShadow = true;
@@ -512,36 +516,10 @@ export function buildBridgePiers() {
   return group;
 }
 
-/* ================= 云层（纯几何云团）
-   MeshBasicMaterial 不受光照：Lambert 云球底面只吃暗绿地面反光，从下看是黑影；
-   纯白无光照 + 受雾，任何角度都是亮白并自然融入地平线 ================= */
+/* ================= 云层 =================
+   旧版白色球体假白云已完全移除，由真实物理程序化大气天穹呈现。 */
 export function buildClouds(opts = {}) {
-  const group = new THREE.Group();
-  const mat = new THREE.MeshBasicMaterial({ color: 0xf8fbff });
-  const geo = new THREE.SphereGeometry(1, 12, 8);
-  let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
-  for (const p of pts) {
-    minx = Math.min(minx, p.x); maxx = Math.max(maxx, p.x);
-    miny = Math.min(miny, p.y); maxy = Math.max(maxy, p.y);
-  }
-  const cx = (minx + maxx) / 2, cz = (miny + maxy) / 2;
-  const span = Math.max(maxx - minx, maxy - miny) + 900;
-  for (let k = 0; k < (opts.cloudCount ?? 9); k++) {
-    const px = cx + (hash01(k, 1) - 0.5) * span;
-    const pz = cz + (hash01(k, 3) - 0.5) * span;
-    const py = 290 + hash01(k, 2) * 170;
-    const cluster = new THREE.Group();
-    const blobs = [[0, 0, 0, 55 + hash01(k, 4) * 35], [-0.8, -0.15, 0.2, 38], [0.75, -0.1, -0.25, 42], [0.1, 0.3, -0.4, 30]];
-    for (const [ox, oy, oz, s] of blobs) {
-      const m = new THREE.Mesh(geo, mat);
-      m.position.set(ox * s, oy * s, oz * s);
-      m.scale.set(s, s * 0.42, s * 0.72);
-      cluster.add(m);
-    }
-    cluster.position.set(px, py, pz);
-    group.add(cluster);
-  }
-  return group;
+  return new THREE.Group();
 }
 
 /* ================= 赛道整组重建（换赛道时调用） ================= */
@@ -552,4 +530,80 @@ export function setGantryLights(lit) {
   for (let k = 0; k < gantryLampMats.length; k++) {
     gantryLampMats[k].emissive.setHex(k < n ? 0xff1a1a : 0x110505);
   }
+}
+
+
+/* ================= 赛道外侧金属三波波形防撞护栏（FIA Armco Barrier） =================
+   在弯道外侧铺设具有银白金属反光、立柱与红色反光片的三波护栏，赋予赛道极为逼真的工业感与安全防护质感。 */
+export function buildGuardrails() {
+  const group = new THREE.Group();
+  const railMat = new THREE.MeshStandardMaterial({
+    color: 0xc8cdd5,
+    metalness: 0.78,
+    roughness: 0.28,
+  });
+  const postMat = new THREE.MeshStandardMaterial({
+    color: 0x474c54,
+    metalness: 0.60,
+    roughness: 0.45,
+  });
+
+  // 沿赛道寻找需要防护的弯道路段（半径 < 140m 的弯道外侧）
+  const segList = [];
+  for (let i = 0; i < N; i++) {
+    // 弯道外侧或者桥梁引桥区
+    if (Math.abs(curvS[i]) > 1 / 140) {
+      segList.push(i);
+    }
+  }
+  if (segList.length === 0) return group;
+
+  // 聚合成连续的护栏段
+  const clusters = [];
+  let curCluster = [segList[0]];
+  for (let idx = 1; idx < segList.length; idx++) {
+    const prev = segList[idx - 1];
+    const curr = segList[idx];
+    if (curr === prev + 1 || (!isLinear && prev === N - 1 && curr === 0)) {
+      curCluster.push(curr);
+    } else {
+      if (curCluster.length >= 6) clusters.push(curCluster);
+      curCluster = [curr];
+    }
+  }
+  if (curCluster.length >= 6) clusters.push(curCluster);
+
+  const postGeo = new THREE.BoxGeometry(0.12, 1.15, 0.14);
+
+  clusters.forEach((indices) => {
+    // 护栏建在曲率外侧
+    const iMid = indices[Math.floor(indices.length / 2)];
+    const side = curvS[iMid] > 0 ? -1 : 1;
+    const off = i => side * (hw[i] + 1.6);
+    const offInner = i => side * (hw[i] + 1.48);
+
+    // 护栏双波面条带
+    const railGeo = ribbonGeometry(indices, off, offInner, 0.58, () => [0.92, 0.94, 0.96], 12);
+    const railMesh = new THREE.Mesh(railGeo, railMat);
+    railMesh.castShadow = true;
+    railMesh.receiveShadow = true;
+    group.add(railMesh);
+
+    // 每隔 3~4 个采样点立一根金属柱
+    for (let k = 0; k < indices.length; k += 3) {
+      const i = indices[k];
+      const p = pts[i], n = nor[i];
+      const o = off(i);
+      const px = p.x + n.x * o;
+      const pz = p.y + n.y * o;
+      const gy = groundAt ? groundAt(px, pz) : (roadElev(i, o) - 0.2);
+      const post = new THREE.Mesh(postGeo, postMat);
+      post.position.set(px, gy + 0.55, pz);
+      post.rotation.y = -Math.atan2(tan[i].y, tan[i].x);
+      post.castShadow = true;
+      group.add(post);
+    }
+  });
+
+  return group;
 }

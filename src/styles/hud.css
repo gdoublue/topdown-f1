@@ -149,6 +149,21 @@ body.ai-mode #speedo {
   letter-spacing: 0.12em;
   flex-shrink: 0;
 }
+/* 一号车 / 二号车标：vs 模式同队双车，金色 = 车队主将，灰蓝 = 队友 */
+.standing-seat {
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+  background: rgba(255, 205, 60, 0.16);
+  color: #ffd75e;
+}
+.standing-seat.second {
+  background: rgba(150, 172, 200, 0.18);
+  color: #b9c8da;
+}
 .standing-you-tag {
   font-size: 8px;
   padding: 1px 4px;
@@ -677,6 +692,7 @@ body.ai-mode #help { bottom: 104px; }
   .standing-name { font-size: 10px; }
   .standing-gap { font-size: 9px; }
   .standing-code,
+  .standing-seat,
   .standing-bottom,
   .standing-you-tag,
   .standing-cam-tag,

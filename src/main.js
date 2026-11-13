@@ -23,7 +23,7 @@ import {
 } from "./ui/autopilot.js";
 import { initMinimap, drawMinimap } from "./game/minimap.js";
 import * as audio from "./game/audio.js";
-import { AI_CONFIGS, rosterForPlayer, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
+import { AI_CONFIGS, rosterForPlayer, secondSeatConfig, applyCarConfig, buildGridSlots, createAIInput, driveAI, AI_RESTART_DELAY, rebuildAITrack } from "./game/ai.js";
 import { conn } from "./net/connection.js";
 import { rtc } from "./net/rtc.js";
 import {
@@ -160,16 +160,25 @@ function setupCars() {
     return;
   }
 
-  // vs：玩家占了一台车，但电脑仍要保留这个型号的车手 → 名单 = 全部车型 + 一台同款车（玩家开）
-  // 观战：名单就是全部车型（大车模除外），没有玩家车
-  // 大体积车模（小米 / 仰望）只在玩家选了它时才上场：没选就连电脑的同款车也不出现，
-  // 模型随之不下载（preloadCars 只加载本场实际有的车型），开局不用白等 ~10MB。
+  // vs：每种车型固定上场 2 台（同队双车），玩家坐其中一台 → 选手只决定「坐哪台」，
+  //     场上总车数恒为 车型数 × 2，不会因为换车而多出一台。
+  // 观战：名单就是全部车型（按需参赛车型除外），每种 1 台，没有玩家车。
+  // 按需参赛车型（小米 / 仰望的超大车模、越野卡车）只在玩家选了它时才上场：没选就连电脑的
+  // 同款车也不出现，模型随之不下载（preloadCars 只加载本场实际有的车型），开局不用白等 ~10MB。
   const pool = rosterForPlayer(AI_CONFIGS, playerCarId);
   const chosen = pool.findIndex(c => c.id === playerCarId);
   const playerCfg = pool[chosen >= 0 ? chosen : 0];
-  const roster = mode === "vs" ? [...pool, playerCfg] : pool;
-  // 玩家车固定排在名单末尾（前面全是 AI 的车队车手）
-  playerIndex = mode === "vs" ? pool.length : 0;
+  const roster = [];
+  playerIndex = 0;
+  if (mode === "vs") {
+    for (const cfg of pool) {
+      roster.push({ ...cfg, seat: 1 });                    // 第一台：电脑驾驶（一号车手）
+      if (cfg === playerCfg) playerIndex = roster.length;   // 第二台：玩家驾驶（同队双车）
+      roster.push(secondSeatConfig(cfg));                  // 二号车手（seat: 2），避免同车型两人同名
+    }
+  } else {
+    roster.push(...pool);
+  }
 
   // 发车位：读取配置中 gridPos 指定的杆位，其余车辆随机填入剩余格位
   const carGrid = buildGridSlots(roster, true);
@@ -319,8 +328,11 @@ let quitConfirmAutoTakeover = false;
 
 // 用真实弹窗状态重算冻结标记：避免某个弹窗还开着、比赛却已经放行的漏洞
 export function syncModalOpen() {
-  isModalOpen = ["startModal", "trackModal", "resultsModal", "confirmModal", "autopilotModal", "nickModal", "shareModal"]
+  const hasModal = ["startModal", "trackModal", "resultsModal", "confirmModal", "autopilotModal", "nickModal", "shareModal"]
     .some(id => document.getElementById(id)?.classList.contains("open"));
+  const hasTune = Boolean(document.getElementById("tunePanel")?.classList.contains("open"));
+  const hasOverlay = Boolean(document.getElementById("raceLoadingOverlay") && !document.getElementById("raceLoadingOverlay").classList.contains("hidden"));
+  isModalOpen = hasModal || hasTune || hasOverlay;
   return isModalOpen;
 }
 
@@ -632,9 +644,12 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   // 换视角：对战/观战/在线都支持（在线换走会自动开自动驾驶，见 switchFocusCar）
+  // 数字键只覆盖 1-9（再多由 Tab / 点击计时塔切换），这里必须按数值比较，
+  // 字符串比较在 cars.length >= 10 时会漏掉 5-9（"9" <= "12" 为 false）。
   if (mode === "vs" || mode === "spectate" || mode === "onlinerace") {
-    if (e.key >= "1" && e.key <= String(cars.length)) {
-      switchFocusCar(Number(e.key) - 1);
+    const numKey = Number(e.key);
+    if (Number.isInteger(numKey) && numKey >= 1 && numKey <= 9 && numKey <= cars.length) {
+      switchFocusCar(numKey - 1);
     } else if (e.key === "Tab") {
       e.preventDefault();
       switchFocusCar((focusIndex + 1) % cars.length);
@@ -695,7 +710,10 @@ function updateStartLights() {
 }
 
 function update(dt, finalStep = true, simNowMs = 0) {
-  if (!started) return;
+  if (!started) {
+    audio.updateAudio(null, null, dt, false);
+    return;
+  }
   // 在线退出确认期间比赛照常推进，避免自己的车停在赛道上被撞/被超
   if (isModalOpen && !onlineQuitConfirmOpen) return;
 
@@ -1210,7 +1228,7 @@ function updateHelpText() {
   } else if (mode === "spectate") {
     help.innerHTML = "AI 锦标赛 · 点击顶部或按 T 选赛道 · 1-7 换视角 · V 切换镜头 · + / - 倍速快进 · R 重开 · Esc 菜单";
   } else if (mode === "vs") {
-    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-7 换视角 · V 切换镜头 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
+    help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · 1-9 / Tab 换视角 · V 切换镜头 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
   } else {
     help.innerHTML = "J 油门　K 轻刹　L 重刹/倒车 · ← → / A D 转向 · V 切换镜头 · B 自动驾驶 · T 选赛道 · R 重开 · Esc 退出到赛道设置" + auto;
   }
@@ -1594,6 +1612,9 @@ function showResults() {
     const c = item.car;
     const isPlayer = !!c.isPlayer;
     const code = driverCode(c) || carNumberLabel(c);
+    // 一号车 / 二号车标（vs 模式同队双车才有 seat，观战 / 在线为 0）
+    const seatTag = c.seat === 1 ? '<i class="rr-seat">1号</i>'
+      : c.seat === 2 ? '<i class="rr-seat second">2号</i>' : "";
     const totalText = c.retired
       ? `<span class="rr-out">退赛</span>`
       : c.finished ? fmt(c.total) : `<span class="rr-out">未完赛</span>`;
@@ -1606,7 +1627,7 @@ function showResults() {
       <div class="result-row p${rank + 1} ${isPlayer ? "player" : ""}">
         <span class="rr-rank">${rank + 1}</span>
         <span class="rr-color" style="background:${c.color || "#ff4a5e"}"></span>
-        <span class="rr-name">${escapeHtml(driverLabel(c))}${code ? `<small class="rr-code">${escapeHtml(code)}</small>` : ""}${isPlayer ? '<i class="rr-you">YOU</i>' : ""}${c.isAI ? '<span class="rr-ai">AI</span>' : ""}</span>
+        <span class="rr-name">${escapeHtml(driverLabel(c))}${seatTag}${code ? `<small class="rr-code">${escapeHtml(code)}</small>` : ""}${isPlayer ? '<i class="rr-you">YOU</i>' : ""}${c.isAI ? '<span class="rr-ai">AI</span>' : ""}</span>
         <span class="rr-car">${escapeHtml(carModelLabel(c))}</span>
         <span class="rr-total">${totalText}</span>
         <span class="rr-best ${c.best === overallBest ? "purple" : ""}">${fmt(c.best)}</span>
@@ -1981,7 +2002,10 @@ function frame(ts) {
     }
   }
 
-  if (!started) return;   // 开局选择阶段（模式 / 赛车弹窗）不渲染比赛
+  if (!started) {
+    audio.silenceAudio();
+    return;   // 开局选择阶段（模式 / 赛车弹窗）不渲染比赛且保持绝对静音
+  }
 
   // 倍速快进：本地模式的比赛时间 ×N，切成固定物理子步推进
   // （在线对战是服务器实时权威模拟，倍速只作用于本地单机类模式）
@@ -2031,7 +2055,8 @@ function frame(ts) {
   fx.updateEffects(visualDt);
   // 弹窗（赛道选择 / 开局重选 / 结算大屏）打开时引擎声回落怠速；
   // 在线退出确认是例外：自动驾驶仍在跑，引擎声继续
-  const raceAudible = race.state === "racing" && !resultsShown && (!isModalOpen || onlineQuitConfirmOpen);
+  const anyModalOpen = syncModalOpen();
+  const raceAudible = started && race.state === "racing" && !resultsShown && (!anyModalOpen || onlineQuitConfirmOpen);
   audio.updateAudio(activeCar, activeCtrl, dt, raceAudible);
   tickMsg(performance.now());
   draw();
@@ -2056,6 +2081,9 @@ applyQuality3D(getQualityMode());
 resize();
 initInput(reset);
 audio.setupAudio();
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) audio.silenceAudio();
+});
 initTrackSelector();
 initStartFlow();
 initViewTools();

@@ -15,72 +15,43 @@ import {
 import {
   prepareGroundSampler, buildGround, buildAsphalt, buildEdgeLines, buildKerbs,
   buildStartLine, buildTrees, buildGrandstands, buildGantry, buildPit,
-  buildBoards, buildBridgePiers, buildClouds,
+  buildBoards, buildBridgePiers, buildClouds, buildGuardrails,
 } from "./track/props.js";
+import { ProceduralSkySystem } from "./sky.js";
 
 export { setGantryLights } from "./track/props.js";
 import TRACK_SCENE_MODULES from "./track/tracks/index.js";
 
-export const SKY_HORIZON = 0xbcd9ea;
+export const SKY_HORIZON = 0xbcdcee;
 
 export function setMaxAnisotropy(v) {
   _setMaxAnisotropy(v);
 }
 
-/* ================= 天空穹顶 + 灯光 + 雾 =================
-   天穹跟随相机 XZ（updateSkyDome）：穹壁视距恒定 2400m，永不被相机远平面
-   （3200）裁剪 —— 否则会露出黑色清屏色，即偶发的"多边形黑球"。 */
-let skyDome = null;
-export function updateSkyDome(x, z) {
-  if (skyDome) skyDome.position.set(x, 0, z);
+/* ================= 程序化物理天空穹顶 + 动态太阳 + 场景光照与雾气系统 =================
+   使用 Rayleigh 大气散射、Mie 漫散射晕圈、HDR 太阳圆盘、FBM 动态高空流云。
+   天穹跟随相机 XZ：保证穹壁视距恒定 2600m，永不被相机远平面（3200）裁剪。 */
+export let skySystem = null;
+
+export function updateSkyDome(x, z, dt = 0.016) {
+  if (skySystem) skySystem.update(dt, { x, z });
 }
 
-export function createSky(scene) {
-  const geo = new THREE.SphereGeometry(2400, 24, 12);
-  const mat = new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    depthWrite: false,
-    uniforms: {
-      top: { value: new THREE.Color(0x3273b8) },
-      bottom: { value: new THREE.Color(SKY_HORIZON) },
-    },
-    vertexShader: `
-      varying vec3 vPos;
-      void main() {
-        vPos = position;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }`,
-    fragmentShader: `
-      uniform vec3 top; uniform vec3 bottom; varying vec3 vPos;
-      void main() {
-        float h = clamp(vPos.y / 900.0, 0.0, 1.0);
-        gl_FragColor = vec4(mix(bottom, top, pow(h, 0.75)), 1.0);
-      }`,
+export function createSky(scene, renderer = null) {
+  if (skySystem) {
+    skySystem.dispose();
+    skySystem = null;
+  }
+  // 建立全新零资源物理程序化天空与太阳系统
+  skySystem = new ProceduralSkySystem(scene, {
+    elevationDeg: 34,    // 真实通透的下午黄金阳光角度
+    azimuthDeg: 46,      // 最佳侧逆光赛道立体入射角
+    hazeStrength: 0.45,  // 清新大奖赛空气质感
+    cloudCover: 0.40,    // 高空柔和卷云
+    renderer,
   });
-  skyDome = new THREE.Mesh(geo, mat);
-  scene.add(skyDome);
 
-  scene.add(new THREE.HemisphereLight(0xcfe4f5, 0x2e4d2b, 1.1));
-
-  const sun = new THREE.DirectionalLight(0xfff2dc, 3.0);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -95;
-  sun.shadow.camera.right = 95;
-  sun.shadow.camera.top = 95;
-  sun.shadow.camera.bottom = -95;
-  sun.shadow.camera.near = 20;
-  sun.shadow.camera.far = 700;
-  sun.shadow.bias = -0.0004;
-  sun.shadow.normalBias = 0.02;
-  // 树影/看台影落在路面上时不要是硬邦邦的黑块：
-  // radius 让 PCF 采样范围变宽（边缘柔和），intensity 抬一点（保留天光与地面反弹）
-  sun.shadow.radius = 2.5;
-  sun.shadow.intensity = 0.8;
-  scene.add(sun);
-  scene.add(sun.target);
-  scene.fog = new THREE.Fog(SKY_HORIZON, 550, 1700);
-  return sun;
+  return skySystem.sunLight;
 }
 
 /* ================= 赛道场景组装（换赛道时调用） ================= */
@@ -105,7 +76,7 @@ export function buildTrackScene(scene) {
   const sampler = prepareGroundSampler();
   // 每赛道渲染 options：track/tracks/<id>.js 的 options 覆盖默认值
   const mod = TRACK_SCENE_MODULES[currentTrackId];
-  const opts = { treeDensity: 1, cloudCount: 9, ...(mod && mod.options) };
+  const opts = { treeDensity: 1, cloudCount: 0, ...(mod && mod.options) };
 
   trackGroup = new THREE.Group();
   trackGroup.add(buildGround());
@@ -119,7 +90,12 @@ export function buildTrackScene(scene) {
   trackGroup.add(buildPit());
   trackGroup.add(buildTrees(opts));
   trackGroup.add(buildBoards(opts));
-  trackGroup.add(buildClouds(opts));
+  trackGroup.add(buildGuardrails());
+  // 旧版假白云球体已移除，真实高空云层由 skySystem 程序化天穹实时驱动渲染
+  if (skySystem) {
+    const cover = opts.cloudCover ?? (opts.cloudCount ? Math.min(0.55, 0.22 + opts.cloudCount * 0.022) : 0.40);
+    skySystem.setCloudCover(cover);
+  }
   scene.add(trackGroup);
 
   // 每赛道个性化装饰钩子：模块缺失时静默跳过（新赛道可只加数据不加文件）

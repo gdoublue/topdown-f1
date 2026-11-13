@@ -1,10 +1,9 @@
 // 3D 渲染总入口：接管 #cv 画布（WebGL），物理/AI/HUD/联网零改动
 // 车辆视觉体按 car 对象实例缓存，比赛重开/换车自动清理
 import * as THREE from "three";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { onTrackChange } from "../track/geometry.js";
 import { race } from "../game/race.js";
-import { buildTrackScene, createSky, setGantryLights, setMaxAnisotropy, updateSkyDome, SKY_HORIZON } from "./track3d.js";
+import { buildTrackScene, createSky, setGantryLights, setMaxAnisotropy, updateSkyDome, SKY_HORIZON, skySystem } from "./track3d.js";
 import { createCarMesh, syncCarMesh, disposeCarMesh } from "./car/index.js";
 import { initEffects3D, updateEffects3D } from "./effects3d.js";
 import { init3DCamera, update3DCamera, cycleCameraMode, getCamera3DLabel, CAMERA_MODES, setTopPitchDeg, setTopYawDeg, useTopCameraMode } from "./camera3d.js";
@@ -37,15 +36,11 @@ export function init3D(canvas) {
   renderer.toneMappingExposure = 1.15;
 
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(60, 1, 0.3, 3200);
+  camera = new THREE.PerspectiveCamera(60, 1, 0.3, 8000);
   init3DCamera(camera);
 
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environmentIntensity = 0.55;
-
   setMaxAnisotropy(renderer.capabilities.getMaxAnisotropy());
-  sun = createSky(scene);
+  sun = createSky(scene, renderer);
   buildTrackScene(scene);
   initEffects3D(scene);
 
@@ -162,12 +157,16 @@ export function render3D(cars, focusIndex, dt, opts = {}) {
   if (focusCar) {
     update3DCamera(focusCar, dt);
     const ry = focusCar.roadY || 0;
-    // 阴影光源跟随焦点车（含真实赛道高程，正交阴影盒 ±95m）
-    sun.position.set(focusCar.x + 130, ry + 210, focusCar.y + 75);
+    // 阴影光源严格沿太阳真实矢量方向入射，与天空中物理太阳圆盘位置 100% 同步
+    const sDir = skySystem ? skySystem.getSunDirection() : null;
+    const sx = sDir ? sDir.x * 240 : 130;
+    const sy = sDir ? sDir.y * 240 : 210;
+    const sz = sDir ? sDir.z * 240 : 75;
+    sun.position.set(focusCar.x + sx, ry + sy, focusCar.y + sz);
     sun.target.position.set(focusCar.x, ry, focusCar.y);
     sun.target.updateMatrixWorld();
-    // 天穹跟随相机 XZ：保证穹壁视距恒定 2400m，永不被远平面裁剪（黑球根治）
-    updateSkyDome(focusCar.x, focusCar.y);
+    // 天穹跟随相机 XZ，并传入 dt 驱动程序化高空卷云微风漂移
+    updateSkyDome(focusCar.x, focusCar.y, dt);
   }
 
   // 发车龙门架灯组与 race.lights 联动（倒计时逐组点亮，灯灭发车）
